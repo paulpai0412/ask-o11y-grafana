@@ -21,7 +21,7 @@ def test_database_config_builds_mssql_string_for_sql_auth():
         port=1433,
         database="wferp_test",
         username="sa",
-        password="Passw0rd!",
+        password="UnitTest!",
         domain="",
         odbc_driver="ODBC Driver 18 for SQL Server",
     )
@@ -76,14 +76,14 @@ def test_database_client_execute_readonly_normalizes_driver_errors():
 
     cfg = DatabaseConfig(
         driver="mssql",
-        connection_string="server=127.0.0.1:1433;user=sa;password=Passw0rd!;database=wferp_test",
+        connection_string="server=127.0.0.1:1433;user=sa;password=UnitTest!;database=wferp_test",
         auth_mode="sql_auth",
         env="test",
         host="127.0.0.1",
         port=1433,
         database="wferp_test",
         username="sa",
-        password="Passw0rd!",
+        password="UnitTest!",
         domain="",
         odbc_driver="ODBC Driver 18 for SQL Server",
     )
@@ -129,7 +129,7 @@ def test_database_client_mssql_connect_uses_parsed_connection_fields(monkeypatch
 
     cfg = DatabaseConfig(
         driver="mssql",
-        connection_string="server=127.0.0.1:1433;user=sa;password=Passw0rd!234;database=wferp_test",
+        connection_string="server=127.0.0.1:1433;user=sa;password=UnitTest!234;database=wferp_test",
         auth_mode="sql_auth",
         env="test",
         host="irrelevant-host",
@@ -147,6 +147,6 @@ def test_database_client_mssql_connect_uses_parsed_connection_fields(monkeypatch
     assert captured["server"] == "127.0.0.1"
     assert captured["port"] == 1433
     assert captured["user"] == "sa"
-    assert captured["password"] == "Passw0rd!234"
+    assert captured["password"] == "UnitTest!234"
     assert captured["database"] == "wferp_test"
     assert rows == [{"MK002": "2026", "MK006": 100000.0}]

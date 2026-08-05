@@ -57,14 +57,14 @@ pytest tests/skill_scripts/test_schema_loader.py -v
 
 ## SQL Execution Validation
 - Any task that generates SQL is incomplete until the SQL executes and returned rows/columns/aggregates match the prompt intent.
-- Use the containerized test DB by default; it runs SQL Server 2019 at compatibility level 80 for SQL Server 2000 syntax targeting.
+- Use the containerized test DB by default; it runs SQL Server 2019 at compatibility level 100 (lowest available on 2019) for SQL Server 2000-style syntax targeting.
 
 ```bash
 docker compose -f test_db/docker-compose.testdb.yml up -d
-docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Passw0rd\!234 -i /init/01_create_wferp_test.sql
+docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -i /init/01_create_wferp_test.sql
 export DB_DRIVER=mssql
 export DB_AUTH_MODE=sql_auth
-export DB_CONNECTION_STRING="server=127.0.0.1:1433;user=sa;password=Passw0rd!234;database=wferp_test"
+export DB_CONNECTION_STRING="server=127.0.0.1:1433;user=sa;password=$MSSQL_SA_PASSWORD;database=wferp_test"
 export DB_ENV=test
 python3 -m skill_scripts.cli_generate_select --prompt "查詢2026年的工程預算明細" --validate-execution --required-columns MK002,MK006 --min-rows 1
 ```

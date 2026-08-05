@@ -52,7 +52,7 @@ docker compose -f test_db/docker-compose.testdb.yml up -d
 Initialize schema and seed data after the container becomes healthy:
 
 ```bash
-docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Passw0rd\!234 -i /init/01_create_wferp_test.sql
+docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -i /init/01_create_wferp_test.sql
 ```
 
 Export the default test environment variables:
@@ -60,7 +60,7 @@ Export the default test environment variables:
 ```bash
 export DB_DRIVER=mssql
 export DB_AUTH_MODE=sql_auth
-export DB_CONNECTION_STRING="server=127.0.0.1:1433;user=sa;password=Passw0rd!234;database=wferp_test"
+export DB_CONNECTION_STRING="server=127.0.0.1:1433;user=sa;password=$MSSQL_SA_PASSWORD;database=wferp_test"
 export DB_ENV=test
 ```
 

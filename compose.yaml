@@ -1,7 +1,11 @@
 services:
   grafana:
-    image: grafana/grafana
+    image: grafana/grafana:13.1.2
     network_mode: host
+    environment:
+      - GF_PLUGIN_APP_CLIENT_SECRET=${ASK_O11Y_SA_TOKEN}
+      - GF_FEATURE_TOGGLES_ENABLE=externalServiceAccounts
+      - GF_AUTH_MANAGED_SERVICE_ACCOUNTS_ENABLED=true
     volumes:
       - grafana-data:/var/lib/grafana
     restart: unless-stopped

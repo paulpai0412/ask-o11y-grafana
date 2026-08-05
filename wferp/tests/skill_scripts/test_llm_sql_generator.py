@@ -72,3 +72,15 @@ def test_call_llm_sdk_providers_use_node_bridge(monkeypatch, provider):
     raw = call_llm(provider=provider, model="none", prompt_text="anything", timeout_sec=1.0)
     parsed = parse_llm_response(raw)
     assert parsed["sql"].startswith("SELECT TOP 3")
+
+
+def test_parse_llm_response_categorical_confidence():
+    payload = '{"sql":"SELECT 1","used_tables":[],"assumptions":[],"confidence":"high"}'
+    assert parse_llm_response(payload)["confidence"] == 0.9
+    payload = '{"sql":"SELECT 1","used_tables":[],"assumptions":[],"confidence":"low"}'
+    assert parse_llm_response(payload)["confidence"] == 0.3
+
+
+def test_parse_llm_response_missing_confidence_is_none():
+    payload = '{"sql":"SELECT 1","used_tables":[],"assumptions":[]}'
+    assert parse_llm_response(payload)["confidence"] is None

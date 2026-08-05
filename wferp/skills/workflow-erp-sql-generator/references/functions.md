@@ -124,7 +124,7 @@ This document lists the main functions, entrypoints, and operator-facing command
 
 ### Seed the test database
 
-- **Command:** `docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Passw0rd\!234 -i /init/01_create_wferp_test.sql`
+- **Command:** `docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -i /init/01_create_wferp_test.sql`
 - **Purpose:** initialize schema and seed data for SQL validation.
 - **Verification:** run a known good query or a prompt with `--validate-execution`.
 

@@ -69,14 +69,29 @@ def _validate_llm_candidate(
     return True, "OK"
 
 
+_REPAIR_HINTS = {
+    "TABLE_REFERENCE_FORMAT_INVALID": "Every table reference must be bracketed, e.g. FROM [VPIC1].[dbo].[ACTMJ] MJ; unbracketed names are rejected.",
+    "NO_TABLE_REFERENCE": "No FROM/JOIN table reference found.",
+    "UNKNOWN_TABLE": "Table id not in metadata; choose from the context tables.",
+    "UNKNOWN_TABLE_ALIAS": "Alias not declared in FROM/JOIN.",
+    "UNKNOWN_COLUMN": "Column id not in metadata; choose from the context columns.",
+    "UNKNOWN_COLUMN_FOR_TABLE": "Column does not belong to that table; check the context columns per table.",
+    "NON_SELECT_INTENT": "Only SELECT is allowed.",
+    "UNSUPPORTED_SQL2000_FEATURE": "No CTE/window/OFFSET/FETCH/EXCEPT/INTERSECT; use TOP N.",
+    "MULTI_STATEMENT_NOT_ALLOWED": "Return exactly one SELECT statement.",
+}
+
+
 def _build_repair_prompt(user_prompt: str, context: JsonDict, failed_sql: str, failed_reason: str) -> str:
     base = build_llm_prompt(user_prompt, context)
     if not failed_sql:
         return base
+    hint = _REPAIR_HINTS.get(failed_reason, "")
+    hint_line = f" Hint: {hint}\n" if hint else "\n"
     return (
         f"{base}\n"
         "Previous SQL candidate failed validation/execution. "
-        f"Failure code: {failed_reason}.\n"
+        f"Failure code: {failed_reason}.{hint_line}"
         f"Previous SQL: {failed_sql}\n"
         "Rewrite SQL to fix the failure and return JSON only with keys: sql, used_tables, assumptions, confidence."
     )
@@ -114,7 +129,10 @@ def route_generate_sql(
     context = build_context_slice(prompt, bundle)
     failed_reason = ""
     failed_sql = ""
-    attempts = max(1, int(options.llm_repair_attempts) + 1)
+    try:
+        attempts = max(1, int(options.llm_repair_attempts) + 1)
+    except (TypeError, ValueError):
+        attempts = 2
 
     for attempt in range(attempts):
         llm_prompt = _build_repair_prompt(prompt, context, failed_sql=failed_sql, failed_reason=failed_reason)
@@ -138,11 +156,11 @@ def route_generate_sql(
             continue
 
         candidate_sql = str(llm_out.get("sql", "")).strip()
-        confidence = float(llm_out.get("confidence", 0.0))
+        confidence = llm_out.get("confidence")  # float, or None when the model omitted it
 
         ok = False
         reason = "LOW_CONFIDENCE"
-        if confidence >= options.min_confidence:
+        if confidence is None or confidence >= options.min_confidence:
             ok, reason = _validate_llm_candidate(
                 prompt=prompt,
                 sql=candidate_sql,

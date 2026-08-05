@@ -1,6 +1,6 @@
 # Test Database (Container)
 
-This folder provides a SQL Server 2019 test database container configured to run with compatibility level 80 (SQL Server 2000 syntax target).
+This folder provides a SQL Server 2019 test database container configured to run with compatibility level 100 (the lowest SQL Server 2019 supports; SQL Server 2000-style syntax target — level 80 is unavailable on 2019, see init script comment).
 
 ## Start container
 
@@ -13,7 +13,7 @@ docker compose -f test_db/docker-compose.testdb.yml up -d
 After container is healthy, run:
 
 ```bash
-docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Passw0rd!234 -i /init/01_create_wferp_test.sql
+docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -i /init/01_create_wferp_test.sql
 ```
 
 ## Connection environment variables
@@ -23,7 +23,7 @@ SQL auth example:
 ```bash
 export DB_DRIVER=mssql
 export DB_AUTH_MODE=sql_auth
-export DB_CONNECTION_STRING="server=127.0.0.1:1433;user=sa;password=Passw0rd!234;database=wferp_test"
+export DB_CONNECTION_STRING="server=127.0.0.1:1433;user=sa;password=$MSSQL_SA_PASSWORD;database=wferp_test"
 export DB_ENV=test
 ```
 

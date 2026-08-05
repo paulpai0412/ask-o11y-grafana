@@ -49,8 +49,12 @@ def _parse_aggregate_expectations(raw: str) -> list[AggregateExpectation]:
         parts = [p.strip() for p in chunk.split(":")]
         if len(parts) < 3:
             continue
-        operation, column, expected = parts[0], parts[1], float(parts[2])
-        tolerance = float(parts[3]) if len(parts) >= 4 else 0.0
+        operation, column = parts[0], parts[1]
+        try:
+            expected = float(parts[2])
+            tolerance = float(parts[3]) if len(parts) >= 4 else 0.0
+        except ValueError:
+            continue
         expectations.append(
             AggregateExpectation(
                 operation=operation,

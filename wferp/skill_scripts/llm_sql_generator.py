@@ -27,26 +27,41 @@ def build_llm_prompt(user_prompt: str, context_slice: JsonDict) -> str:
         "You are a SQL generation engine for Workflow ERP. "
         "Output JSON only with keys: sql, used_tables, assumptions, confidence. "
         "Rules: SQL Server 2000 compatible, single statement, SELECT only, no CTE/window/offset/fetch/except/intersect. "
+        "Every table and column identifier MUST be bracketed ([ACTMJ], [MJ001]); "
+        "qualify tables as [VPIC1].[dbo].[TABLE]; aliases are unbracketed (FROM [VPIC1].[dbo].[ACTMJ] MJ) "
+        "with qualified columns like MJ.[MJ001]; use TOP N for row limits; "
+        "give selected columns recognizable aliases AS [可識別欄位名]. "
         f"User prompt: {user_prompt}\n"
         f"Context: {json.dumps(context_slice, ensure_ascii=False)}"
     )
 
 
+_CONFIDENCE_LEVELS = {"high": 0.9, "medium": 0.6, "moderate": 0.6, "low": 0.3}
+
+
+def _parse_confidence(raw: Any) -> float | None:
+    if raw is None:
+        return None  # model omitted self-assessment — let validation gates decide
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in _CONFIDENCE_LEVELS:
+            return _CONFIDENCE_LEVELS[text]
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(1.0, max(0.0, value))
+
+
 def parse_llm_response(raw_text: str) -> JsonDict:
-    payload = json.loads(_strip_markdown_fence(raw_text))
+    try:
+        payload = json.loads(_strip_markdown_fence(raw_text))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("LLM_BAD_RESPONSE") from exc
     sql = str(payload.get("sql", "")).strip()
     used_tables = [str(x).strip() for x in payload.get("used_tables", []) if str(x).strip()]
     assumptions = [str(x).strip() for x in payload.get("assumptions", []) if str(x).strip()]
-
-    try:
-        confidence = float(payload.get("confidence", 0.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-
-    if confidence < 0.0:
-        confidence = 0.0
-    if confidence > 1.0:
-        confidence = 1.0
+    confidence = _parse_confidence(payload.get("confidence"))
 
     return {
         "sql": sql,
@@ -100,7 +115,9 @@ def _sdk_error(stderr: str) -> str:
     for line in reversed(str(stderr or "").splitlines()):
         try:
             payload = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError,):
+            payload = None  # not a JSON line — keep scanning
+        if payload is None:
             continue
         code = str(payload.get("code", "")).strip()
         if code:
@@ -117,11 +134,15 @@ def _call_sdk(provider: str, model: str, prompt_text: str, timeout_sec: float) -
     if not bridge.exists():
         raise RuntimeError("LLM_SDK_NOT_INSTALLED")
 
+    try:
+        timeout = float(timeout_sec)
+    except (TypeError, ValueError):
+        timeout = 30.0
     payload = {
         "provider": provider,
         "model": str(model or ""),
         "prompt": prompt_text,
-        "timeoutSec": float(timeout_sec),
+        "timeoutSec": timeout,
         "cwd": str(Path.cwd()),
     }
     env = os.environ.copy()
