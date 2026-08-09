@@ -3,11 +3,21 @@ services:
     image: grafana/grafana:13.1.2
     network_mode: host
     environment:
+      - GF_INSTALL_PLUGINS=yesoreyeram-infinity-datasource 3.11.2,esnet-matrix-panel 2.0.1
       - GF_PLUGIN_APP_CLIENT_SECRET=${ASK_O11Y_SA_TOKEN}
       - GF_FEATURE_TOGGLES_ENABLE=externalServiceAccounts
       - GF_AUTH_MANAGED_SERVICE_ACCOUNTS_ENABLED=true
+      - GF_SECURITY_ALLOW_EMBEDDING=true
     volumes:
       - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
+  csv-server:
+    image: nginx:alpine
+    ports:
+      - "8767:80"
+    volumes:
+      - ./data/poc:/usr/share/nginx/html:ro
     restart: unless-stopped
 
 volumes:

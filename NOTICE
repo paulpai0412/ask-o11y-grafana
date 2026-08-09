@@ -1,0 +1,33 @@
+Adaptive Ask O11y ML Platform — Third-Party Notices
+
+This distribution includes or runs with the following third-party components.
+Complete version, source, commit, license, patch, and lock details are recorded in
+`docs/third-party-reuse-manifest.json` and `docs/sbom.json`.
+
+## pandas
+Copyright (c) 2008-2011 AQR Capital Management, LLC, Lambda Foundry, Inc. and PyData Development Team.
+Copyright (c) 2011-2026 Open source contributors.
+Licensed under the BSD 3-Clause License.
+Source: https://github.com/pandas-dev/pandas (v3.0.5)
+
+## scikit-learn
+Copyright (c) 2007-2026 The scikit-learn developers.
+Licensed under the BSD 3-Clause License.
+Source: https://github.com/scikit-learn/scikit-learn (1.9.0)
+
+## statsmodels
+Copyright (C) 2006 Jonathan E. Taylor.
+Copyright (c) 2006-2008 Scipy Developers.
+Copyright (c) 2009-2018 statsmodels Developers.
+Licensed under the BSD 3-Clause License.
+Source: https://github.com/statsmodels/statsmodels (v0.14.6)
+
+## Grafana Infinity Datasource
+Copyright 2023 Grafana Labs.
+Licensed under the Apache License 2.0.
+Source: https://github.com/grafana/grafana-infinity-datasource (v3.11.2)
+
+## ESnet Matrix Panel
+Copyright (c) 2022 The Regents of the University of California, through Lawrence Berkeley National Laboratory.
+Licensed under the LBNL BSD-style license distributed with the plugin.
+Source: https://github.com/esnet/esnet-matrix-panel (v2.0.1)

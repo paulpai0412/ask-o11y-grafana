@@ -1,0 +1,58 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:7d99a6c4-57ac-4d75-9b94-4fd7779acae8",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "name": "adaptive-ask-o11y-ml-platform",
+      "version": "poc-v1"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "pandas",
+      "version": "3.0.5",
+      "purl": "pkg:pypi/pandas@3.0.5",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "externalReferences": [{"type": "vcs", "url": "https://github.com/pandas-dev/pandas/tree/e68db09ecf6427d1b62e565bacf17f2e525a3032"}],
+      "properties": [{"name": "notice", "value": "NOTICE#pandas"}, {"name": "lockfile", "value": "uv.lock"}]
+    },
+    {
+      "type": "library",
+      "name": "scikit-learn",
+      "version": "1.9.0",
+      "purl": "pkg:pypi/scikit-learn@1.9.0",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "externalReferences": [{"type": "vcs", "url": "https://github.com/scikit-learn/scikit-learn/tree/77def0ed6e3beab57244885d2a584470e96c103d"}],
+      "properties": [{"name": "notice", "value": "NOTICE#scikit-learn"}, {"name": "lockfile", "value": "uv.lock"}]
+    },
+    {
+      "type": "library",
+      "name": "statsmodels",
+      "version": "0.14.6",
+      "purl": "pkg:pypi/statsmodels@0.14.6",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "externalReferences": [{"type": "vcs", "url": "https://github.com/statsmodels/statsmodels/tree/40e6a84d26ac74623c6b94b718f0987ef0351c53"}],
+      "properties": [{"name": "notice", "value": "NOTICE#statsmodels"}, {"name": "lockfile", "value": "uv.lock"}]
+    },
+    {
+      "type": "application",
+      "name": "yesoreyeram-infinity-datasource",
+      "version": "3.11.2",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "externalReferences": [{"type": "vcs", "url": "https://github.com/grafana/grafana-infinity-datasource/tree/6d00d4d7fafc0c9371f71a60bb90842477186836"}],
+      "properties": [{"name": "notice", "value": "NOTICE#grafana-infinity-datasource"}, {"name": "runtime", "value": "Grafana datasource plugin"}, {"name": "compose.pin", "value": "yesoreyeram-infinity-datasource 3.11.2"}]
+    },
+    {
+      "type": "application",
+      "name": "esnet-matrix-panel",
+      "version": "2.0.1",
+      "licenses": [{"license": {"name": "LBNL BSD-style license"}}],
+      "externalReferences": [{"type": "vcs", "url": "https://github.com/esnet/esnet-matrix-panel/tree/878ec5a5fae2e3c23d2e3879283c43fbe89e65d5"}],
+      "properties": [{"name": "notice", "value": "NOTICE#esnet-matrix-panel"}, {"name": "runtime", "value": "Grafana plugin"}]
+    }
+  ]
+}

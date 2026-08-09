@@ -1,0 +1,17 @@
+feature,importance
+raw_coal_consumption_g,496.1382197952608
+main_steam_temp_c,173.49734746072798
+coal_avg_heat_value_kcal_kg,167.56731364152023
+reheat_steam_temp_c,158.23785893500798
+overfire_air_fcs,10.558213411175188
+overfire_air_fcf,10.558213411173638
+overfire_air_fct,10.110743266049557
+overfire_air_fcp,10.110743266048715
+scr_temp_c,8.081919716636186
+burner_angle,3.658464118102655
+condenser_outlet_water_temp,3.2045386048267046
+scr_inlet_co,2.1449473480604446
+scr_inlet_nox,2.0116958425921396
+unburned_carbon_pct,1.8748588350384563
+condenser_vacuum,1.1768435636270915
+avg_generation_mw,0.6352146138592829

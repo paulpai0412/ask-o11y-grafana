@@ -1,0 +1,44 @@
+{
+  "servers": [
+    {
+      "id": "data-query-planner",
+      "name": "Data Query Planner Workflow Node",
+      "url_env": "DATA_QUERY_PLANNER_MCP_URL",
+      "local_url": "http://127.0.0.1:8768/mcp",
+      "enabled_tools": ["plan_query"],
+      "disabled_tools": ["validate_query"]
+    },
+    {
+      "id": "grafana-query",
+      "name": "Grafana Metadata and Query Read Boundary",
+      "url_env": "GRAFANA_QUERY_MCP_URL",
+      "local_url": "http://127.0.0.1:8772/mcp",
+      "enabled_tools": ["discover_datasets", "inspect_dataset", "execute_planned_query"],
+      "disabled_tools": []
+    },
+    {
+      "id": "engineering-analysis",
+      "name": "Deterministic Engineering Analysis",
+      "url_env": "ENGINEERING_ANALYSIS_MCP_URL",
+      "local_url": "http://127.0.0.1:8775/mcp",
+      "enabled_tools": ["analyze_profile", "analyze_correlation", "analyze_predictive", "analyze_patterns", "analyze_timeseries"],
+      "disabled_tools": []
+    },
+    {
+      "id": "finance-analysis",
+      "name": "Deterministic Finance Analysis",
+      "url_env": "FINANCE_ANALYSIS_MCP_URL",
+      "local_url": "http://127.0.0.1:8776/mcp",
+      "enabled_tools": ["analyze_cost_drivers", "analyze_variance"],
+      "disabled_tools": []
+    },
+    {
+      "id": "grafana-renderer",
+      "name": "Grafana Renderer Workflow Node",
+      "url_env": "GRAFANA_RENDERER_MCP_URL",
+      "local_url": "http://127.0.0.1:8773/mcp",
+      "enabled_tools": ["prepare_dashboard_write", "create_dashboard_from_analysis"],
+      "disabled_tools": []
+    }
+  ]
+}

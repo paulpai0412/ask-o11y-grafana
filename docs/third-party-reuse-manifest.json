@@ -1,0 +1,105 @@
+{
+  "version": 2,
+  "notice": "NOTICE",
+  "sbom": "docs/sbom.json",
+  "sources": [
+    {
+      "name": "grafana/mcp-grafana",
+      "url": "https://github.com/grafana/mcp-grafana",
+      "tag": "v1.0.0",
+      "commit": "130384b1be0ce618e35e0b9c8f38c4ec17bf9367",
+      "license": "Apache-2.0",
+      "artifact": "grafana/mcp-grafana@sha256:5efeafd01cd7e1aea9c4b0f03305951f2944db8f43e5ae290cce9578c977f241",
+      "status": "evaluated-not-adopted-runtime",
+      "local_patches": [],
+      "reason": "Infinity execution and opaque artifact contracts are incompatible; metadata/RBAC/tool-allowlist patterns remain reference material."
+    },
+    {
+      "name": "modelcontextprotocol/python-sdk",
+      "url": "https://github.com/modelcontextprotocol/python-sdk",
+      "tag": "v2.0.0",
+      "commit": "6f69a3758ebf2ee55ce050f58b470ce11af71133",
+      "license": "MIT",
+      "status": "evaluated-not-adopted-runtime",
+      "local_patches": [],
+      "reason": "Real v2.0.0 spike confirmed Streamable HTTP compatibility but required an ASGI/custom identity middleware adapter to preserve bearer-bound org/user authorization and added 28 transitive packages for a PoC surface limited to initialize, tools/list, and tools/call. The existing stdlib transport remains covered by live protocol/auth/schema regressions; revisit when OAuth, SSE/resumption, or a broader MCP surface is required.",
+      "evidence": ".scratch/poc/mcp-python-sdk-compatibility-spike.json"
+    },
+    {
+      "name": "pandas-dev/pandas",
+      "url": "https://github.com/pandas-dev/pandas",
+      "tag": "v3.0.5",
+      "commit": "e68db09ecf6427d1b62e565bacf17f2e525a3032",
+      "license": "BSD-3-Clause",
+      "status": "adopted-locked-dependency",
+      "copyright": "Copyright (c) 2008-2011 AQR Capital Management, LLC, Lambda Foundry, Inc. and PyData Development Team; Copyright (c) 2011-2026 Open source contributors",
+      "notice": "NOTICE#pandas",
+      "local_patches": [],
+      "lockfile": "uv.lock",
+      "integration": "released dependency in deterministic domain analysis runtime"
+    },
+    {
+      "name": "scikit-learn/scikit-learn",
+      "url": "https://github.com/scikit-learn/scikit-learn",
+      "tag": "1.9.0",
+      "commit": "77def0ed6e3beab57244885d2a584470e96c103d",
+      "license": "BSD-3-Clause",
+      "status": "adopted-locked-dependency",
+      "copyright": "Copyright (c) 2007-2026 The scikit-learn developers",
+      "notice": "NOTICE#scikit-learn",
+      "local_patches": [],
+      "lockfile": "uv.lock",
+      "integration": "released dependency for supervised/unsupervised methods"
+    },
+    {
+      "name": "statsmodels/statsmodels",
+      "url": "https://github.com/statsmodels/statsmodels",
+      "tag": "v0.14.6",
+      "commit": "40e6a84d26ac74623c6b94b718f0987ef0351c53",
+      "license": "BSD-3-Clause",
+      "status": "adopted-locked-dependency",
+      "copyright": "Copyright (C) 2006 Jonathan E. Taylor; Copyright (c) 2006-2008 Scipy Developers; Copyright (c) 2009-2018 statsmodels Developers",
+      "notice": "NOTICE#statsmodels",
+      "local_patches": [],
+      "lockfile": "uv.lock",
+      "integration": "released dependency for statistical inference and deterministic forecasting where required"
+    },
+    {
+      "name": "grafana/grafana-infinity-datasource",
+      "url": "https://github.com/grafana/grafana-infinity-datasource",
+      "tag": "v3.11.2",
+      "commit": "6d00d4d7fafc0c9371f71a60bb90842477186836",
+      "license": "Apache-2.0",
+      "status": "approved-runtime-plugin",
+      "copyright": "Copyright 2023 Grafana Labs",
+      "notice": "NOTICE#grafana-infinity-datasource",
+      "local_patches": [],
+      "integration": "Pinned Grafana datasource plugin and sole execution boundary for the authorized CSV PoC; installed as yesoreyeram-infinity-datasource 3.11.2"
+    },
+    {
+      "name": "esnet/esnet-matrix-panel",
+      "url": "https://github.com/esnet/esnet-matrix-panel",
+      "tag": "v2.0.1",
+      "commit": "878ec5a5fae2e3c23d2e3879283c43fbe89e65d5",
+      "license": "BSD-3-Clause-like LBNL license",
+      "status": "approved-runtime-plugin",
+      "copyright": "Copyright (c) 2022 The Regents of the University of California, through Lawrence Berkeley National Laboratory",
+      "notice": "NOTICE#esnet-matrix-panel",
+      "local_patches": [],
+      "integration": "Grafana catalog panel for categorical source/target/value correlation matrices; declared Grafana >=10.4.19, used with Grafana 13.1.2"
+    },
+    {
+      "name": "OpenBB-finance/OpenBB MCP",
+      "url": "https://github.com/OpenBB-finance/OpenBB",
+      "license": "AGPL-3.0-only",
+      "status": "rejected",
+      "reason": "Direct external finance data path bypasses Grafana and licensing is outside the accepted policy."
+    },
+    {
+      "name": "K-Dense-AI/scientific-agent-skills",
+      "url": "https://github.com/K-Dense-AI/scientific-agent-skills",
+      "status": "development-reference-only",
+      "reason": "No skill runtime, scripts, shell capability, or whole-repository installation is allowed in production MCPs."
+    }
+  ]
+}

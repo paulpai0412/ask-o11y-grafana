@@ -1,0 +1,325 @@
+{
+  "profile": "u1-operating-daily",
+  "raw_file": "data/2026年機組數據-20260729.xlsx",
+  "source_sheet": "工作表-U1",
+  "csv_file": "data/poc/u1_operating_daily.csv",
+  "datasource_uid": "csv-poc",
+  "unit_id": "U1",
+  "time_field": "date",
+  "unit_field": "unit_id",
+  "required_fields": [
+    "date",
+    "unit_id",
+    "heat_rate",
+    "raw_coal_consumption_g",
+    "avg_generation_mw",
+    "main_steam_temp_c",
+    "reheat_steam_temp_c",
+    "scr_temp_c",
+    "condenser_vacuum"
+  ],
+  "optional_fields": [
+    "scr_inlet_nox",
+    "scr_inlet_co",
+    "condenser_outlet_water_temp",
+    "burner_angle",
+    "overfire_air_fcp",
+    "overfire_air_fcs",
+    "overfire_air_fct",
+    "overfire_air_fcf",
+    "coal_avg_heat_value_kcal_kg",
+    "unburned_carbon_pct"
+  ],
+  "minimum_rows": 100,
+  "units": {
+    "date": "",
+    "unit_id": "",
+    "heat_rate": "kcal/kWh",
+    "raw_coal_consumption_g": "g/kWh",
+    "avg_generation_mw": "MW",
+    "main_steam_temp_c": "℃",
+    "reheat_steam_temp_c": "℃",
+    "scr_temp_c": "℃",
+    "condenser_vacuum": "",
+    "scr_inlet_nox": "",
+    "scr_inlet_co": "",
+    "condenser_outlet_water_temp": "℃",
+    "burner_angle": "degree",
+    "overfire_air_fcp": "",
+    "overfire_air_fcs": "",
+    "overfire_air_fct": "",
+    "overfire_air_fcf": "",
+    "coal_avg_heat_value_kcal_kg": "kcal/kg",
+    "unburned_carbon_pct": "%"
+  },
+  "row_counts": {
+    "total": 365,
+    "valid_heat_rate": 172,
+    "zero_or_negative_heat_rate": 37,
+    "blank_heat_rate": 156
+  },
+  "date_range": {
+    "all_from": "2026-01-01",
+    "all_to": "2026-12-31",
+    "valid_from": "2026-01-01",
+    "valid_to": "2026-07-28"
+  },
+  "fields": [
+    {
+      "name": "date",
+      "source_column": "A",
+      "type": "date",
+      "display_name": "日期",
+      "unit": "",
+      "description": "ISO date",
+      "aliases": [
+        "日期",
+        "date"
+      ]
+    },
+    {
+      "name": "unit_id",
+      "source_column": null,
+      "type": "string",
+      "display_name": "機組",
+      "unit": "",
+      "description": "Fixed value U1",
+      "aliases": [
+        "機組",
+        "unit_id"
+      ]
+    },
+    {
+      "name": "heat_rate",
+      "source_column": "AN",
+      "type": "number",
+      "display_name": "熱耗率",
+      "unit": "kcal/kWh",
+      "description": "Target metric",
+      "aliases": [
+        "熱耗率",
+        "heat_rate"
+      ]
+    },
+    {
+      "name": "raw_coal_consumption_g",
+      "source_column": "AL",
+      "type": "number",
+      "display_name": "原煤耗",
+      "unit": "g/kWh",
+      "description": "Direct efficiency factor",
+      "aliases": [
+        "原煤耗",
+        "raw_coal_consumption_g"
+      ]
+    },
+    {
+      "name": "avg_generation_mw",
+      "source_column": "AE",
+      "type": "number",
+      "display_name": "保證時段發電量 average",
+      "unit": "MW",
+      "description": "Operating load",
+      "aliases": [
+        "保證時段發電量 average",
+        "avg_generation_mw"
+      ]
+    },
+    {
+      "name": "main_steam_temp_c",
+      "source_column": "AI",
+      "type": "number",
+      "display_name": "主蒸汽溫度",
+      "unit": "℃",
+      "description": "Process parameter",
+      "aliases": [
+        "主蒸汽溫度",
+        "main_steam_temp_c"
+      ]
+    },
+    {
+      "name": "reheat_steam_temp_c",
+      "source_column": "AJ",
+      "type": "number",
+      "display_name": "再熱蒸汽溫度",
+      "unit": "℃",
+      "description": "Process parameter",
+      "aliases": [
+        "再熱蒸汽溫度",
+        "reheat_steam_temp_c"
+      ]
+    },
+    {
+      "name": "scr_temp_c",
+      "source_column": "AK",
+      "type": "number",
+      "display_name": "09SCR-TTX-0101",
+      "unit": "℃",
+      "description": "SCR/flue-gas temperature",
+      "aliases": [
+        "09SCR-TTX-0101",
+        "scr_temp_c"
+      ]
+    },
+    {
+      "name": "condenser_vacuum",
+      "source_column": "BW",
+      "type": "number",
+      "display_name": "冷凝器真空度",
+      "unit": "",
+      "description": "Cold-end parameter",
+      "aliases": [
+        "冷凝器真空度",
+        "condenser_vacuum"
+      ]
+    },
+    {
+      "name": "scr_inlet_nox",
+      "source_column": "BU",
+      "type": "number",
+      "display_name": "SCR 入口 NOx",
+      "unit": "",
+      "description": "Emission companion parameter",
+      "aliases": [
+        "SCR 入口 NOx",
+        "scr_inlet_nox"
+      ]
+    },
+    {
+      "name": "scr_inlet_co",
+      "source_column": "BV",
+      "type": "number",
+      "display_name": "SCR 入口 CO",
+      "unit": "",
+      "description": "Combustion companion parameter",
+      "aliases": [
+        "SCR 入口 CO",
+        "scr_inlet_co"
+      ]
+    },
+    {
+      "name": "condenser_outlet_water_temp",
+      "source_column": "BX",
+      "type": "number",
+      "display_name": "冷凝器出口水溫",
+      "unit": "℃",
+      "description": "Cold-end companion parameter",
+      "aliases": [
+        "冷凝器出口水溫",
+        "condenser_outlet_water_temp"
+      ]
+    },
+    {
+      "name": "burner_angle",
+      "source_column": "AH",
+      "type": "number",
+      "display_name": "燃燒器角度",
+      "unit": "degree",
+      "description": "Combustion setting",
+      "aliases": [
+        "燃燒器角度",
+        "burner_angle"
+      ]
+    },
+    {
+      "name": "overfire_air_fcp",
+      "source_column": "CC",
+      "type": "number",
+      "display_name": "火上風門開度設定值 FCP",
+      "unit": "",
+      "description": "Combustion setting",
+      "aliases": [
+        "火上風門開度設定值 FCP",
+        "overfire_air_fcp"
+      ]
+    },
+    {
+      "name": "overfire_air_fcs",
+      "source_column": "CD",
+      "type": "number",
+      "display_name": "火上風門開度設定值 FCS",
+      "unit": "",
+      "description": "Combustion setting",
+      "aliases": [
+        "火上風門開度設定值 FCS",
+        "overfire_air_fcs"
+      ]
+    },
+    {
+      "name": "overfire_air_fct",
+      "source_column": "CE",
+      "type": "number",
+      "display_name": "火上風門開度設定值 FCT",
+      "unit": "",
+      "description": "Combustion setting",
+      "aliases": [
+        "火上風門開度設定值 FCT",
+        "overfire_air_fct"
+      ]
+    },
+    {
+      "name": "overfire_air_fcf",
+      "source_column": "CF",
+      "type": "number",
+      "display_name": "火上風門開度設定值 FCF",
+      "unit": "",
+      "description": "Combustion setting",
+      "aliases": [
+        "火上風門開度設定值 FCF",
+        "overfire_air_fcf"
+      ]
+    },
+    {
+      "name": "coal_avg_heat_value_kcal_kg",
+      "source_column": "AD",
+      "type": "number",
+      "display_name": "一號機煤炭平均熱值 全時段",
+      "unit": "kcal/kg",
+      "description": "Fuel quality",
+      "aliases": [
+        "一號機煤炭平均熱值 全時段",
+        "coal_avg_heat_value_kcal_kg"
+      ]
+    },
+    {
+      "name": "unburned_carbon_pct",
+      "source_column": "AM",
+      "type": "number",
+      "display_name": "未燃碳 飛灰(保證)",
+      "unit": "%",
+      "description": "Combustion efficiency companion",
+      "aliases": [
+        "未燃碳 飛灰(保證)",
+        "unburned_carbon_pct"
+      ]
+    },
+    {
+      "name": "heat_rate_valid",
+      "source_column": null,
+      "type": "boolean",
+      "display_name": "熱耗率有效",
+      "unit": "",
+      "description": "true when heat_rate is positive",
+      "aliases": [
+        "有效熱耗率"
+      ],
+      "validity_for": [
+        "heat_rate"
+      ],
+      "accepted_values": [
+        true
+      ]
+    },
+    {
+      "name": "data_quality_note",
+      "source_column": null,
+      "type": "string",
+      "display_name": "資料品質註記",
+      "unit": "",
+      "description": "blank/zero heat-rate marker",
+      "aliases": [
+        "資料品質"
+      ]
+    }
+  ]
+}

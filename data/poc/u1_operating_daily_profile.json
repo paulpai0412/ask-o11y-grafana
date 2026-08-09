@@ -1,0 +1,7 @@
+{
+  "profile": "u1-operating-daily",
+  "datasource_uid": "csv-poc",
+  "plugin_type": "yesoreyeram-infinity-datasource",
+  "csv_url_env": "U1_OPERATING_CSV_URL",
+  "csv_path": "/u1_operating_daily.csv"
+}

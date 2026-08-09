@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "datasets": [
+    {
+      "id": "u1-operating-daily",
+      "title": "Unit 1 Daily Operating Parameters",
+      "description": "Daily engineering operating parameters for Unit 1, including heat rate, fuel consumption, generation, steam temperatures, SCR conditions, condenser conditions, combustion settings, fuel quality, and validity indicators.",
+      "domain_hints": ["engineering"],
+      "datasource_uid": "csv-poc",
+      "datasource_type": "yesoreyeram-infinity-datasource",
+      "metadata_file": "data-query-planner-mcp/metadata/csv-poc.json",
+      "query_profile_file": "data/poc/u1_operating_daily_profile.json",
+      "query_kind": "infinity_csv"
+    }
+  ]
+}
