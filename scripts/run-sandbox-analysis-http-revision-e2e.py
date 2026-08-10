@@ -49,13 +49,17 @@ def main() -> int:
     }])
     store.write_json(context, run_id, "query-plan", {"analysis_input_contract": {"validity_rules": []}})
 
-    executed = rpc("execute_python_analysis", {"frame_ref": frame_ref, "python_code": "display(df[['x', 'y']].describe())", "seed": 41})
+    initial_code = "import matplotlib.pyplot as plt\nfig, ax = plt.subplots()\nax.plot(df['x'], df['y'])\nax.set_title('熱耗率相關性')\nemit(fig, name='熱耗率趨勢.png')\nemit(df[['x', 'y']], name='分析結果.csv')"
+    executed = rpc("execute_python_analysis", {"frame_ref": frame_ref, "python_code": initial_code, "seed": 41})
     require(bool(executed.get("ok")), f"execute failed: {executed}")
+    require(executed.get("output_summary", {}).get("mime_types") == ["image/png", "text/csv"], "named PNG/CSV MIME capture failed")
+    require(executed.get("output_summary", {}).get("output_names") == ["熱耗率趨勢.png", "分析結果.csv"], "output display names were not preserved")
+    require(executed.get("output_summary", {}).get("stderr_lines") == 0, "CJK plot emitted font warnings")
     provenance_ref = executed["refs"]["provenance_ref"]
     listed = rpc("list_python_analyses", {})
     require(any(item.get("provenance_ref") == provenance_ref for item in listed.get("analyses", [])), "new analysis was not listed")
     inspected = rpc("inspect_python_analysis", {"provenance_ref": provenance_ref})
-    require(inspected.get("python_code") == "display(df[['x', 'y']].describe())", "inspect did not recover source")
+    require(inspected.get("python_code") == initial_code, "inspect did not recover source")
     revised = rpc("revise_python_analysis", {"provenance_ref": provenance_ref, "python_code": "display(df[['x', 'y']].head(2))", "seed": 42})
     require(bool(revised.get("ok")) and revised.get("provenance", {}).get("parent_provenance_ref") == provenance_ref, f"revision lineage failed: {revised}")
 
@@ -79,6 +83,8 @@ def main() -> int:
     evidence = {
         "ok": True,
         "execute_mime_types": executed["output_summary"]["mime_types"],
+        "named_outputs": executed["output_summary"]["output_names"],
+        "cjk_font_warnings": executed["output_summary"]["stderr_lines"],
         "listed": True,
         "inspect_code_sha256": inspected["code_sha256"],
         "revise_ok": True,

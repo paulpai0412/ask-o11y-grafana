@@ -108,6 +108,13 @@ def main() -> int:
             checks.append(require("renderer_artifact_authorization_no_write", not renderer_auth.get("ok") and not writes and "context mismatch" in renderer_auth.get("error", ""), renderer_auth))
             raw_output = renderer.prepare_dashboard_write({"execution_ref": execution_ref, "results": [], "_server_context": context})
             checks.append(require("renderer_raw_output_rejected_no_write", not raw_output.get("ok") and not writes, raw_output))
+            catalog = lambda: [{"id": "timeseries", "name": "Time series", "description": "time"}]
+            native_unknown = renderer.prepare_dashboard_write({"plan_ref": valid["plan_ref"], "visualizations": [{"title": "Unknown", "panel_type": "timeseries", "fields": ["missing"]}], "_server_context": context}, catalog_fn=catalog)
+            checks.append(require("renderer_native_unknown_field_rejected_no_write", not native_unknown.get("ok") and not writes, native_unknown))
+            native_injection = renderer.prepare_dashboard_write({"plan_ref": valid["plan_ref"], "visualizations": [{"title": "Injection", "panel_type": "timeseries", "fields": ["date", "x"], "options": {"url": "http://evil"}}], "_server_context": context}, catalog_fn=catalog)
+            checks.append(require("renderer_native_query_injection_rejected_no_write", not native_injection.get("ok") and not writes, native_injection))
+            native_prepared = renderer.prepare_dashboard_write({"plan_ref": valid["plan_ref"], "visualizations": [{"title": "Safe", "panel_type": "timeseries", "fields": ["date", "x"]}], "_server_context": context}, catalog_fn=catalog)
+            checks.append(require("renderer_native_preview_no_write", native_prepared.get("ok") and not writes and native_prepared.get("evidence", {}).get("grafana_write") is False, native_prepared))
 
             runtime_tools = {tool["name"] for tool in dqp.TOOLS}
             checks.append(require("legacy_wferp_route_not_exposed", "plan_wferp_query" not in runtime_tools and "plan_wferp_query" not in dqp.HANDLERS, sorted(runtime_tools)))

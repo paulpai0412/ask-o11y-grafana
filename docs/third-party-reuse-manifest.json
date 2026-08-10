@@ -12,8 +12,8 @@
       "status": "adopted-runtime-plugin-with-local-patch",
       "copyright": "Copyright (c) 2026 Consensys",
       "notice": "NOTICE#ask-o11y",
-      "local_patches": ["patches/ask-o11y-mcp-tool-timeout-10m.patch"],
-      "integration": "only runtime LLM planner; local patch raises its external MCP tool-call deadline from 30 seconds to 10 minutes"
+      "local_patches": ["patches/ask-o11y-dynamic-tools-and-timeout.patch"],
+      "integration": "only runtime LLM planner; local patch uses the same Ask O11y LLM to select a compact relevant subset from current tool schemas per run, restores only successful opaque refs/identities as compact cross-turn state, and raises the external MCP tool-call deadline from 30 seconds to 10 minutes"
     },
     {
       "name": "grafana/mcp-grafana",
@@ -92,7 +92,7 @@
     {
       "name": "Sandbox analysis image package set",
       "status": "adopted-pinned-image-dependencies",
-      "image": "ask-o11y-sandbox-analysis@sha256:8ade7ac494c440400fc7bdfbe055d149140b46be856ffabfdfeddffb9a90c21b",
+      "image": "ask-o11y-sandbox-analysis@sha256:182c0fb5a13773d9036e302d6212e2553a6ed422fd759ab9470a06df7f1370f3",
       "pinfile": "sandbox-analysis-mcp/Dockerfile",
       "local_patches": [],
       "components": [
@@ -107,7 +107,8 @@
         {"name": "xgboost-cpu", "version": "3.4.0", "license": "Apache-2.0", "url": "https://github.com/dmlc/xgboost"},
         {"name": "lightgbm", "version": "4.7.0", "license": "MIT", "url": "https://github.com/microsoft/LightGBM"},
         {"name": "imbalanced-learn", "version": "0.14.2", "license": "MIT", "url": "https://github.com/scikit-learn-contrib/imbalanced-learn"},
-        {"name": "optuna", "version": "4.9.0", "license": "MIT", "url": "https://github.com/optuna/optuna"}
+        {"name": "optuna", "version": "4.9.0", "license": "MIT", "url": "https://github.com/optuna/optuna"},
+        {"name": "fonts-noto-cjk", "version": "1:20230817+repack1-3", "license": "OFL-1.1", "url": "https://packages.ubuntu.com/noble/fonts-noto-cjk"}
       ],
       "integration": "preinstalled offline analysis and rich-output libraries available only inside the network-denied custom sandbox image"
     },

@@ -102,6 +102,8 @@ def load_dataframe(bundle_path: str, pd: Any) -> tuple[Any, dict[str, Any]]:
 def run(code: str, bundle_path: str, seed: int) -> None:
     matplotlib = importlib.import_module("matplotlib")
     matplotlib.use("Agg")
+    matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC", "DejaVu Sans"]
+    matplotlib.rcParams["axes.unicode_minus"] = False
     plt = importlib.import_module("matplotlib.pyplot")
     np = importlib.import_module("numpy")
     pd = importlib.import_module("pandas")
@@ -116,39 +118,52 @@ def run(code: str, bundle_path: str, seed: int) -> None:
     data, audit = load_dataframe(bundle_path, pd)
     Path(bundle_path).unlink(missing_ok=True)
 
-    def write(name: str, mime_type: str, value: str | bytes) -> None:
+    def label(value: str | None, index: int, fallback: str) -> str:
+        if not isinstance(value, str):
+            return fallback
+        cleaned = " ".join(value.replace("\x00", "").split()).strip()
+        return cleaned[:120] or fallback
+
+    def write(name: str, mime_type: str, value: str | bytes, display_name: str) -> None:
         payload = value.encode() if isinstance(value, str) else value
         if len(payload) > MAX_ITEM_BYTES:
             raise ValueError(f"captured output {name} exceeds {MAX_ITEM_BYTES} bytes")
         path = OUTPUT_DIR / name
         path.write_bytes(payload)
-        manifest.append({"path": str(path), "mime_type": mime_type})
+        manifest.append({"path": str(path), "mime_type": mime_type, "display_name": display_name})
 
     def emit(value: Any, name: str | None = None) -> None:
         if value is None:
             return
-        del name  # Optional LLM-friendly label; filenames remain server-controlled.
         index = len(manifest) + 1
+        display_name = label(name, index, f"Output {index}")
+        csv_requested = display_name.lower().endswith(".csv")
         if isinstance(value, Figure):
             path = OUTPUT_DIR / f"figure-{index}.png"
             value.savefig(path, format="png", bbox_inches="tight")
             if path.stat().st_size > MAX_ITEM_BYTES:
                 path.unlink()
                 raise ValueError(f"captured output {path.name} exceeds {MAX_ITEM_BYTES} bytes")
-            manifest.append({"path": str(path), "mime_type": "image/png"})
+            manifest.append({"path": str(path), "mime_type": "image/png", "display_name": display_name})
             captured_figures.add(value.number)
             return
         if hasattr(value, "to_plotly_json") and hasattr(value, "to_json"):
-            write(f"plotly-{index}.json", "application/vnd.plotly.v1+json", value.to_json())
+            write(f"plotly-{index}.json", "application/vnd.plotly.v1+json", value.to_json(), display_name)
             return
         if isinstance(value, pd.DataFrame):
-            write(f"table-{index}.html", "text/html", value.to_html(index=False))
+            if csv_requested:
+                write(f"table-{index}.csv", "text/csv", value.to_csv(index=False), display_name)
+            else:
+                write(f"table-{index}.html", "text/html", value.to_html(index=False), display_name)
             return
         html = getattr(value, "_repr_html_", None)
         if callable(html) and (rendered := html()) is not None:
-            write(f"output-{index}.html", "text/html", str(rendered))
+            write(f"output-{index}.html", "text/html", str(rendered), display_name)
             return
-        write(f"output-{index}.txt", "text/plain", repr(value))
+        if isinstance(value, str):
+            write(f"output-{index}.csv" if csv_requested else f"output-{index}.txt", "text/csv" if csv_requested else "text/plain", value, display_name)
+            return
+        write(f"output-{index}.txt", "text/plain", repr(value), display_name)
 
     namespace = {"df": data, "pd": pd, "np": np, "display": emit, "emit": emit}
     setattr(plt, "show", lambda *args, **kwargs: None)

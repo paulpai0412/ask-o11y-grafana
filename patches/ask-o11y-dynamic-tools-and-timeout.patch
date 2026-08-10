@@ -1,0 +1,318 @@
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+index c22dd6f..566a3ff 100644
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -30,6 +30,8 @@ const nearLimitWarning = "[SYSTEM: You are approaching the iteration limit. Prod
+ // model to reissue a tool call whose arguments arrived truncated/invalid. Beyond
+ // this the run ends with a clean, retryable error instead of spinning.
+ const maxTruncationRetries = 1
++const maxSelectedTools = 24
++const publicationQuestion = "是否確認正式發佈此 Result Preview 至 Grafana Dashboard？"
+ 
+ // truncatedToolCallNudge is injected after a truncated tool call is discarded so
+ // the model reissues a smaller, complete call rather than repeating the cutoff.
+@@ -116,6 +118,8 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 		}
+ 		mcpTools = filtered
+ 	}
++	var offerPublicationAfterExecution bool
++	mcpTools, offerPublicationAfterExecution = a.selectRelevantTools(ctx, req, mcpTools)
+ 	openAITools := ConvertMCPToolsToOpenAI(mcpTools)
+ 
+ 	messages := BuildContextWindow(req.SystemPrompt, req.Messages, req.Summary, req.RecentMessageCount)
+@@ -128,6 +132,7 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 	mcpUnavailableEmitted := false
+ 	truncationRetries := 0
+ 	pendingTruncationNudge := false
++	successfulExecutionObserved := false
+ 
+ 	for iteration := 0; iteration < maxIter; iteration++ {
+ 		if ctx.Err() != nil {
+@@ -223,6 +228,9 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 		}
+ 
+ 		if len(msg.ToolCalls) == 0 {
++			if offerPublicationAfterExecution && successfulExecutionObserved && msg.Content != "" && !strings.Contains(msg.Content, publicationQuestion) {
++				msg.Content = strings.TrimSpace(msg.Content) + "\n\n" + publicationQuestion
++			}
+ 			if msg.Content != "" {
+ 				a.send(ctx, eventCh, SSEEvent{
+ 					Type: "final_report",
+@@ -299,6 +307,7 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 				})
+ 			}
+ 			if !isError {
++				successfulExecutionObserved = successfulExecutionObserved || isExecutionResult(toolContent)
+ 				a.send(ctx, eventCh, SSEEvent{
+ 					Type: "evidence",
+ 					Data: EvidenceEvent{
+@@ -320,6 +329,110 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 	})
+ }
+ 
++func isExecutionResult(content string) bool {
++	var result map[string]interface{}
++	if json.Unmarshal([]byte(content), &result) != nil || result["ok"] != true {
++		return false
++	}
++	step, _ := result["step"].(string)
++	return strings.HasPrefix(step, "execute_")
++}
++
++func (a *AgentLoop) selectRelevantTools(ctx context.Context, req LoopRequest, tools []mcp.Tool) ([]mcp.Tool, bool) {
++	if len(tools) == 0 {
++		return tools, false
++	}
++	type catalogEntry struct {
++		Name        string `json:"name"`
++		Description string `json:"description,omitempty"`
++	}
++	catalog := make([]catalogEntry, 0, len(tools))
++	for _, tool := range tools {
++		description := tool.Description
++		if len(description) > 300 {
++			description = description[:300]
++		}
++		catalog = append(catalog, catalogEntry{Name: tool.Name, Description: description})
++	}
++	catalogJSON, err := json.Marshal(catalog)
++	if err != nil {
++		return tools, false
++	}
++	conversation := make([]Message, 0, 6)
++	start := len(req.Messages) - 6
++	if start < 0 {
++		start = 0
++	}
++	for _, message := range req.Messages[start:] {
++		if message.Role == "user" || message.Role == "assistant" || (message.Role == "system" && strings.HasPrefix(message.Content, "[Prior successful opaque tool state.")) {
++			conversation = append(conversation, Message{Role: message.Role, Content: message.Content})
++		}
++	}
++	conversationJSON, err := json.Marshal(conversation)
++	if err != nil {
++		return tools, false
++	}
++	selectionPrompt := "You are the tool-capability selector for the same Ask O11y planner. Select only tools plausibly needed for the current user turn and its direct safe follow-up work. Do not invent identifiers or execute tools. Preserve optional compositions; do not impose a workflow. Return only JSON: {\"tools\":[exact names from catalog, at most 24],\"offer_publication_after_execution\":boolean}. Set the boolean true only when this current turn authorizes data/analysis execution, prior/current intent explicitly includes later Grafana publication, and the correct next response after successful execution is a Result Preview asking for formal publication. It is false for initial Analysis Preview, pure analysis, and the later formal-publication turn.\nConversation: " + string(conversationJSON) + "\nCatalog: " + string(catalogJSON)
++	selectionReq := ChatCompletionRequest{
++		Model:     req.Model,
++		Messages:  []Message{{Role: "system", Content: selectionPrompt}},
++		MaxTokens: 1024,
++	}
++	resp, err := a.chatCompletionWithFallback(ctx, selectionReq, req)
++	if err != nil || len(resp.Choices) == 0 {
++		a.logger.Warn("Dynamic tool selection failed; retaining authorized tool set", "error", err)
++		return tools, false
++	}
++	content := strings.TrimSpace(resp.Choices[0].Message.Content)
++	if start := strings.Index(content, "{"); start >= 0 {
++		if end := strings.LastIndex(content, "}"); end >= start {
++			content = content[start : end+1]
++		}
++	}
++	var decision struct {
++		Tools                          []string `json:"tools"`
++		OfferPublicationAfterExecution bool     `json:"offer_publication_after_execution"`
++	}
++	if err := json.Unmarshal([]byte(content), &decision); err != nil || len(decision.Tools) > maxSelectedTools {
++		a.logger.Warn("Dynamic tool selection returned invalid JSON; retaining authorized tool set", "response", content)
++		return tools, false
++	}
++	names := decision.Tools
++	selected := make(map[string]struct{}, len(names))
++	for _, name := range names {
++		selected[name] = struct{}{}
++	}
++	for _, server := range req.MCPServers {
++		prefix := server.ID + "_"
++		serverSelected := false
++		for name := range selected {
++			if strings.HasPrefix(name, prefix) {
++				serverSelected = true
++				break
++			}
++		}
++		if serverSelected {
++			for _, tool := range tools {
++				if strings.HasPrefix(tool.Name, prefix) {
++					selected[tool.Name] = struct{}{}
++				}
++			}
++		}
++	}
++	filtered := make([]mcp.Tool, 0, len(selected))
++	for _, tool := range tools {
++		if _, ok := selected[tool.Name]; ok {
++			filtered = append(filtered, tool)
++		}
++	}
++	if len(names) > 0 && len(filtered) == 0 {
++		a.logger.Warn("Dynamic tool selection chose no known tools; retaining authorized tool set")
++		return tools, false
++	}
++	a.logger.Info("Dynamically selected tools", "available", len(tools), "selected", len(filtered), "offerPublicationAfterExecution", decision.OfferPublicationAfterExecution)
++	return filtered, decision.OfferPublicationAfterExecution
++}
++
+ func (a *AgentLoop) chatCompletionWithFallback(ctx context.Context, llmReq ChatCompletionRequest, req LoopRequest) (*ChatCompletionResponse, error) {
+ 	resp, err := a.llmClient.ChatCompletion(ctx, llmReq, req.GrafanaURL, req.AuthToken, req.OrgID)
+ 	if err == nil {
+diff --git a/pkg/agent/loop_test.go b/pkg/agent/loop_test.go
+index e1592cb..388a27c 100644
+--- a/pkg/agent/loop_test.go
++++ b/pkg/agent/loop_test.go
+@@ -1017,3 +1017,14 @@ func TestAgentLoop_ContextCancellation(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestIsExecutionResult(t *testing.T) {
++	if !isExecutionResult(`{"ok":true,"step":"execute_python_analysis"}`) {
++		t.Fatal("successful execute step was not recognized")
++	}
++	for _, value := range []string{`{"ok":false,"step":"execute_python_analysis"}`, `{"ok":true,"step":"plan_query"}`, `not-json`} {
++		if isExecutionResult(value) {
++			t.Fatalf("non-execution result was recognized: %s", value)
++		}
++	}
++}
+diff --git a/pkg/mcp/client.go b/pkg/mcp/client.go
+index 7b2c1f4..026a0b8 100644
+--- a/pkg/mcp/client.go
++++ b/pkg/mcp/client.go
+@@ -185,7 +185,10 @@ func (c *Client) forceReconnect() error {
+ 	return c.connectMCP()
+ }
+ 
+-const connectDialTimeout = 10 * time.Second
++const (
++	connectDialTimeout = 10 * time.Second
++	toolCallTimeout    = 10 * time.Minute
++)
+ 
+ // forceReconnectMinInterval is the dedupe window that prevents the health
+ // monitor from thrashing a session that the on-call retry path just refreshed.
+@@ -577,7 +580,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
+ 		return nil, fmt.Errorf("session not established for tool call")
+ 	}
+ 
+-	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
++	ctx, cancel := context.WithTimeout(c.ctx, toolCallTimeout)
+ 	defer cancel()
+ 
+ 	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+@@ -620,7 +623,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
+ 				return nil, fmt.Errorf("session not established after reconnection")
+ 			}
+ 
+-			retryCtx, retryCancel := context.WithTimeout(c.ctx, 30*time.Second)
++			retryCtx, retryCancel := context.WithTimeout(c.ctx, toolCallTimeout)
+ 			defer retryCancel()
+ 
+ 			result, err = session.CallTool(retryCtx, &mcpsdk.CallToolParams{
+diff --git a/pkg/mcp/proxy.go b/pkg/mcp/proxy.go
+index 1323b9a..be1416f 100644
+--- a/pkg/mcp/proxy.go
++++ b/pkg/mcp/proxy.go
+@@ -354,7 +354,7 @@ func (p *Proxy) RemoveServer(id string) {
+ func (p *Proxy) sdkClient() (*http.Client, error) {
+ 	return httpclient.New(httpclient.Options{
+ 		Timeouts: &httpclient.TimeoutOptions{
+-			Timeout:     30 * time.Second,
++			Timeout:     toolCallTimeout,
+ 			DialTimeout: connectDialTimeout,
+ 		},
+ 	})
+diff --git a/pkg/plugin/plugin.go b/pkg/plugin/plugin.go
+index a9711f8..40e0184 100644
+--- a/pkg/plugin/plugin.go
++++ b/pkg/plugin/plugin.go
+@@ -724,6 +724,59 @@ func (p *Plugin) handleMCPServers(w http.ResponseWriter, r *http.Request) {
+ 	json.NewEncoder(w).Encode(response)
+ }
+ 
++func compactPriorToolState(raw json.RawMessage) string {
++	if len(raw) == 0 {
++		return ""
++	}
++	var calls []map[string]interface{}
++	if err := json.Unmarshal(raw, &calls); err != nil {
++		return ""
++	}
++	states := make([]map[string]interface{}, 0, len(calls))
++	for _, call := range calls {
++		if errorText, _ := call["error"].(string); errorText != "" {
++			continue
++		}
++		response, ok := call["response"].(map[string]interface{})
++		if !ok {
++			continue
++		}
++		content, ok := response["content"].([]interface{})
++		if !ok {
++			continue
++		}
++		for _, blockValue := range content {
++			block, ok := blockValue.(map[string]interface{})
++			if !ok {
++				continue
++			}
++			text, _ := block["text"].(string)
++			var result map[string]interface{}
++			if text == "" || json.Unmarshal([]byte(text), &result) != nil || result["ok"] != true {
++				continue
++			}
++			state := map[string]interface{}{"tool": call["name"]}
++			for key, value := range result {
++				if key == "refs" || key == "run_id" || key == "step" || key == "dataset_id" || key == "datasource_uid" || key == "selected_fields" || key == "output_summary" || strings.HasSuffix(key, "_ref") || strings.HasSuffix(key, "_uid") || strings.HasSuffix(key, "_url") || strings.HasSuffix(key, "_slug") {
++					state[key] = value
++				}
++			}
++			states = append(states, state)
++		}
++	}
++	if len(states) == 0 {
++		return ""
++	}
++	encoded, err := json.Marshal(states)
++	if err != nil {
++		return ""
++	}
++	if len(encoded) > 16*1024 {
++		encoded = encoded[:16*1024]
++	}
++	return "[Prior successful opaque tool state. Reuse exact refs only when their provenance matches the current intent; never reconstruct them: " + string(encoded) + "]"
++}
++
+ func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
+ 	if r.Method != http.MethodPost {
+ 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+@@ -854,6 +907,9 @@ func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
+ 				Role:    msg.Role,
+ 				Content: msg.Content,
+ 			})
++			if state := compactPriorToolState(msg.ToolCalls); state != "" {
++				messages = append(messages, agent.Message{Role: "system", Content: state})
++			}
+ 		}
+ 
+ 		messages = append(messages, agent.Message{
+diff --git a/pkg/plugin/plugin_test.go b/pkg/plugin/plugin_test.go
+index 39554ef..a715832 100644
+--- a/pkg/plugin/plugin_test.go
++++ b/pkg/plugin/plugin_test.go
+@@ -676,3 +676,14 @@ func TestHandlePromptDefaults(t *testing.T) {
+ 		}
+ 	})
+ }
++
++func TestCompactPriorToolState(t *testing.T) {
++	raw := json.RawMessage(`[{"name":"planner","response":{"content":[{"text":"{\"ok\":true,\"step\":\"plan_query\",\"refs\":{\"plan_ref\":\"artifact://run_1/query-plan\"},\"frame\":{\"secret\":\"raw\"}}"}]}},{"name":"failed","error":"boom"}]`)
++	state := compactPriorToolState(raw)
++	if !strings.Contains(state, "artifact://run_1/query-plan") || !strings.Contains(state, "plan_query") {
++		t.Fatalf("missing successful opaque state: %s", state)
++	}
++	if strings.Contains(state, "secret") || strings.Contains(state, "boom") {
++		t.Fatalf("raw or failed tool state leaked: %s", state)
++	}
++}

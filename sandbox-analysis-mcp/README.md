@@ -9,7 +9,7 @@ Executes Ask O11y-generated Python against one authorized Grafana columnar frame
 - `inspect_python_analysis(provenance_ref)`
 - `revise_python_analysis(provenance_ref, python_code, seed?)`
 
-The query frame and validity rules are transferred as bounded JSON. Trusted `capture.py`, baked into the image, creates filtered `df` and captures tables, Matplotlib PNG, Plotly JSON, HTML, text, errors, and validity audit. No CSV or SQLite intermediate is created.
+The query frame and validity rules are transferred as bounded JSON. Trusted `capture.py`, baked into the image, creates filtered `df` and captures named tables, bounded CSV outputs, Matplotlib PNG, Plotly JSON, HTML, text, errors, and validity audit. Display names never control physical paths. No CSV or SQLite input intermediate is created.
 
 The image pins NumPy, SciPy, pandas, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna. PyTorch and TensorFlow are intentionally omitted because their image and runtime cost is disproportionate for this bounded tabular-analysis service.
 

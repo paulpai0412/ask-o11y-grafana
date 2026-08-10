@@ -29,7 +29,7 @@
       "name": "Grafana Renderer Workflow Node",
       "url_env": "GRAFANA_RENDERER_MCP_URL",
       "local_url": "http://127.0.0.1:8773/mcp",
-      "enabled_tools": ["prepare_dashboard_write", "create_dashboard_from_artifacts"],
+      "enabled_tools": ["list_visualization_capabilities", "prepare_dashboard_write", "create_dashboard_from_artifacts"],
       "disabled_tools": []
     }
   ]

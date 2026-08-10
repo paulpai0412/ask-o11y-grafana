@@ -113,11 +113,11 @@ If measured frame sizes later make JSON transfer material, adopt Arrow IPC or Pa
 
 The original authorized `grafana-frame` artifact, generated Python, execution outputs and provenance are retained server-side for the configured retention period. The ephemeral input file and sandbox are deleted after each call.
 
-`list_python_analyses`, `inspect_python_analysis`, and `revise_python_analysis` let a later Ask O11y conversation rediscover a prior revision, retrieve its generated source and compact metadata without frame rows, then execute replacement code against the same authorized frame. No persistent kernel is required. The locally installed Ask O11y 0.3.2 backend carries `patches/ask-o11y-mcp-tool-timeout-10m.patch`, one operational patch that raises its hardcoded external MCP tool-call deadline from 30 seconds to 10 minutes so it does not terminate a still-bounded Sandbox run early. Apply it to tag `v0.3.2`, build the Linux backend with Go 1.26.5, replace `gpx_consensys-asko11y-app_linux_amd64`, remove the now-invalid signed `MANIFEST.txt`, and enable only this plugin ID through `GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS` for the local PoC.
+`list_python_analyses`, `inspect_python_analysis`, and `revise_python_analysis` let a later Ask O11y conversation rediscover a prior revision, retrieve its generated source and compact metadata without frame rows, then execute replacement code against the same authorized frame. No persistent kernel is required. The locally installed Ask O11y 0.3.2 backend carries `patches/ask-o11y-dynamic-tools-and-timeout.patch`, one operational patch that uses the same Ask O11y LLM to select a compact relevant subset from current tool schemas per run, restores only successful opaque refs and identities as compact cross-turn state, and raises its hardcoded external MCP tool-call deadline from 30 seconds to 10 minutes so it does not terminate a still-bounded Sandbox run early. Apply it to tag `v0.3.2`, build the Linux backend with Go 1.26.5, replace `gpx_consensys-asko11y-app_linux_amd64`, remove the now-invalid signed `MANIFEST.txt`, and enable only this plugin ID through `GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS` for the local PoC.
 
 ## Isolation policy
 
-Every call creates one fresh sandbox and kills it in `finally`. Cross-turn kernel persistence is deliberately excluded because Ask O11y 0.3.2 does not reliably reconstruct prior tool results.
+Every call creates one fresh sandbox and kills it in `finally`. Cross-turn kernel persistence is deliberately excluded; Ask O11y restores only compact successful opaque refs/identities and reconstructs no kernel, raw frame, MIME payload, or full tool result.
 
 | Control | Limit |
 | --- | ---: |
@@ -144,9 +144,11 @@ Additional rules:
 
 No component prescribes a query→analysis→render path. Ask O11y's built-in Grafana MCP remains enabled, so it may dynamically query, return data, or call native dashboard tools when no Sandbox computation is needed. External Planner/Grafana Query remain available when an authorized opaque `frame_ref` is required for Sandbox. Ask O11y selects among these schemas; Sandbox is not a mandatory intermediary.
 
-Sandbox execution is not itself a Grafana write. An image/HTML/Plotly MIME result is not a Grafana dashboard, and Ask O11y must not claim otherwise. The generic Renderer may consume an authorized opaque `sandbox-execution` ref when the user requested Grafana output. Its preview tool binds the exact title and output indexes to a short-lived, one-time capability; its write tool also remains subject to Ask O11y host approval.
+Sandbox execution is not itself a Grafana write. After each successful query or Sandbox execution, Ask O11y returns a Result Preview and performs no mutation. If publication was part of the confirmed intent, it asks for a separate formal-publication confirmation. Only then may Renderer prepare an exact short-lived capability; the subsequent write remains subject to independent Ask O11y host approval.
 
-Renderer supports bounded Matplotlib/SHAP PNG, allowlist-sanitized HTML, plain text, and JSON as Grafana text panels. It never accepts raw MIME bodies from the model. Plotly JSON remains an analysis artifact unless a compatible Grafana panel is installed; Ask O11y should request Matplotlib PNG when a dashboard-compatible plot is required. This is one optional capability selected from schemas, not a hardcoded orchestrator step or SHAP-specific path.
+Renderer discovers the live installed Grafana panel catalog instead of prescribing panel types or order. For native panels it consumes an authorized `plan_ref` plus schema-declared visualization specs containing only installed panel type, authorized field names and bounded display options; query body and datasource identity come from the trusted plan. A visualization may optionally bind a named bounded `text/csv` output from an authorized `execution_ref` to a native inline Infinity query. For artifact panels Renderer still supports Matplotlib/SHAP PNG, allowlist-sanitized HTML, plain text, CSV and JSON. It never accepts raw frames, MIME bodies, datasource identity, panel targets or query bodies from the model. Plotly JSON remains an analysis artifact unless an installed compatible panel can consume a trusted representation. This is one optional capability selected from schemas, not a hardcoded orchestrator step or analysis-specific endpoint.
+
+Successful publication returns `dashboard_uid`, `dashboard_slug`, and `dashboard_url` separately. The slug is never reused as the UID. `emit(value, name=...)` preserves a bounded sanitized display name without using it as a physical path; names ending in `.csv` produce bounded `text/csv` artifacts and native table-compatible data. A claimed downloadable file still requires direct download evidence.
 
 ## Repository migration
 
@@ -163,7 +165,7 @@ Add or change:
 - `sandbox-analysis-mcp/server.py` and its trusted in-image DataFrame/output bootstrap
 - the `sandbox-analysis` capability entry
 - Ask O11y instructions for generated Python and sandbox failure behavior
-- OpenSandbox dependency pins plus the pinned tabular/ML image set: NumPy, SciPy, pandas, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna
+- OpenSandbox dependency pins plus the pinned tabular/ML image set: NumPy, SciPy, pandas, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, Optuna, and Noto CJK fonts
 - lockfile, SBOM, NOTICE, and reuse manifest
 - artifact cleanup entries for Sandbox code, execution, and provenance
 - focused Sandbox authentication, authorization, limits, MIME, validity, and cleanup checks
@@ -177,12 +179,13 @@ Planner, Grafana Query, ArtifactStore authorization, and Renderer approval remai
 3. Sandbox `tools/list` exposes only `execute_python_analysis`, `list_python_analyses`, `inspect_python_analysis`, and `revise_python_analysis`.
 4. Missing/forged identity, foreign ref, raw-frame arguments and oversized code fail before sandbox creation.
 5. The authorized Grafana columnar frame and validity rules are injected as bounded JSON; the trusted bootstrap constructs filtered `df`, and raw data is absent from the model-visible result.
-6. Captured table/image MIME results are stored behind opaque authorized refs with bounded provenance.
+6. Captured named table/CSV/image MIME results are stored behind opaque authorized refs with bounded provenance; display names never control paths.
 7. Sandbox policy has deny-all egress, fixed CPU/memory/lifetime, empty environment and no volumes; cleanup is unconditional.
 8. If OpenSandbox is unavailable, the MCP fails closed and never executes Python locally.
 9. Later conversations can list, inspect and revise authorized analyses without persistent sandboxes or raw frame disclosure.
-10. The generic Renderer accepts only authorized Sandbox refs, sanitizes/validates supported MIME outputs, and requires both its exact one-time capability and Ask O11y host approval before mutation.
-11. Grafana dashboard tools remain optional capabilities selected by Ask O11y, not hardcoded next steps.
+10. The generic Renderer accepts only authorized plan/Sandbox refs, resolves datasource/query identity server-side, validates installed panel/field/display specs, and requires both its exact one-time capability and Ask O11y host approval before mutation.
+11. Grafana dashboard tools remain optional capabilities selected by Ask O11y, not hardcoded next steps; every execution returns Result Preview before any separately confirmed formal publication.
+12. Published dashboard UID, slug and URL are returned separately, and native-panel E2E evidence proves non-text panels contain query targets.
 
 ## Deferred
 

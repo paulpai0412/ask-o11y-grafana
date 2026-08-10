@@ -16,7 +16,9 @@ Remove the Engineering and Finance Analysis MCPs and their shared `analysis_core
 
 The sandbox has deny-all egress, fixed CPU/memory/lifetime/output bounds, no host volumes and no injected credentials. Production requires a digest-pinned image and gVisor or Kata. Plain `runc` is local-development only.
 
-The four runtime seams are Planner, Grafana Query, Sandbox Analysis and Grafana Renderer. They are independently registered capabilities, not a prescribed path: Ask O11y dynamically chooses query-only, dashboard, Sandbox, or combined calls. Renderer remains the approval-gated Grafana writer. When requested, its generic artifact path converts authorized bounded PNG, sanitized HTML, text, or JSON Sandbox outputs into Grafana text panels; Sandbox execution alone must not be described as a dashboard.
+The four runtime seams are Planner, Grafana Query, Sandbox Analysis and Grafana Renderer. They are independently registered capabilities, not a prescribed path: Ask O11y dynamically selects a compact tool subset and chooses query-only, dashboard, Sandbox, or combined calls. Every successful execution returns a no-write Result Preview. Formal publication requires a later explicit confirmation, an exact one-time Renderer capability, and Ask O11y host approval.
+
+Renderer remains the approval-gated Grafana writer. It discovers installed panel plugins and can build dynamic native query panels from an authorized plan plus schema-declared field/display specs, or bind named bounded CSV Sandbox outputs to native inline Infinity queries. Its generic artifact path still converts authorized PNG, sanitized HTML, text, CSV or JSON outputs without exposing raw payloads to the model. Sandbox execution alone must not be described as a dashboard.
 
 This ADR supersedes ADR 0002's deterministic Engineering/Finance analysis topology. It preserves ADR 0002's Grafana datasource boundary, opaque artifact authorization, adaptive Ask O11y planning and approval-gated Renderer boundary.
 
@@ -24,8 +26,8 @@ This ADR supersedes ADR 0002's deterministic Engineering/Finance analysis topolo
 
 - There is one dynamic analysis MCP instead of parallel deterministic and sandbox paths.
 - Fixed method contracts and method-specific regressions are deleted.
-- Generated analysis can use a pinned tabular/ML stack including SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn and Optuna, and can emit rich outputs without method or chart enums.
+- Generated analysis can use a pinned tabular/ML stack including SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn and Optuna, and can emit named rich outputs without method or chart enums.
 - OpenSandbox becomes a locked Apache-2.0 runtime dependency and separately operated service.
-- Supported Sandbox outputs can optionally become Grafana panels through one generic, approval-gated artifact Renderer; Plotly JSON still requires a compatible Grafana panel or a Matplotlib fallback.
+- Authorized query plans and supported Sandbox outputs can optionally become native or artifact Grafana panels through one generic, approval-gated Renderer; panel choice/order remains LLM-driven from live capabilities.
 
 Detailed contract and acceptance criteria are in `docs/design/sandbox-analysis-mcp.md`.

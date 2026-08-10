@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -47,7 +48,7 @@ try:
 except ValueError:
     PORT = 8777
 
-SERVER_INFO = {"name": "sandbox-analysis-mcp", "version": "0.1.0"}
+SERVER_INFO = {"name": "sandbox-analysis-mcp", "version": "0.3.0"}
 PROTOCOL = "2025-03-26"
 MAX_CODE_BYTES = 32 * 1024
 MAX_RPC_BODY_BYTES = 128 * 1024
@@ -274,15 +275,18 @@ def read_captured_outputs(filesystem: Any) -> list[dict[str, Any]]:
         raise WorkflowContractError("sandbox output manifest is invalid") from exc
     if not isinstance(manifest, list) or len(manifest) > 20:
         raise WorkflowContractError("sandbox output manifest must contain at most 20 items")
-    allowed_mime = {"text/plain", "text/html", "image/png", "application/vnd.plotly.v1+json"}
+    allowed_mime = {"text/plain", "text/csv", "text/html", "image/png", "application/vnd.plotly.v1+json"}
     outputs = []
     total = len(manifest_bytes)
     output_root = Path("/tmp/sandbox-output")
     for item in manifest:
-        if not isinstance(item, dict) or set(item) != {"path", "mime_type"}:
+        if not isinstance(item, dict) or set(item) != {"path", "mime_type", "display_name"}:
             raise WorkflowContractError("sandbox output manifest item is invalid")
         path = Path(str(item["path"]))
         mime_type = str(item["mime_type"])
+        display_name = item["display_name"]
+        if not isinstance(display_name, str) or not display_name or len(display_name) > 120:
+            raise WorkflowContractError("sandbox output display name is invalid")
         if path.parent != output_root or mime_type not in allowed_mime:
             raise WorkflowContractError("sandbox output path or MIME type is not allowed")
         payload = filesystem.read_bytes(str(path), range_header=f"bytes=0-{MAX_OUTPUT_BYTES}")
@@ -290,13 +294,13 @@ def read_captured_outputs(filesystem: Any) -> list[dict[str, Any]]:
         if total > MAX_OUTPUT_BYTES:
             raise WorkflowContractError("sandbox captured outputs exceed limit")
         if mime_type == "image/png":
-            outputs.append({"text": None, "timestamp": 0, "mime": {mime_type: base64.b64encode(payload).decode("ascii")}})
+            outputs.append({"text": None, "timestamp": 0, "mime": {mime_type: base64.b64encode(payload).decode("ascii")}, "display_name": display_name})
         else:
             try:
                 text = payload.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise WorkflowContractError("sandbox text output is not UTF-8") from exc
-            outputs.append({"text": text if mime_type == "text/plain" else None, "timestamp": 0, "mime": {} if mime_type == "text/plain" else {mime_type: text}})
+            outputs.append({"text": text if mime_type == "text/plain" else None, "timestamp": 0, "mime": {} if mime_type == "text/plain" else {mime_type: text}, "display_name": display_name})
     return outputs
 
 
@@ -375,26 +379,27 @@ def execute_opensandbox(frame_bundle_json: str, python_code: str, seed: int) -> 
         return serialized
     finally:
         if sandbox is not None:
-            try:
+            with contextlib.suppress(Exception):
                 sandbox.kill()
-            except Exception:
-                pass
-            finally:
-                sandbox.close()
+            sandbox.close()
 
 
 def output_summary(execution: dict[str, Any]) -> dict[str, Any]:
     mime_types = set()
+    output_names = []
     stdout_lines = 0
     for result in execution["results"]:
         if result.get("text") is not None:
             mime_types.add("text/plain")
         mime_types.update(str(key) for key in result.get("mime", {}))
+        if isinstance(result.get("display_name"), str):
+            output_names.append(result["display_name"])
     for item in execution["stdout"]:
         stdout_lines += len(str(item.get("text", "")).splitlines())
     return {
         "result_count": len(execution["results"]),
         "mime_types": sorted(mime_types),
+        "output_names": output_names,
         "stdout_lines": stdout_lines,
         "stderr_lines": sum(len(str(item.get("text", "")).splitlines()) for item in execution["stderr"]),
     }

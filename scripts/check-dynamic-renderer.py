@@ -54,7 +54,7 @@ def main() -> int:
         )
         content = json.dumps(dashboards)
         checks = {
-            "dynamic_supported_output_count": prepared.get("panel_preview") == [
+            "dynamic_supported_output_count": prepared.get("publication_preview") == [
                 {"output_index": 0, "mime_type": "image/png"},
                 {"output_index": 1, "mime_type": "text/html"},
             ],
