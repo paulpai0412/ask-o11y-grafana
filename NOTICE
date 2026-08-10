@@ -1,5 +1,12 @@
 Adaptive Ask O11y ML Platform — Third-Party Notices
 
+[ask-o11y]
+Consensys Ask O11y plugin v0.3.2 (locally patched)
+Copyright (c) 2026 Consensys
+License: MIT
+Source: https://github.com/Consensys/ask-o11y-plugin/tree/8395ae1
+Patch: patches/ask-o11y-mcp-tool-timeout-10m.patch
+
 This distribution includes or runs with the following third-party components.
 Complete version, source, commit, license, patch, and lock details are recorded in
 `docs/third-party-reuse-manifest.json` and `docs/sbom.json`.

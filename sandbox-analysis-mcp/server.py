@@ -139,7 +139,7 @@ def context_from_args(args: dict[str, Any]) -> dict[str, str]:
 
 def sandbox_policy() -> dict[str, Any]:
     return {
-        "timeout_seconds": 120,
+        "timeout_seconds": 600,
         "ready_timeout_seconds": 20,
         "resource": {"cpu": "1", "memory": "1Gi"},
         "network_default_action": "deny",
@@ -706,7 +706,7 @@ def self_check() -> None:
         args = {"frame_ref": frame_ref, "python_code": "display(df)", "seed": 7, "_server_context": context}
         result = execute_python_analysis(args, executor=fake_executor)
         assert result["ok"] and result["output_summary"]["mime_types"] == ["image/png", "text/html", "text/plain"]
-        assert result["provenance"]["limits"] == {"timeout_seconds": 120, "source_bytes": MAX_CODE_BYTES, "rpc_body_bytes": MAX_RPC_BODY_BYTES, "input_bundle_bytes": MAX_INPUT_BUNDLE_BYTES, "captured_execution_bytes": MAX_OUTPUT_BYTES, "stdout_stderr_bytes_each": MAX_LOG_BYTES}
+        assert result["provenance"]["limits"] == {"timeout_seconds": 600, "source_bytes": MAX_CODE_BYTES, "rpc_body_bytes": MAX_RPC_BODY_BYTES, "input_bundle_bytes": MAX_INPUT_BUNDLE_BYTES, "captured_execution_bytes": MAX_OUTPUT_BYTES, "stdout_stderr_bytes_each": MAX_LOG_BYTES}
         assert observed["seed"] == 7 and observed["bundle"]["frame"]["data"]["values"][0] == [1, 2, 3]
         assert observed["bundle"]["validity_rules"][0]["field"] == "heat_rate_valid"
         assert "display(df)" not in json.dumps(result) and '"values"' not in json.dumps(result)

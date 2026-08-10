@@ -47,4 +47,4 @@ MCP_SHARED_TOKEN='<same-token>' uv run python scripts/run-sandbox-analysis-http-
 - Configure OpenSandbox with gVisor or Kata; do not enable `SANDBOX_ALLOW_RUNC`.
 - Pin and publish the custom image by digest.
 - Enable OpenSandbox API authentication and set `SANDBOX_API_KEY` only in the MCP process; it is never injected into a sandbox.
-- Keep deny-all egress, empty sandbox environment, no volumes, 1 CPU, 1 GiB memory, 120-second lifetime, and bounded input/output.
+- Keep deny-all egress, empty sandbox environment, no volumes, 1 CPU, 1 GiB memory, 10-minute lifetime, and bounded input/output.

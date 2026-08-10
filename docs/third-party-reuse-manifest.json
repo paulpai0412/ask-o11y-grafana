@@ -4,6 +4,18 @@
   "sbom": "docs/sbom.json",
   "sources": [
     {
+      "name": "Consensys/ask-o11y-plugin",
+      "url": "https://github.com/Consensys/ask-o11y-plugin",
+      "tag": "v0.3.2",
+      "commit": "8395ae1",
+      "license": "MIT",
+      "status": "adopted-runtime-plugin-with-local-patch",
+      "copyright": "Copyright (c) 2026 Consensys",
+      "notice": "NOTICE#ask-o11y",
+      "local_patches": ["patches/ask-o11y-mcp-tool-timeout-10m.patch"],
+      "integration": "only runtime LLM planner; local patch raises its external MCP tool-call deadline from 30 seconds to 10 minutes"
+    },
+    {
       "name": "grafana/mcp-grafana",
       "url": "https://github.com/grafana/mcp-grafana",
       "tag": "v1.0.0",

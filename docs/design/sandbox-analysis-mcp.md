@@ -113,7 +113,7 @@ If measured frame sizes later make JSON transfer material, adopt Arrow IPC or Pa
 
 The original authorized `grafana-frame` artifact, generated Python, execution outputs and provenance are retained server-side for the configured retention period. The ephemeral input file and sandbox are deleted after each call.
 
-`list_python_analyses`, `inspect_python_analysis`, and `revise_python_analysis` let a later Ask O11y conversation rediscover a prior revision, retrieve its generated source and compact metadata without frame rows, then execute replacement code against the same authorized frame. No persistent kernel or Ask O11y source modification is required.
+`list_python_analyses`, `inspect_python_analysis`, and `revise_python_analysis` let a later Ask O11y conversation rediscover a prior revision, retrieve its generated source and compact metadata without frame rows, then execute replacement code against the same authorized frame. No persistent kernel is required. The locally installed Ask O11y 0.3.2 backend carries `patches/ask-o11y-mcp-tool-timeout-10m.patch`, one operational patch that raises its hardcoded external MCP tool-call deadline from 30 seconds to 10 minutes so it does not terminate a still-bounded Sandbox run early. Apply it to tag `v0.3.2`, build the Linux backend with Go 1.26.5, replace `gpx_consensys-asko11y-app_linux_amd64`, remove the now-invalid signed `MANIFEST.txt`, and enable only this plugin ID through `GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS` for the local PoC.
 
 ## Isolation policy
 
@@ -121,7 +121,7 @@ Every call creates one fresh sandbox and kills it in `finally`. Cross-turn kerne
 
 | Control | Limit |
 | --- | ---: |
-| sandbox lifetime | 120 seconds |
+| sandbox lifetime | 10 minutes |
 | CPU | 1 |
 | memory | 1 GiB |
 | source | 32 KiB |

@@ -1,0 +1,47 @@
+diff --git a/pkg/mcp/client.go b/pkg/mcp/client.go
+index 7b2c1f4..026a0b8 100644
+--- a/pkg/mcp/client.go
++++ b/pkg/mcp/client.go
+@@ -185,7 +185,10 @@ func (c *Client) forceReconnect() error {
+ 	return c.connectMCP()
+ }
+ 
+-const connectDialTimeout = 10 * time.Second
++const (
++	connectDialTimeout = 10 * time.Second
++	toolCallTimeout    = 10 * time.Minute
++)
+ 
+ // forceReconnectMinInterval is the dedupe window that prevents the health
+ // monitor from thrashing a session that the on-call retry path just refreshed.
+@@ -577,7 +580,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
+ 		return nil, fmt.Errorf("session not established for tool call")
+ 	}
+ 
+-	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
++	ctx, cancel := context.WithTimeout(c.ctx, toolCallTimeout)
+ 	defer cancel()
+ 
+ 	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+@@ -620,7 +623,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
+ 				return nil, fmt.Errorf("session not established after reconnection")
+ 			}
+ 
+-			retryCtx, retryCancel := context.WithTimeout(c.ctx, 30*time.Second)
++			retryCtx, retryCancel := context.WithTimeout(c.ctx, toolCallTimeout)
+ 			defer retryCancel()
+ 
+ 			result, err = session.CallTool(retryCtx, &mcpsdk.CallToolParams{
+diff --git a/pkg/mcp/proxy.go b/pkg/mcp/proxy.go
+index 1323b9a..be1416f 100644
+--- a/pkg/mcp/proxy.go
++++ b/pkg/mcp/proxy.go
+@@ -354,7 +354,7 @@ func (p *Proxy) RemoveServer(id string) {
+ func (p *Proxy) sdkClient() (*http.Client, error) {
+ 	return httpclient.New(httpclient.Options{
+ 		Timeouts: &httpclient.TimeoutOptions{
+-			Timeout:     30 * time.Second,
++			Timeout:     toolCallTimeout,
+ 			DialTimeout: connectDialTimeout,
+ 		},
+ 	})
