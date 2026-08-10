@@ -60,6 +60,15 @@ def main() -> int:
             raise RuntimeError(result)
         listed = server.list_python_analyses({"_server_context": context})
         inspected = server.inspect_python_analysis({"provenance_ref": result["refs"]["provenance_ref"], "_server_context": context})
+        network_execution = server.execute_opensandbox(
+            json.dumps({"frame": {"schema": {"fields": [{"name": "x", "type": "number"}]}, "data": {"values": [[1]]}}, "validity_rules": []}),
+            "import json, os, socket\ndef blocked(host):\n    try:\n        with socket.create_connection((host, 443), timeout=2):\n            return False\n    except OSError:\n        return True\nprint(json.dumps({'direct_ip_blocked': blocked('1.1.1.1'), 'dns_blocked': blocked('example.com'), 'input_bundle_unlinked': not os.path.exists('/tmp/input-frame.json')}))",
+            42,
+        )
+        stdout_text = "".join(str(item.get("text") or "") for item in network_execution.get("stdout", []))
+        network = json.loads(stdout_text.strip().splitlines()[-1])
+        if network != {"direct_ip_blocked": True, "dns_blocked": True, "input_bundle_unlinked": True}:
+            raise RuntimeError(network_execution)
         evidence = {
             "ok": True,
             "frame_transport": "grafana-columnar-json",
@@ -69,7 +78,9 @@ def main() -> int:
             "validity": result["provenance"]["validity"],
             "cross_conversation": {"listed": len(listed.get("analyses", [])), "inspect_code_sha256": inspected.get("code_sha256")},
             "sandbox_packages_imported": ["numpy", "scipy", "pandas", "matplotlib", "seaborn", "plotly", "scikit-learn", "statsmodels", "shap", "xgboost", "lightgbm", "imbalanced-learn", "optuna"],
+            "runtime_config_attested": len(str(result["provenance"].get("server_config_sha256") or "")) == 64 and result["provenance"].get("runtime_class") == "runc",
             "shap_plot_captured": "image/png" in summary.get("mime_types", []),
+            "egress": network,
             "refs_are_opaque": all(str(value).startswith("artifact://") for value in result["refs"].values()),
         }
     OUT.parent.mkdir(parents=True, exist_ok=True)

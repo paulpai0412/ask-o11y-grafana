@@ -80,7 +80,7 @@
     {
       "name": "Sandbox analysis image package set",
       "status": "adopted-pinned-image-dependencies",
-      "image": "ask-o11y-sandbox-analysis@sha256:31d6545b63f6e8ce2a4ce3fd8f44880939ee455546c108d92e91bba801c54024",
+      "image": "ask-o11y-sandbox-analysis@sha256:370283eff42bb57908ac0599f8b50fc1c76284d30c7dc372e90409924f22961c",
       "pinfile": "sandbox-analysis-mcp/Dockerfile",
       "local_patches": [],
       "components": [

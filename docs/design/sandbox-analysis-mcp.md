@@ -134,8 +134,9 @@ Every call creates one fresh sandbox and kills it in `finally`. Cross-turn kerne
 Additional rules:
 
 - Production refuses an unpinned image and a runtime class other than gVisor/Kata/Firecracker.
-- `runc` requires explicit local-development opt-in.
-- The repository, artifact store, Docker socket, home directory, Grafana credentials, MCP bearer, and process environment are never mounted or injected.
+- The MCP validates `SANDBOX_RUNTIME_CLASS` against the OpenSandbox server TOML used by the control plane, requires `dns+nft` plus disabled IPv6, and records that config hash in provenance. `runc` additionally requires explicit local-development opt-in.
+- The repository, artifact store, Docker socket, home directory, Grafana credentials, MCP bearer, and process environment are never mounted or injected. Trusted bootstrap unlinks the unfiltered input bundle before generated code runs and rewrites the validity audit afterward.
+- MCP HTTP request bodies are bounded before reading; execution exception values remain only in authorized artifacts and are redacted from model-visible errors.
 - Do not add regex/import blacklists. Generated Python may invoke subprocesses inside the sandbox; containment belongs to the sandbox boundary.
 - Provenance records code hash, input ref, image, runtime class, seed, limits, validity filtering and execution metadata.
 

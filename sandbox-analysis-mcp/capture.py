@@ -71,7 +71,7 @@ def run(code: str, bundle_path: str, seed: int) -> None:
     manifest: list[dict[str, str]] = []
     captured_figures: set[int] = set()
     data, audit = load_dataframe(bundle_path, pd)
-    (OUTPUT_DIR / "audit.json").write_text(json.dumps(audit), encoding="utf-8")
+    Path(bundle_path).unlink(missing_ok=True)
 
     def write(name: str, mime_type: str, value: str | bytes) -> None:
         payload = value.encode() if isinstance(value, str) else value
@@ -118,7 +118,9 @@ def run(code: str, bundle_path: str, seed: int) -> None:
         else:
             exec(compile(tree, "<generated-analysis>", "exec"), namespace)
     finally:
+        OUTPUT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         for number in plt.get_fignums():
             if number not in captured_figures:
                 emit(plt.figure(number))
+        (OUTPUT_DIR / "audit.json").write_text(json.dumps(audit), encoding="utf-8")
         (OUTPUT_DIR / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

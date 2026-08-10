@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import tomllib
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -49,6 +50,7 @@ except ValueError:
 SERVER_INFO = {"name": "sandbox-analysis-mcp", "version": "0.1.0"}
 PROTOCOL = "2025-03-26"
 MAX_CODE_BYTES = 32 * 1024
+MAX_RPC_BODY_BYTES = 128 * 1024
 MAX_INPUT_BUNDLE_BYTES = 16 * 1024 * 1024
 MAX_OUTPUT_BYTES = 5 * 1024 * 1024
 DEFAULT_SEED = 42
@@ -156,6 +158,20 @@ def runtime_settings() -> dict[str, str]:
     if runtime_class not in {"gvisor", "kata", "firecracker"}:
         if not (runtime_class == "runc" and os.environ.get("SANDBOX_ALLOW_RUNC") == "1"):
             raise RuntimeError("SANDBOX_RUNTIME_CLASS must be gvisor, kata, or firecracker; runc requires SANDBOX_ALLOW_RUNC=1 for local development")
+    config_path = Path(os.environ.get("SANDBOX_SERVER_CONFIG", ""))
+    if not config_path.is_file():
+        raise RuntimeError("SANDBOX_SERVER_CONFIG must reference the OpenSandbox server TOML used by the control plane")
+    try:
+        config_bytes = config_path.read_bytes()
+        server_config = tomllib.loads(config_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeError(f"cannot validate SANDBOX_SERVER_CONFIG: {exc}") from exc
+    configured_type = str((server_config.get("secure_runtime") or {}).get("type") or "runc").lower()
+    if configured_type != runtime_class:
+        raise RuntimeError(f"SANDBOX_RUNTIME_CLASS {runtime_class!r} does not match control-plane secure_runtime {configured_type!r}")
+    egress = server_config.get("egress") or {}
+    if egress.get("mode") != "dns+nft" or egress.get("disable_ipv6") is not True:
+        raise RuntimeError("OpenSandbox control-plane config must enforce dns+nft egress with IPv6 disabled")
     protocol = os.environ.get("SANDBOX_PROTOCOL", "http").strip().lower()
     if protocol not in {"http", "https"}:
         raise RuntimeError("SANDBOX_PROTOCOL must be http or https")
@@ -163,7 +179,8 @@ def runtime_settings() -> dict[str, str]:
         "image": image,
         "domain": os.environ.get("SANDBOX_DOMAIN", "localhost:8080").strip(),
         "protocol": protocol,
-        "runtime_class": runtime_class,
+        "runtime_class": configured_type,
+        "server_config_sha256": hashlib.sha256(config_bytes).hexdigest(),
     }
 
 
@@ -387,7 +404,7 @@ def execute_python_analysis(
     try:
         context = context_from_args(args)
         source_run_id, frame = read_authorized_frame(context, frame_ref)
-        field_names, _row_count = validate_frame(frame)
+        field_names, row_count = validate_frame(frame)
         validity_rules = read_validity_rules(context, source_run_id, field_names)
         frame_bundle_json = json.dumps({"frame": frame, "validity_rules": validity_rules}, ensure_ascii=False, separators=(",", ":"))
     except (PermissionError, WorkflowContractError, ValueError, TypeError) as exc:
@@ -398,13 +415,20 @@ def execute_python_analysis(
     try:
         execution = executor(frame_bundle_json, python_code, seed)
     except Exception as exc:
-        return error_response(step=step, error=f"sandbox execution unavailable: {type(exc).__name__}: {str(exc)[:500]}", recoverable=False, instruction="Stop; do not execute this code on the MCP host or retry another analysis tool.")
+        return error_response(step=step, error=f"sandbox execution unavailable: {type(exc).__name__}", recoverable=False, instruction="Stop; inspect service-side logs; never expose input data through exception text or execute this code on the MCP host.")
     encoded_execution = json.dumps(execution, ensure_ascii=False).encode("utf-8")
     if len(encoded_execution) > MAX_OUTPUT_BYTES:
         return error_response(step=step, error=f"sandbox output exceeds {MAX_OUTPUT_BYTES} bytes", recoverable=False, instruction="Stop; request smaller displayed outputs.")
     validity = execution.get("input_audit")
-    if not isinstance(validity, dict):
-        return error_response(step=step, error="sandbox execution omitted the trusted input audit", recoverable=False, instruction="Stop; do not trust outputs without validity evidence.")
+    audit_counts = [validity.get(key) for key in ("input_rows", "valid_rows", "excluded_rows")] if isinstance(validity, dict) else []
+    if (
+        not isinstance(validity, dict)
+        or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in audit_counts)
+        or validity.get("input_rows") != row_count
+        or validity.get("valid_rows", 0) + validity.get("excluded_rows", 0) != row_count
+        or validity.get("rules") != validity_rules
+    ):
+        return error_response(step=step, error="sandbox execution returned an invalid trusted input audit", recoverable=False, instruction="Stop; do not trust outputs without host-verified validity evidence.")
     settings = runtime_settings() if executor is execute_opensandbox else {"image": "self-check", "runtime_class": "fake"}
     summary = output_summary(execution)
     output_run_id = ARTIFACTS.create_run(context)
@@ -412,6 +436,7 @@ def execute_python_analysis(
     provenance = {
         "runtime": "opensandbox",
         "runtime_class": settings["runtime_class"],
+        "server_config_sha256": settings.get("server_config_sha256"),
         "image": settings["image"],
         "code_sha256": code_sha256,
         "code_ref": code_ref,
@@ -429,11 +454,12 @@ def execute_python_analysis(
     refs = {"execution_ref": execution_ref, "provenance_ref": provenance_ref}
     if execution.get("error"):
         error = execution["error"]
+        error_name = str(error.get("name", "Error"))[:100] if isinstance(error, dict) else "Error"
         return error_response(
             step=step,
-            error=f"sandbox Python failed: {str(error.get('name', 'Error'))[:100]}: {str(error.get('value', ''))[:500]}",
+            error=f"sandbox Python failed: {error_name}; details retained only in the authorized execution artifact",
             recoverable=False,
-            instruction="Stop and report the sandbox error; do not silently generate and execute replacement code.",
+            instruction="Stop and report the opaque execution_ref; do not expose exception values or silently execute replacement code.",
             evidence={"refs": refs, "code_sha256": code_sha256},
         )
     return success_response(
@@ -595,8 +621,14 @@ class Handler(BaseHTTPRequestHandler):
         if authenticate_headers(self.headers) is None:
             return self._send(401, {"error": "authenticated MCP service identity is required"})
         try:
-            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        except Exception:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            return self._send(400, rpc_error(None, -32700, "invalid Content-Length"))
+        if content_length < 0 or content_length > MAX_RPC_BODY_BYTES:
+            return self._send(413, rpc_error(None, -32000, f"request body exceeds {MAX_RPC_BODY_BYTES} bytes"))
+        try:
+            payload = json.loads(self.rfile.read(content_length))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             return self._send(400, rpc_error(None, -32700, "parse error"))
         messages = payload if isinstance(payload, list) else [payload]
         replies = [reply for message in messages if (reply := handle_rpc(inject_header_context(message, self.headers))) is not None]

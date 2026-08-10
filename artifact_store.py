@@ -50,6 +50,8 @@ class ArtifactAuthError(PermissionError):
 class ArtifactStore:
     def __init__(self, root: str | Path = ".analysis-artifacts/runs", retention_days: int | None = None):
         self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root.chmod(0o700)
         raw_days = retention_days if retention_days is not None else os.environ.get("ANALYSIS_ARTIFACT_RETENTION_DAYS", "7")
         try:
             days = max(0, int(raw_days))
@@ -61,8 +63,9 @@ class ArtifactStore:
         run_id = run_id or f"run_{uuid.uuid4().hex}"
         make_artifact_ref(run_id, "metadata")
         run_dir = self._run_dir(run_id)
-        run_dir.mkdir(parents=True, exist_ok=False)
-        self._metadata_path(run_id).write_text(
+        run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+        metadata_path = self._metadata_path(run_id)
+        metadata_path.write_text(
             json.dumps(
                 {
                     "run_id": run_id,
@@ -76,6 +79,7 @@ class ArtifactStore:
             + "\n",
             encoding="utf-8",
         )
+        metadata_path.chmod(0o600)
         return run_id
 
     def write_json(self, context: dict[str, Any], run_id: str, name: str, value: Any) -> str:
@@ -83,6 +87,7 @@ class ArtifactStore:
         ref = make_artifact_ref(run_id, name)
         path = self._artifact_path(ref)
         path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        path.chmod(0o600)
         return ref
 
     def read_json(self, context: dict[str, Any], ref: str) -> Any:

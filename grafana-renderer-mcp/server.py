@@ -62,6 +62,7 @@ ARTIFACTS.cleanup_expired()
 APPROVAL_TTL_SECONDS = 10 * 60
 APPROVAL_LOCK = threading.Lock()
 MAX_PANELS = 8
+MAX_RPC_BODY_BYTES = 128 * 1024
 MAX_INLINE_IMAGE_BYTES = 3 * 1024 * 1024
 MAX_TEXT_BYTES = 1024 * 1024
 SUPPORTED_MIME_TYPES = {"image/png", "text/html", "text/plain", "application/json"}
@@ -403,6 +404,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if length < 0 or length > MAX_RPC_BODY_BYTES:
+                self._send(413, {"error": f"request body exceeds {MAX_RPC_BODY_BYTES} bytes"})
+                return
             message = json.loads(self.rfile.read(length) or b"{}")
             result = handle_rpc(inject_header_context(message, self.headers))
             self._send(202 if result is None else 200, result)

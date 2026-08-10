@@ -54,6 +54,11 @@ def main() -> int:
 
         if "org-real" in frame_ref or "engineer-a" in frame_ref or str(tmp) in frame_ref:
             raise AssertionError(frame_ref)
+        run_path = Path(tmp) / "runs" / run_id
+        if (Path(tmp) / "runs").stat().st_mode & 0o777 != 0o700 or run_path.stat().st_mode & 0o777 != 0o700:
+            raise AssertionError("artifact directories must be owner-only")
+        if any(path.stat().st_mode & 0o777 != 0o600 for path in run_path.glob("*.json")):
+            raise AssertionError("artifact files must be owner-only")
         if store.read_json(owner, frame_ref) != {"rows": 3}:
             raise AssertionError("owner could not read artifact")
         expect_error(lambda: store.read_json(other, frame_ref), ArtifactAuthError)

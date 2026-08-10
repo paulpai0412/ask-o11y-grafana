@@ -83,6 +83,14 @@ def main() -> int:
             oversized_code = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "x" * (sandbox.MAX_CODE_BYTES + 1), "_server_context": context}, executor=fake_execution)
             checks.append(require("sandbox_oversized_code_rejected", not oversized_code.get("ok") and "exceeds" in oversized_code.get("error", ""), oversized_code))
 
+            def audited_execution(error=None, input_rows=30):
+                return {"execution_id": "security", "results": [], "stdout": [], "stderr": [], "error": error, "complete": {}, "input_audit": {"input_rows": input_rows, "valid_rows": input_rows, "excluded_rows": 0, "rules": []}}
+
+            invalid_audit = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "pass", "_server_context": context}, executor=lambda *_: audited_execution(input_rows=29))
+            checks.append(require("sandbox_forged_audit_rejected", not invalid_audit.get("ok") and "invalid trusted input audit" in invalid_audit.get("error", ""), invalid_audit))
+            redacted_error = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "raise RuntimeError('DO_NOT_EXPOSE')", "_server_context": context}, executor=lambda *_: audited_execution({"name": "RuntimeError", "value": "DO_NOT_EXPOSE"}))
+            checks.append(require("sandbox_exception_value_redacted", not redacted_error.get("ok") and "DO_NOT_EXPOSE" not in json.dumps(redacted_error), redacted_error))
+
             png = base64.b64encode(b"\x89PNG\r\n\x1a\nsecurity").decode()
             execution_ref = store.write_json(context, run_id, "sandbox-execution", {"results": [{"mime": {"image/png": png}}], "stdout": [], "stderr": [], "error": None})
             writes: list[dict[str, Any]] = []

@@ -26,6 +26,7 @@ docker image inspect ask-o11y-sandbox-analysis:dev --format '{{index .RepoDigest
 export SANDBOX_IMAGE='ask-o11y-sandbox-analysis@sha256:<local-digest>'
 export SANDBOX_RUNTIME_CLASS=runc
 export SANDBOX_ALLOW_RUNC=1
+export SANDBOX_SERVER_CONFIG="$PWD/config/opensandbox.local.toml"
 export SANDBOX_DOMAIN=localhost:8080
 export MCP_SHARED_TOKEN='<at-least-32-characters>'
 export ANALYSIS_SERVICE_ORG_ID=1
@@ -38,6 +39,7 @@ Run checks:
 ```bash
 uv run python sandbox-analysis-mcp/server.py --self-check
 uv run python scripts/run-sandbox-analysis-real-spike.py
+MCP_SHARED_TOKEN='<same-token>' uv run python scripts/run-sandbox-analysis-http-revision-e2e.py
 ```
 
 ## Production
