@@ -25,12 +25,12 @@
       "disabled_tools": []
     },
     {
-      "id": "grafana-renderer",
-      "name": "Grafana Renderer Workflow Node",
-      "url_env": "GRAFANA_RENDERER_MCP_URL",
+      "id": "artifact-bridge",
+      "name": "Internal Artifact Binding Bridge",
+      "url_env": "ARTIFACT_BRIDGE_MCP_URL",
       "local_url": "http://127.0.0.1:8773/mcp",
-      "enabled_tools": ["list_visualization_capabilities", "prepare_dashboard_write", "create_temporary_dashboard_preview", "create_dashboard_from_artifacts"],
-      "disabled_tools": []
+      "enabled_tools": [],
+      "disabled_tools": ["resolve_dashboard_refs"]
     }
   ]
 }

@@ -13,7 +13,7 @@
       "copyright": "Copyright (c) 2026 Consensys",
       "notice": "NOTICE#ask-o11y",
       "local_patches": ["patches/ask-o11y-dynamic-tools-and-timeout.patch"],
-      "integration": "only runtime LLM planner; local patch uses the same Ask O11y LLM to select a compact relevant subset from current tool schemas per run, restores only successful opaque refs/identities as compact cross-turn state, and raises the external MCP tool-call deadline from 30 seconds to 10 minutes"
+      "integration": "only runtime LLM planner; local patch dynamically selects tools and embedded Agent Skills, resolves opaque dashboard data bindings host-side, preserves successful refs/dashboard identities across turns, and raises the external MCP tool-call deadline from 30 seconds to 10 minutes"
     },
     {
       "name": "grafana/mcp-grafana",
@@ -22,9 +22,19 @@
       "commit": "130384b1be0ce618e35e0b9c8f38c4ec17bf9367",
       "license": "Apache-2.0",
       "artifact": "grafana/mcp-grafana@sha256:5efeafd01cd7e1aea9c4b0f03305951f2944db8f43e5ae290cce9578c977f241",
-      "status": "evaluated-not-adopted-runtime",
+      "status": "adopted-via-grafana-built-in-mcp",
       "local_patches": [],
-      "reason": "Infinity execution and opaque artifact contracts are incompatible; metadata/RBAC/tool-allowlist patterns remain reference material."
+      "integration": "Ask O11y's built-in Grafana MCP is the sole dashboard writer; mcp-grafana_update_dashboard handles model-authored full JSON or patches under Grafana RBAC and Ask O11y approval. Opaque query/artifact placeholders are resolved before dispatch."
+    },
+    {
+      "name": "grafana/skills",
+      "url": "https://github.com/grafana/skills",
+      "commit": "d9dfb9ec7a6b1ac6c8ec9741ec045ad6f412dec6",
+      "license": "Apache-2.0",
+      "status": "adopted-vendored-skill-subset",
+      "notice": "NOTICE#grafana-skills",
+      "local_patches": [],
+      "integration": "dashboarding SKILL.md and bounded direct references are embedded in the Ask O11y fork, selected dynamically by the same planner LLM, and injected as advisory system context; live tool schemas remain authoritative"
     },
     {
       "name": "modelcontextprotocol/python-sdk",

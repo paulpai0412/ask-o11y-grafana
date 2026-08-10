@@ -2,7 +2,6 @@
 """Security and fail-closed negatives for adaptive MCP trust boundaries."""
 from __future__ import annotations
 
-import base64
 import importlib.util
 import json
 import os
@@ -35,15 +34,14 @@ def main() -> int:
     dqp = load_module("adaptive_dqp_security", ROOT / "data-query-planner-mcp" / "server.py")
     grafana_query = load_module("adaptive_gq_security", ROOT / "grafana-query-mcp" / "server.py")
     sandbox = load_module("adaptive_sandbox_security", ROOT / "sandbox-analysis-mcp" / "server.py")
-    renderer = load_module("adaptive_renderer_security", ROOT / "grafana-renderer-mcp" / "server.py")
+    bridge = load_module("adaptive_bridge_security", ROOT / "artifact-bridge-mcp" / "server.py")
     checks: list[dict[str, Any]] = []
     old_org, old_user = os.environ.pop("ANALYSIS_CONTEXT_ORG_ID", None), os.environ.pop("ANALYSIS_CONTEXT_USER_ID", None)
     try:
         with tempfile.TemporaryDirectory() as tmp:
             store = dqp.ArtifactStore(Path(tmp) / "runs")
-            for module in [dqp, grafana_query, sandbox, renderer]:
+            for module in [dqp, grafana_query, sandbox, bridge]:
                 setattr(module, "ARTIFACTS", store)
-            renderer.GRAFANA_URL = "http://grafana.example.invalid"
             context = {"org_id": "1", "user_id": "security-owner"}
             other = {"org_id": "1", "user_id": "security-other"}
             run_id = store.create_run(context, "run_security_adaptive")
@@ -90,37 +88,27 @@ def main() -> int:
             checks.append(require("sandbox_forged_audit_rejected", not invalid_audit.get("ok") and "invalid trusted input audit" in invalid_audit.get("error", ""), invalid_audit))
             redacted_error = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "raise RuntimeError('DO_NOT_EXPOSE')", "_server_context": context}, executor=lambda *_: audited_execution({"name": "DO_NOT_EXPOSE", "value": "DO_NOT_EXPOSE"}))
             checks.append(require("sandbox_exception_value_redacted", not redacted_error.get("ok") and "DO_NOT_EXPOSE" not in json.dumps(redacted_error), redacted_error))
+            syntax_error = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "x = [{", "_server_context": context}, executor=lambda *_: audited_execution({"name": "SyntaxError", "value": "'[' was never closed"}))
+            checks.append(require("sandbox_syntax_error_recoverable_without_value", not syntax_error.get("ok") and syntax_error.get("recoverable") is True and "SyntaxError" in syntax_error.get("error", "") and "never closed" not in json.dumps(syntax_error), syntax_error))
 
-            png = base64.b64encode(b"\x89PNG\r\n\x1a\nsecurity").decode()
-            execution_ref = store.write_json(context, run_id, "sandbox-execution", {"results": [{"mime": {"image/png": png}}], "stdout": [], "stderr": [], "error": None})
-            writes: list[dict[str, Any]] = []
-
-            def fake_post(dashboard: dict[str, Any]) -> dict[str, Any]:
-                writes.append(dashboard)
-                return {"uid": dashboard["uid"], "url": "/d/security"}
-
-            no_approval = renderer.create_dashboard_from_artifacts({"_server_context": context}, post_fn=fake_post)
-            checks.append(require("renderer_approval_gate_no_write", not no_approval.get("ok") and not writes, no_approval))
-            forged = renderer.create_dashboard_from_artifacts({"approval_ref": f"artifact://{run_id}/render-approval-forged", "_server_context": context}, post_fn=fake_post)
-            checks.append(require("renderer_forged_capability_no_write", not forged.get("ok") and not writes, forged))
-            prepared = renderer.prepare_dashboard_write({"execution_ref": execution_ref, "_server_context": context})
-            checks.append(require("renderer_server_capability_before_preview_no_write", prepared.get("ok") and not writes, prepared))
-            foreign_preview = renderer.create_temporary_dashboard_preview({"approval_ref": prepared.get("approval_ref"), "_server_context": other}, post_fn=fake_post)
-            checks.append(require("renderer_preview_artifact_authorization_no_write", not foreign_preview.get("ok") and not writes and "context mismatch" in foreign_preview.get("error", ""), foreign_preview))
-            previewed = renderer.create_temporary_dashboard_preview({"approval_ref": prepared.get("approval_ref"), "_server_context": context}, post_fn=fake_post)
-            checks.append(require("renderer_temporary_preview_write", previewed.get("ok") and len(writes) == 1 and renderer.PREVIEW_TAG in writes[0].get("tags", []), previewed))
-            renderer_auth = renderer.create_dashboard_from_artifacts({"approval_ref": prepared.get("approval_ref"), "_server_context": other}, post_fn=fake_post)
-            checks.append(require("renderer_artifact_authorization_no_extra_write", not renderer_auth.get("ok") and len(writes) == 1 and "context mismatch" in renderer_auth.get("error", ""), renderer_auth))
-            raw_output = renderer.prepare_dashboard_write({"execution_ref": execution_ref, "results": [], "_server_context": context})
-            checks.append(require("renderer_raw_output_rejected_no_extra_write", not raw_output.get("ok") and len(writes) == 1, raw_output))
-            catalog = lambda: [{"id": "timeseries", "name": "Time series", "description": "time"}]
-            native_unknown = renderer.prepare_dashboard_write({"plan_ref": valid["plan_ref"], "visualizations": [{"title": "Unknown", "panel_type": "timeseries", "fields": ["missing"]}], "_server_context": context}, catalog_fn=catalog)
-            checks.append(require("renderer_native_unknown_field_rejected_no_extra_write", not native_unknown.get("ok") and len(writes) == 1, native_unknown))
-            native_injection = renderer.prepare_dashboard_write({"plan_ref": valid["plan_ref"], "visualizations": [{"title": "Injection", "panel_type": "timeseries", "fields": ["date", "x"], "options": {"url": "http://evil"}}], "_server_context": context}, catalog_fn=catalog)
-            checks.append(require("renderer_native_query_injection_rejected_no_extra_write", not native_injection.get("ok") and len(writes) == 1, native_injection))
-            native_prepared = renderer.prepare_dashboard_write({"plan_ref": valid["plan_ref"], "visualizations": [{"title": "Safe", "panel_type": "timeseries", "fields": ["date", "x"]}], "_server_context": context}, catalog_fn=catalog)
-            native_previewed = renderer.create_temporary_dashboard_preview({"approval_ref": native_prepared.get("approval_ref"), "_server_context": context}, post_fn=fake_post)
-            checks.append(require("renderer_native_preview_is_temporary_write", native_prepared.get("ok") and native_prepared.get("evidence", {}).get("grafana_write") is False and native_previewed.get("ok") and len(writes) == 2 and renderer.PREVIEW_TAG in writes[1].get("tags", []) and native_previewed.get("evidence", {}).get("temporary_preview") is True, native_previewed))
+            execution_ref = store.write_json(context, run_id, "sandbox-execution", {"results": [{"mime": {"text/csv": "date,x,y\n2026-01-01,1,2\n"}, "display_name": "derived.csv"}], "stdout": [], "stderr": [], "error": None})
+            foreign_binding = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$plan_ref": valid["plan_ref"], "fields": ["x"]}]}]}, "_server_context": other})
+            checks.append(require("artifact_bridge_authorization", not foreign_binding.get("ok") and "context mismatch" in foreign_binding.get("error", ""), foreign_binding))
+            unknown_binding = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$plan_ref": valid["plan_ref"], "fields": ["missing"]}]}]}, "_server_context": context})
+            checks.append(require("artifact_bridge_unknown_field_rejected", not unknown_binding.get("ok") and "not authorized" in unknown_binding.get("error", ""), unknown_binding))
+            injected_binding = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$plan_ref": valid["plan_ref"], "fields": ["x"], "url": "http://evil"}]}]}, "_server_context": context})
+            checks.append(require("artifact_bridge_query_injection_rejected", not injected_binding.get("ok") and "unsupported keys" in injected_binding.get("error", ""), injected_binding))
+            raw_target = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"datasource": {"uid": "raw"}, "expr": "up"}]}]}, "_server_context": context})
+            checks.append(require("artifact_bridge_raw_target_rejected", not raw_target.get("ok") and "opaque binding" in raw_target.get("error", ""), raw_target))
+            nested = {"targets": []}
+            for _ in range(bridge.MAX_PANELS):
+                nested = {"targets": [], "panels": [nested]}
+            excessive_panels = bridge.resolve_dashboard_refs({"dashboard": {"panels": [nested]}, "_server_context": context})
+            checks.append(require("artifact_bridge_nested_panel_limit", not excessive_panels.get("ok") and "more than" in excessive_panels.get("error", ""), excessive_panels))
+            resolved = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"type": "trend", "options": {"xField": "date"}, "targets": [{"$plan_ref": valid["plan_ref"], "$execution_ref": execution_ref, "output_index": 0, "fields": ["date", "x", "y"]}]}]}, "_server_context": context})
+            panel = resolved.get("dashboard", {}).get("panels", [{}])[0]
+            checks.append(require("artifact_bridge_preserves_model_panel_json", resolved.get("ok") and panel.get("type") == "trend" and panel.get("options") == {"xField": "date"}, resolved))
+            checks.append(require("artifact_bridge_resolves_refs_without_writes", panel.get("targets", [{}])[0].get("source") == "inline" and [tool["name"] for tool in bridge.TOOLS] == ["resolve_dashboard_refs"], resolved))
 
             runtime_tools = {tool["name"] for tool in dqp.TOOLS}
             checks.append(require("legacy_wferp_route_not_exposed", "plan_wferp_query" not in runtime_tools and "plan_wferp_query" not in dqp.HANDLERS, sorted(runtime_tools)))

@@ -5,14 +5,16 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import csv
 import hashlib
+import io
 import importlib.util
 import json
 import os
 import sys
 import tempfile
 import tomllib
-from datetime import timedelta
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -33,6 +35,7 @@ def load_module(name: str, path: Path):
 workflow_node = load_module("workflow_node", ROOT / "workflow_node.py")
 artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
+artifact_assets = load_module("artifact_assets", ROOT / "artifact_assets.py")
 ArtifactStore = artifact_store.ArtifactStore
 WorkflowContractError = workflow_node.WorkflowContractError
 authenticate_headers = mcp_security.authenticate_headers
@@ -232,7 +235,9 @@ def read_validity_rules(context: dict[str, str], source_run_id: str, field_names
 
 
 def wrapped_code(python_code: str, seed: int) -> str:
-    return f"from capture import run\ntry:\n    run({python_code!r}, '/tmp/input-frame.json', {seed})\nexcept BaseException:\n    raise RuntimeError('generated analysis failed') from None"
+    # The full traceback belongs in the authorized execution artifact; the
+    # model-visible response is redacted separately in execute_python_analysis.
+    return f"from capture import run\nrun({python_code!r}, '/tmp/input-frame.json', {seed})"
 
 
 def serialize_execution(execution: Any) -> dict[str, Any]:
@@ -384,22 +389,62 @@ def execute_opensandbox(frame_bundle_json: str, python_code: str, seed: int) -> 
             sandbox.close()
 
 
+def output_asset_summary(execution: dict[str, Any], execution_ref: str) -> list[dict[str, Any]]:
+    assets = []
+    for index, result in enumerate(execution.get("results", [])):
+        mime = result.get("mime") if isinstance(result, dict) else None
+        if not isinstance(mime, dict) or not isinstance(mime.get("image/png"), str):
+            continue
+        assets.append({
+            "output_index": index,
+            "display_name": result.get("display_name") or f"Output {index + 1}",
+            "mime_type": "image/png",
+            "$execution_ref": execution_ref,
+        })
+    return assets
+
+
 def output_summary(execution: dict[str, Any]) -> dict[str, Any]:
     mime_types = set()
     output_names = []
+    tabular_outputs = []
     stdout_lines = 0
-    for result in execution["results"]:
+    for index, result in enumerate(execution["results"]):
         if result.get("text") is not None:
             mime_types.add("text/plain")
-        mime_types.update(str(key) for key in result.get("mime", {}))
+        mime = result.get("mime", {})
+        mime_types.update(str(key) for key in mime)
         if isinstance(result.get("display_name"), str):
             output_names.append(result["display_name"])
+        csv_data = mime.get("text/csv") if isinstance(mime, dict) else None
+        if isinstance(csv_data, str):
+            reader = csv.DictReader(io.StringIO(csv_data))
+            rows = list(reader)
+            fields = []
+            for name in (reader.fieldnames or [])[:100]:
+                values = [row.get(name, "") for row in rows[:100] if row.get(name, "") != ""]
+                logical_type = "string"
+                if values:
+                    try:
+                        for value in values:
+                            float(value)
+                        logical_type = "number"
+                    except ValueError:
+                        try:
+                            for value in values:
+                                datetime.fromisoformat(value.replace("Z", "+00:00"))
+                            logical_type = "time"
+                        except ValueError:
+                            logical_type = "string"
+                fields.append({"name": name, "type": logical_type})
+            tabular_outputs.append({"output_index": index, "display_name": result.get("display_name") or f"Output {index + 1}", "row_count": len(rows), "fields": fields})
     for item in execution["stdout"]:
         stdout_lines += len(str(item.get("text", "")).splitlines())
     return {
         "result_count": len(execution["results"]),
         "mime_types": sorted(mime_types),
         "output_names": output_names,
+        "tabular_outputs": tabular_outputs,
         "stdout_lines": stdout_lines,
         "stderr_lines": sum(len(str(item.get("text", "")).splitlines()) for item in execution["stderr"]),
     }
@@ -484,9 +529,20 @@ def execute_python_analysis(
         "parent_provenance_ref": parent_provenance_ref,
     }
     execution_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-execution", execution)
+    summary["assets"] = output_asset_summary(execution, execution_ref)
     provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
     refs = {"execution_ref": execution_ref, "provenance_ref": provenance_ref}
-    if execution.get("error"):
+    execution_error = execution.get("error")
+    if execution_error:
+        error_name = execution_error.get("name") if isinstance(execution_error, dict) else None
+        if error_name in {"SyntaxError", "IndentationError"}:
+            return error_response(
+                step=step,
+                error=f"generated Python has a {error_name}; fix the syntax and resubmit complete corrected code",
+                recoverable=True,
+                instruction="Do not rerun the query; call execute_python_analysis once more with the same frame_ref and corrected python_code. Never expose exception values in prose.",
+                evidence={"refs": refs, "code_sha256": code_sha256},
+            )
         return error_response(
             step=step,
             error="sandbox Python failed; details retained only in the authorized execution artifact",
@@ -498,7 +554,7 @@ def execute_python_analysis(
         step=step,
         run_id=output_run_id,
         refs=refs,
-        instruction="Use the opaque execution_ref as analysis evidence. A Grafana dashboard does not exist unless Renderer later returns a dashboard URL.",
+        instruction="Use the opaque execution_ref and output metadata as analysis evidence. A Grafana Dashboard exists only after the approved built-in Grafana writer returns a URL.",
         evidence={"validity": validity},
         output_summary=summary,
         provenance={key: value for key, value in provenance.items() if key != "code_ref"},
@@ -642,6 +698,21 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_GET(self):
+        if self.path.startswith("/assets/"):
+            token = self.path.removeprefix("/assets/").split("?", 1)[0]
+            try:
+                data, mime_type, _display_name = artifact_assets.read_signed_output(token, secret=os.environ.get("MCP_SHARED_TOKEN", ""), artifacts=ARTIFACTS)
+            except (PermissionError, OSError, ValueError):
+                return self._send(403, {"error": "artifact URL is invalid or expired"})
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "private, max-age=300")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+            return
         self._send(405 if self.path.rstrip("/") == "/mcp" else 404, {"error": "POST JSON-RPC to /mcp"})
 
     def do_DELETE(self):

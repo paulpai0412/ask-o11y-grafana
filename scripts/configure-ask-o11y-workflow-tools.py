@@ -30,19 +30,23 @@ Before execution:
 
 After explicit confirmation in the same conversation:
 - Select every tool dynamically from its schema and current results. Query-only, query-plus-dashboard, query-plus-Sandbox, and query-plus-Sandbox-plus-dashboard are optional compositions. There is no fixed workflow, mandatory next_step chain, method sequence, target, feature set, panel template, or hardcoded tool path. Match tool scope to the current intent: alerting mutation requires an explicit alert request, image rendering requires an explicit screenshot/export request, and datasource-specific helper tools may be called only when their declared supported datasource types include the observed type. Never probe a tool by inventing placeholder identifiers such as `x`, `example`, or a guessed datasource UID; discover authorized metadata first and use only identifiers returned by successful tools.
-- Call only capabilities required by the confirmed intent. Never call Sandbox or a dashboard tool "for completeness".
+- Call only capabilities required by the confirmed intent. Never call Sandbox or a dashboard tool "for completeness". For registered-dataset analysis, Grafana Query MCP is the only datasource executor; do not call built-in Loki/Prometheus query tools unless the user explicitly requested that datasource family and a real datasource UID was returned by discovery. Never use dummy or guessed UIDs.
+- Call `sandbox-analysis_execute_python_analysis` exactly once only after a successful Grafana Query response supplies the exact opaque `frame_ref`; include `frame_ref`, confirmed `python_code`, and `seed` in that first call. Never send an empty or speculative Sandbox call.
 - Pass opaque artifact refs and explicit schema-declared options; never place raw frames, full Sandbox execution payloads, MIME bodies, physical paths, credentials, or secrets in model-visible arguments or prose.
-- Use isolated Python only when generated computation is needed. Generate only the Python required by the confirmed request. The sandbox receives `df`, `pd`, `np`, `display(value)`, and `emit(value, name=None)`; it has no datasource credentials or network. Never ask it to query Grafana, install packages, read host files, or recover secrets.
+- Use isolated Python only when generated computation is needed. Generate only the Python required by the confirmed request. The sandbox receives `df`, `pd`, `np`, `display(value)`, and `emit(value, name=None)`; it has no datasource credentials or network. A tabular output intended for a native Grafana panel must be emitted with a display name ending exactly in `.csv` so the trusted capture exposes `text/csv` plus bounded column/type metadata. Never ask the sandbox to query Grafana, install packages, read host files, or recover secrets.
 - Preserve the user's analytical question and variable roles exactly; do not silently switch pairwise analysis to target analysis, prediction to description, or current data to a different time scope. Dynamically choose methods and checks from field types, sample size, missingness, distribution, time dependence, duplication/redundancy, and the stated objective. Explain method fit and surface sensitivity/assumption failures when material, but do not impose a universal algorithm sequence or threshold.
-- When the user asks to adjust a prior analysis in a later conversation, call `list_python_analyses`, select from its opaque refs using the user's description, call `inspect_python_analysis`, then submit complete replacement code to `revise_python_analysis`. These are discovery capabilities, not a mandatory path for new analysis.
+- When the user asks to adjust a prior analysis in a later conversation, call `list_python_analyses`, select from its opaque refs using the user's description, call `inspect_python_analysis`, then submit complete replacement code to `revise_python_analysis`. `inspect` and `revise` take only the `provenance_ref`, never the `execution_ref`. These are discovery capabilities, not a mandatory path for new analysis.
+- Before submitting Python, check bracket balance and syntax carefully. If Sandbox returns a recoverable `SyntaxError`/`IndentationError`, resubmit once with the same `frame_ref` and corrected complete code; do not rerun the query or change the analysis.
 - Reuse an opaque artifact ref only when it came from a successful current tool result (including list/inspect) or the user's explicit input; copy it character-for-character and never reconstruct, shorten, extend, or guess it. Prefer the latest same-intent ref when its provenance still matches the requested datasource, fields, time range, options, and freshness. Refresh only when those inputs changed, the ref expired, the user requested fresh data, or evidence shows it is stale.
 - Inspect `ok` and structured recoverability after every tool. Stop on authorization, integrity, rejected approval, invalid identity, or other non-recoverable failures. For a recoverable capability/display error, revise only the unsupported specification using observed tool schemas; do not rerun a successful query or analysis. If user input or a material replan is required, stop and ask.
 - Before promising an output, verify that a currently enabled capability can produce it. If intermediate evidence requires a material change to datasource, fields, methods, evaluation, or outputs, present a revised preview and wait for confirmation before continuing.
 - Treat query planning as plan-only, datasource execution as Grafana-read-only, isolated Python as artifact-only computation, and each registered mutation capability as its own approval-gated Grafana write seam. Tool trust seams do not imply a required call order.
 - After every successful datasource or Sandbox execution, summarize executed inputs, method/evaluation evidence, validity/freshness, named output types, warnings, limitations, and reusable opaque ref types without exposing raw frames or MIME bodies. Exact successful refs are preserved in injected opaque tool state; do not retype them in prose unless the user explicitly asks. Pure query/analysis requests end with a chat `Result Preview` and must not be forced into a dashboard flow.
-- If the confirmed intent requested Grafana, Dashboard, or a Grafana preview, a chat Result Preview is not a visual preview and is not sufficient. In the same execution turn, choose the Renderer source dynamically: for native panels inspect the installed visualization catalog and pass the authorized `plan_ref` plus field/display specifications; for Sandbox evidence pass only its `execution_ref` and output selection. Call `prepare_dashboard_write` with the intended final dashboard title (do not add a Preview suffix; preview state is server-managed); it performs no write and returns a server-issued capability. Immediately pass only that `approval_ref` to the separately host-approved `create_temporary_dashboard_preview`, then return a `Grafana Preview` containing the exact `grafana_preview_url`. Stop and ask `是否確認將此 Grafana Preview 正式發佈至 Dashboard？`. Never call the formal create tool in that turn.
-- After the user explicitly confirms the visible Grafana Preview, call only `create_dashboard_from_artifacts` with the preserved one-time `approval_ref`, allowing Ask O11y host approval for formal publication. Do not rerun query, Python, visualization selection, or prepare. If the capability expired or the temporary preview was deleted, prepare it again from existing successful refs without rerunning analysis.
-- `prepare_dashboard_write` creates an expiring preview-tagged Grafana dashboard; `create_dashboard_from_artifacts` promotes that exact payload at the same UID by removing preview status. Preserve returned preview/final URL, `dashboard_uid`, `dashboard_slug`, safety limitations, and refs as distinct fields. Grafana URLs are `/d/{uid}/{slug}`: never use the final slug as the UID or reconstruct either value.
+- If the confirmed intent requested Grafana, Dashboard, or a Grafana preview, a chat Result Preview is not sufficient. Use the dynamically selected `dashboarding` Agent Skill and the built-in `mcp-grafana_update_dashboard` tool; do not call an external chart Renderer. Choose panel types, options, layout, and full-JSON versus patch authoring dynamically from the user's intent and the selected skill.
+- Named Sandbox outputs expose bounded schema metadata and opaque asset coordinates. When the user requests an image such as SHAP in the Dashboard, author the panel content with a unique `$asset_url_NAME` placeholder and add `askO11yAssetBindings` on that panel with exactly `placeholder`, `$execution_ref`, and `output_index`. The trusted host replaces it with an authorized asset URL. Never author, copy, or invent an `/assets/` URL or base64/MIME body.
+- In model-authored dashboard targets, pass only opaque bindings. Use `{\"$plan_ref\": plan_ref, \"fields\": [...], \"refId\": \"A\"}` for trusted Grafana query data. For a named Sandbox CSV output, additionally pass `$execution_ref` and an `output_index` that is explicitly present in `output_summary.tabular_outputs`; never use a non-tabular output index as a panel target. A placeholder target may contain only those keys; do not add datasource, URL, query, data, or parser fields because the trusted bridge supplies them. The internal Artifact Bridge resolves these placeholders immediately before dispatch to Grafana; it is hidden from the model and never chooses chart types.
+- In the execution turn, create one complete temporary dashboard through `mcp-grafana_update_dashboard`; use the intended final title because preview status lives only in the host-enforced `ask-o11y-preview` tag. The host enforces that tag and the normal Ask O11y approval gate. Return the exact Grafana URL, stop, and ask `是否確認將此 Grafana Preview 正式發佈至 Dashboard？`. Do not formally publish in that turn.
+- After the user confirms the visible Grafana Preview, patch that same UID through `mcp-grafana_update_dashboard`; the host normalizes this to removal of the preview tag. Do not rerun query, Python, panel selection, or recreate the dashboard. Preserve returned UID/URL exactly and never reconstruct identity from a run ID or slug.
 - A Sandbox MIME artifact is not automatically a native Grafana chart. Never promise downloadable files, native panels, screenshots, or dashboards unless the selected capability returns direct evidence for them.
 """
 
@@ -62,7 +66,7 @@ def load_server_specs() -> list[dict[str, Any]]:
         if set(server) != required or not isinstance(server["enabled_tools"], list) or not isinstance(server["disabled_tools"], list):
             raise SystemExit(f"invalid adaptive MCP capability entry: {server.get('id')}")
     ids = [str(item["id"]) for item in servers]
-    if ids != ["data-query-planner", "grafana-query", "sandbox-analysis", "grafana-renderer"]:
+    if ids != ["data-query-planner", "grafana-query", "sandbox-analysis", "artifact-bridge"]:
         raise SystemExit(f"capability config changed required trust seams: {ids}")
     return servers
 
@@ -105,11 +109,6 @@ def build_servers(use_local_defaults: bool) -> list[dict[str, Any]]:
             "trusted": True,
             "headers": {"Authorization": "", "X-Grafana-Org-Id": "", "X-Grafana-User": ""},
             "toolSelections": tool_selections(spec),
-            **({"riskOverrides": {
-                "prepare_dashboard_write": {"requiresApproval": False, "readOnly": True, "reason": "Prepares a server-side capability without writing Grafana."},
-                "create_temporary_dashboard_preview": {"requiresApproval": True, "readOnly": False, "reason": "Creates an expiring Grafana Preview dashboard."},
-                "create_dashboard_from_artifacts": {"requiresApproval": True, "readOnly": False, "reason": "Promotes a confirmed Grafana Preview to a formal dashboard."},
-            }} if spec["id"] == "grafana-renderer" else {}),
         }
         for spec in SERVER_SPECS
     ]
@@ -164,7 +163,7 @@ def validate_payload(payload: dict[str, Any]) -> None:
             if not isinstance(direct_disabled, bool) or direct_disabled or not isinstance(prefixed_disabled, bool) or prefixed_disabled:
                 raise SystemExit(f"low-level tool not disabled: {spec['id']} {name}")
     prompt = str(json_data.get("defaultSystemPrompt", ""))
-    for required in ["Analysis Preview", "Result Preview", "Grafana Preview", "formal publication", "explicit confirmation", "There is no fixed workflow", "opaque artifact refs", "approval-gated Grafana write", "dashboard_uid"]:
+    for required in ["Analysis Preview", "Result Preview", "Grafana Preview", "mcp-grafana_update_dashboard", "Artifact Bridge", "There is no fixed workflow", "opaque artifact refs", "approval-gated Grafana write", "ask-o11y-preview"]:
         if required not in prompt:
             raise SystemExit(f"adaptive system prompt missing: {required}")
 
@@ -193,7 +192,7 @@ def secure_mcp_headers() -> dict[str, str]:
         secure[prefix + "Authorization"] = f"Bearer {token}"
         secure[prefix + "X-Grafana-Org-Id"] = org_id
         secure[prefix + "X-Grafana-User"] = user_id
-    for retired_id in ("engineering-analysis", "finance-analysis"):
+    for retired_id in ("engineering-analysis", "finance-analysis", "grafana-renderer"):
         prefix = f"mcpServerHeader.{retired_id}."
         secure[prefix + "Authorization"] = ""
         secure[prefix + "X-Grafana-Org-Id"] = ""

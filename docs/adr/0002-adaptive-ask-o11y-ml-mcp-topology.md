@@ -14,7 +14,7 @@ This ADR originally introduced deterministic Engineering and Finance Analysis MC
 - Grafana Query is the only datasource executor used for opaque analysis-frame artifacts.
 - Artifacts are bounded and bound to authenticated org/user context.
 - Ask O11y's built-in Grafana MCP remains available for native dynamic query/dashboard work.
-- Every custom Renderer mutation requires both Ask O11y host approval and a short-lived, exact, one-time server capability.
+- Every Grafana mutation requires Ask O11y host approval; opaque data and asset refs are resolved only at the trusted host boundary.
 - No caller-controlled boolean constitutes write approval.
 - Direct database access, runtime skills, fixed workflow chains, and a universal analysis framework remain rejected.
 - The official MCP Python SDK and `grafana/mcp-grafana` remain evaluated reference implementations rather than adopted runtime dependencies; see `docs/third-party-reuse-manifest.json`.

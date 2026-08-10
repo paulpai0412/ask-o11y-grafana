@@ -10,11 +10,28 @@
     {
       "type": "application",
       "name": "consensys-asko11y-app",
-      "version": "0.3.2+timeout10m",
+      "version": "0.3.2+skills+timeout10m",
       "purl": "pkg:github/Consensys/ask-o11y-plugin@v0.3.2",
       "licenses": [{"license": {"id": "MIT"}}],
       "externalReferences": [{"type": "vcs", "url": "https://github.com/Consensys/ask-o11y-plugin/tree/8395ae1"}],
       "properties": [{"name": "notice", "value": "NOTICE#ask-o11y"}, {"name": "local.patch", "value": "patches/ask-o11y-dynamic-tools-and-timeout.patch"}]
+    },
+    {
+      "type": "data",
+      "name": "grafana-skills-dashboarding",
+      "version": "d9dfb9ec7a6b1ac6c8ec9741ec045ad6f412dec6",
+      "purl": "pkg:github/grafana/skills@d9dfb9ec7a6b1ac6c8ec9741ec045ad6f412dec6",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "externalReferences": [{"type": "vcs", "url": "https://github.com/grafana/skills/tree/d9dfb9ec7a6b1ac6c8ec9741ec045ad6f412dec6"}],
+      "properties": [{"name": "notice", "value": "NOTICE#grafana-skills"}, {"name": "integration", "value": "embedded Ask O11y Agent Skill"}]
+    },
+    {
+      "type": "application",
+      "name": "mcp-grafana-built-in",
+      "version": "130384b1be0ce618e35e0b9c8f38c4ec17bf9367",
+      "purl": "pkg:github/grafana/mcp-grafana@130384b1be0ce618e35e0b9c8f38c4ec17bf9367",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "properties": [{"name": "integration", "value": "Grafana LLM app built-in MCP dashboard writer"}]
     },
     {
       "type": "application",

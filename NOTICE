@@ -7,6 +7,12 @@ License: MIT
 Source: https://github.com/Consensys/ask-o11y-plugin/tree/8395ae1
 Patch: patches/ask-o11y-dynamic-tools-and-timeout.patch
 
+## Grafana Skills
+Copyright Grafana Labs and contributors.
+Licensed under the Apache License 2.0.
+Source: https://github.com/grafana/skills (commit d9dfb9ec7a6b1ac6c8ec9741ec045ad6f412dec6)
+Vendored subset: grafana-core/dashboarding skill and references, embedded in the Ask O11y fork.
+
 This distribution includes or runs with the following third-party components.
 Complete version, source, commit, license, patch, and lock details are recorded in
 `docs/third-party-reuse-manifest.json` and `docs/sbom.json`.

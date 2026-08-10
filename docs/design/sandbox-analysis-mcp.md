@@ -1,58 +1,42 @@
-# Sandboxed Python Analysis MCP
+# Sandboxed Python analysis MCP
 
 Status: implementation design
 
 Branch: `feature/sandbox-analysis-mcp`
 
-Runtime decision: OpenSandbox (`opensandbox==0.1.15`, Apache-2.0)
+Runtime: OpenSandbox (`opensandbox==0.1.15`, Apache-2.0)
 
-## Decision
+## Architecture
 
-Replace the deterministic Engineering and Finance Analysis MCPs with one `sandbox-analysis` MCP. Do not run both paths in parallel. Remove their endpoint registrations, server code, `analysis_core`, fixed method contracts, and method-specific regressions.
-
-Ask O11y remains the only runtime LLM planner. It dynamically selects and composes registered query, Sandbox and Grafana dashboard tools from the prompt, schemas and intermediate results. Query-only, query-plus-dashboard, query-plus-Sandbox, and query-plus-Sandbox-plus-dashboard are all optional compositions; no sequence is mandatory. No central router, fixed DAG, method enum, target workflow, chart enum, panel template, or hardcoded tool path is introduced.
-
-The runtime exposes four independent trust seams:
-
-1. Data Query Planner: plan only.
-2. Grafana Query: sole datasource metadata/read executor; returns an opaque authorized frame ref.
-3. Sandbox Analysis: executes generated Python over that frame in isolation; returns opaque Jupyter output artifacts.
-4. Grafana Renderer: sole approval-gated Grafana writer. Support for publishing Sandbox outputs is a separate follow-up.
-
-## Why OpenSandbox
-
-OpenSandbox supplies sandbox lifecycle, resource controls, Code Interpreter/Jupyter execution, and MIME result capture. The MCP is only an authenticated client; it does not host a container runtime or execute generated source itself.
-
-Local integration may use Docker `runc`. Production execution of untrusted generated code requires an administrator-configured gVisor or Kata runtime. The analysis image must be pinned by digest and preinstall the approved Python packages because runtime network access is denied.
-
-## Topology
+Ask O11y is the only runtime LLM planner. It dynamically selects live tools and up to two embedded Agent Skills. Query-only, query-plus-Dashboard, query-plus-Sandbox, and combined requests are optional compositions; no component prescribes an order, method, target, feature set, panel type, or layout.
 
 ```text
-Ask O11y (only LLM planner)
-  ├─ Data Query Planner MCP
-  ├─ Grafana Query MCP ── authorized frame_ref
+Ask O11y LLM
+  ├─ Data Query Planner MCP (plan only)
+  ├─ Grafana Query MCP (datasource read → opaque frame_ref)
   ├─ Sandbox Analysis MCP
-  │    └─ OpenSandbox service
-  │         └─ fresh Code Interpreter sandbox
-  │              ├─ /tmp/input-frame.json
-  │              ├─ generated Python
-  │              ├─ deny-all egress
-  │              └─ bounded Jupyter MIME/text/error output
-  └─ Grafana Renderer MCP
+  │    └─ fresh OpenSandbox Code Interpreter
+  │         ├─ trusted validity filtering
+  │         ├─ generated Python
+  │         ├─ deny-all egress
+  │         └─ bounded named outputs
+  ├─ embedded Grafana dashboarding Skill (advisory)
+  ├─ hidden Artifact Bridge MCP (opaque binding only)
+  └─ built-in mcp-grafana_update_dashboard (sole Dashboard writer)
 ```
 
-The Sandbox Analysis endpoint binds `127.0.0.1:8777` by default. It reuses the existing service bearer and server-bound org/user identity. Caller-provided identity is discarded and replaced with authenticated HTTP header context.
+The external endpoints bind loopback, require the shared service bearer, and use server-configured org/user identity. Model-visible tools exclude Artifact Bridge. Built-in Grafana mutation still passes Ask O11y's host approval gate.
 
-## MCP contract
+## Sandbox contract
 
-The endpoint exposes four independent capabilities:
+Sandbox Analysis exposes four tools:
 
-- `execute_python_analysis`: start a new revision from an authorized `frame_ref`.
-- `list_python_analyses`: rediscover the authenticated user's recent revision refs.
-- `inspect_python_analysis`: return prior generated source plus compact fields/output metadata, never frame rows.
-- `revise_python_analysis`: execute complete replacement source against a prior revision's authorized frame.
+- `execute_python_analysis`: execute a new revision against one authorized frame.
+- `list_python_analyses`: list retained revisions for the authenticated context.
+- `inspect_python_analysis`: return retained source and compact metadata, never frame rows.
+- `revise_python_analysis`: run complete replacement source against a prior revision's authorized frame.
 
-### `execute_python_analysis`
+A minimal call is:
 
 ```json
 {
@@ -62,62 +46,58 @@ The endpoint exposes four independent capabilities:
 }
 ```
 
-Contract:
+Rules:
 
-- `frame_ref` must resolve to exactly one `grafana-frame` artifact owned by the authenticated org/user.
-- The originating query-plan validity rules travel in the authorized input bundle and are applied by the trusted Sandbox bootstrap before generated code receives `df`. This preserves required `heat_rate_valid` filtering without trusting generated code to remember it.
-- `python_code` is required, UTF-8, and limited to 32 KiB. The MCP hashes and transfers it but never interprets or executes it on the host.
-- `seed` is an optional unsigned 32-bit integer. Python and NumPy are seeded before user code.
-- The sandbox receives `df`, `pd`, `np`, `display(value)`, and `emit(value, name=None)`. Generated code uses those helpers or a final expression for tables, Matplotlib figures, Plotly JSON, HTML, or text; optional output names never control filesystem paths.
-- Raw frames, serialized frame bytes, datasource queries, physical paths, credentials, and complete MIME payloads are not echoed in model-visible execution results. `inspect_python_analysis` intentionally returns only previously generated source so Ask O11y can revise it across conversations.
+- `frame_ref` must be exactly one authorized `grafana-frame`.
+- The trusted input bundle carries native Grafana columnar JSON and query-plan validity rules.
+- Trusted bootstrap constructs and filters `df` before generated code runs, then unlinks the input bundle.
+- Source is UTF-8 and limited to 32 KiB. The MCP hashes and transfers it but never executes it locally.
+- The sandbox receives `df`, `pd`, `np`, `display(value)`, and `emit(value, name=None)`.
+- A table intended for a native panel is emitted with a display name ending in `.csv`; trusted capture records `text/csv`, row count, field names, and logical types.
+- Output names are sanitized metadata and never filesystem paths.
+- Raw frames, query bodies, physical paths, credentials, full MIME payloads, stdout values, and exception values are not returned to the model.
 
-Success returns only opaque refs and compact evidence:
+Success returns opaque refs, validity evidence, provenance, and compact output metadata:
 
 ```json
 {
   "ok": true,
-  "step": "execute_python_analysis",
-  "run_id": "run_…",
   "refs": {
     "execution_ref": "artifact://run_…/sandbox-execution",
     "provenance_ref": "artifact://run_…/sandbox-provenance"
   },
   "output_summary": {
-    "result_count": 3,
-    "mime_types": ["image/png", "text/html", "text/plain"],
-    "stdout_lines": 1
-  },
-  "provenance": {
-    "runtime": "opensandbox",
-    "code_sha256": "…",
-    "input_frame_ref": "artifact://run_…/grafana-frame",
-    "seed": 42,
-    "network": "deny"
+    "result_count": 2,
+    "tabular_outputs": [
+      {
+        "output_index": 0,
+        "display_name": "importance.csv",
+        "row_count": 16,
+        "fields": [
+          {"name": "feature", "type": "string"},
+          {"name": "mean_abs_shap", "type": "number"}
+        ]
+      }
+    ],
+    "assets": [
+      {
+        "output_index": 1,
+        "display_name": "shap.png",
+        "mime_type": "image/png",
+        "$execution_ref": "artifact://run_…/sandbox-execution"
+      }
+    ]
   }
 }
 ```
 
-The execution artifact contains bounded stdout/stderr, structured error information, and Jupyter result items (`text` and MIME-keyed properties). A separate server-side artifact retains source plus hash for audit. Artifact reads remain org/user authorized.
+A failure returns a bounded classification and authorized diagnostic refs. It never falls back to host execution.
 
-A sandbox error returns `ok=false` with a bounded error summary and opaque diagnostic refs. Ask O11y stops that run; it must not silently generate replacement code or fall back to host execution.
+## Data transport and isolation
 
-## Data transfer decision
+Grafana DataFrames remain columnar JSON (`schema.fields` plus `data.values`). CSV and SQLite are not input intermediaries because they lose typing or duplicate decoding and lifecycle work. Arrow IPC or Parquet is deferred until measurement proves JSON material to performance.
 
-Grafana query responses use Grafana DataFrames encoded as columnar JSON (`schema.fields` plus `data.values`). The Sandbox MCP preserves that representation in a bounded `/tmp/input-frame.json` bundle together with server-authorized validity rules. The trusted in-image bootstrap constructs `df` and applies validity filtering inside the sandbox before generated code runs.
-
-Do not convert the frame to CSV on the MCP host. CSV adds formatting/parsing work and loses type information. Do not create an intermediate SQLite database: Grafana `/api/ds/query` does not return a SQLite file, so the Query or Sandbox MCP would still have to decode every frame value and insert it, while also owning database schema mapping, file lifecycle, locking and authorization. Letting Sandbox open a datasource SQLite file directly would also bypass the Grafana-only query boundary.
-
-If measured frame sizes later make JSON transfer material, adopt Arrow IPC or Parquet as an artifact encoding. That is a measured optimization, not a workflow change; Grafana remains the query executor and Ask O11y still chooses tools dynamically.
-
-## Cross-conversation revision
-
-The original authorized `grafana-frame` artifact, generated Python, execution outputs and provenance are retained server-side for the configured retention period. The ephemeral input file and sandbox are deleted after each call.
-
-`list_python_analyses`, `inspect_python_analysis`, and `revise_python_analysis` let a later Ask O11y conversation rediscover a prior revision, retrieve its generated source and compact metadata without frame rows, then execute replacement code against the same authorized frame. No persistent kernel is required. The locally installed Ask O11y 0.3.2 backend carries `patches/ask-o11y-dynamic-tools-and-timeout.patch`, one operational patch that uses the same Ask O11y LLM to select a compact relevant subset from current tool schemas per run, restores only successful opaque refs and identities as compact cross-turn state, and raises its hardcoded external MCP tool-call deadline from 30 seconds to 10 minutes so it does not terminate a still-bounded Sandbox run early. Apply it to tag `v0.3.2`, build the Linux backend with Go 1.26.5, replace `gpx_consensys-asko11y-app_linux_amd64`, remove the now-invalid signed `MANIFEST.txt`, and enable only this plugin ID through `GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS` for the local PoC.
-
-## Isolation policy
-
-Every call creates one fresh sandbox and kills it in `finally`. Cross-turn kernel persistence is deliberately excluded; Ask O11y restores only compact successful opaque refs/identities and reconstructs no kernel, raw frame, MIME payload, or full tool result.
+Every call creates and destroys one sandbox. No kernel persists across turns.
 
 | Control | Limit |
 | --- | ---: |
@@ -125,72 +105,92 @@ Every call creates one fresh sandbox and kills it in `finally`. Cross-turn kerne
 | CPU | 1 |
 | memory | 1 GiB |
 | source | 32 KiB |
-| injected columnar frame bundle | 16 MiB |
-| captured execution JSON | 5 MiB |
+| input bundle | 16 MiB |
+| captured execution | 5 MiB |
 | egress | deny all |
-| sandbox credentials | none |
+| credentials | none |
 | host volumes | none |
 
-Additional rules:
+Production rejects unpinned images and unapproved runtime classes. The MCP verifies the OpenSandbox TOML network/runtime settings and records its hash. `runc` requires explicit local-development opt-in. No regex or import blacklist is used; containment belongs to the sandbox boundary.
 
-- Production refuses an unpinned image and a runtime class other than gVisor/Kata/Firecracker.
-- The MCP validates `SANDBOX_RUNTIME_CLASS` against the OpenSandbox server TOML used by the control plane, requires `dns+nft` plus disabled IPv6, and records that config hash in provenance. `runc` additionally requires explicit local-development opt-in.
-- The repository, artifact store, Docker socket, home directory, Grafana credentials, MCP bearer, and process environment are never mounted or injected. Trusted bootstrap unlinks the unfiltered input bundle before generated code runs and rewrites the validity audit afterward.
-- MCP HTTP request bodies are bounded before reading; execution exception values remain only in authorized artifacts and are redacted from model-visible errors.
-- Do not add regex/import blacklists. Generated Python may invoke subprocesses inside the sandbox; containment belongs to the sandbox boundary.
-- Provenance records code hash, input ref, image, runtime class, seed, limits, validity filtering and execution metadata.
+## Dashboard authoring and opaque binding
 
-## Dynamic tool composition and rendering
+Sandbox output is evidence, not a Dashboard. When Grafana output is requested:
 
-No component prescribes a query→analysis→render path. Ask O11y's built-in Grafana MCP remains enabled, so it may dynamically query, return data, or call native dashboard tools when no Sandbox computation is needed. External Planner/Grafana Query remain available when an authorized opaque `frame_ref` is required for Sandbox. Ask O11y selects among these schemas; Sandbox is not a mandatory intermediary.
+1. The Ask O11y LLM selects the embedded dashboarding Skill and reads live built-in tool schemas.
+2. The LLM authors the complete Dashboard JSON, including panel types, options, layout, and opaque bindings.
+3. The host invokes hidden `artifact-bridge_resolve_dashboard_refs`.
+4. The bridge validates artifact ownership and replaces only trusted data/asset placeholders.
+5. The host dispatches the resolved Dashboard to approved built-in `mcp-grafana_update_dashboard`.
 
-Sandbox execution is not itself a Grafana write. Pure query/analysis requests end with a chat Result Preview. When the confirmed intent requested Grafana output, a chat summary is not considered a visual preview: Ask O11y must call Renderer after execution to prepare a server-issued exact capability, then use it in a separately host-approved call that creates an expiring preview-tagged Grafana dashboard and returns its exact URL. It then stops for explicit publication confirmation. A later host-approved call promotes the exact preview payload at the same UID; it does not rerun analysis or visualization selection.
+A native query target is model-authored as:
 
-Renderer discovers the live installed Grafana panel catalog instead of prescribing panel types or order. For native panels it consumes an authorized `plan_ref` plus schema-declared visualization specs containing only installed panel type, authorized field names and bounded display options; query body and datasource identity come from the trusted plan. A visualization may optionally bind a named bounded `text/csv` output from an authorized `execution_ref` to a native inline Infinity query. For artifact panels Renderer still supports Matplotlib/SHAP PNG, allowlist-sanitized HTML, plain text, CSV and JSON. It never accepts raw frames, MIME bodies, datasource identity, panel targets or query bodies from the model. Plotly JSON remains an analysis artifact unless an installed compatible panel can consume a trusted representation. This is one optional capability selected from schemas, not a hardcoded orchestrator step or analysis-specific endpoint.
+```json
+{
+  "$plan_ref": "artifact://run_…/query-plan",
+  "fields": ["date", "value"],
+  "refId": "A"
+}
+```
 
-Preview preparation returns a short-lived one-time capability without writing; the approved temporary-preview call consumes it and returns `grafana_preview_url`, `preview_dashboard_uid`, and expiration. The temporary dashboard is tagged `ask-o11y-preview` and scheduled for deletion on expiry unless the exact payload is promoted first. Successful publication removes preview status and returns `dashboard_uid`, `dashboard_slug`, and `dashboard_url` separately; the UID is unchanged and the slug is never reused as the UID. `emit(value, name=...)` preserves a bounded sanitized display name without using it as a physical path; names ending in `.csv` produce bounded `text/csv` artifacts and native table-compatible data. A claimed downloadable file still requires direct download evidence.
+A named CSV target additionally uses `$execution_ref` and `output_index`. If its fields are omitted, the bridge binds the actual bounded CSV header; it never guesses fields. The trusted plan supplies datasource identity, URL/query body, parser, and column mapping.
 
-## Repository migration
+For an image, the LLM authors its chosen panel and an opaque URL placeholder:
 
-Remove:
+```json
+{
+  "type": "text",
+  "options": {
+    "mode": "html",
+    "content": "<img src=\"$asset_url_shap\" alt=\"SHAP output\">"
+  },
+  "askO11yAssetBindings": [
+    {
+      "placeholder": "$asset_url_shap",
+      "$execution_ref": "artifact://run_…/sandbox-execution",
+      "output_index": 1
+    }
+  ]
+}
+```
 
-- `engineering-analysis-mcp/`
-- `finance-analysis-mcp/`
-- `analysis_core/`
-- Engineering/Finance capability entries and environment requirements
-- fixed analysis method/E2E scripts that have no Sandbox equivalent
+The bridge validates the output and replaces the placeholder with a signed URL. It does not generate the `<img>`, select the text panel, transform PNG into HTML, or write Grafana. The Sandbox asset endpoint validates the signature, retention deadline, and artifact authorization, then streams the stored bytes with their trusted MIME type.
 
-Add or change:
+The bridge rejects every nonempty target without an opaque binding, including mixed dashboards that combine authorized and raw datasource targets. It also rejects model-authored datasource/query/URL bodies, physical artifact URLs, unsupported fields, foreign refs, unresolved placeholders, excessive total nested panels/targets/assets, and oversized dashboards.
 
-- `sandbox-analysis-mcp/server.py` and its trusted in-image DataFrame/output bootstrap
-- the `sandbox-analysis` capability entry
-- Ask O11y instructions for generated Python and sandbox failure behavior
-- OpenSandbox dependency pins plus the pinned tabular/ML image set: NumPy, SciPy, pandas, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, Optuna, and Noto CJK fonts
-- lockfile, SBOM, NOTICE, and reuse manifest
-- artifact cleanup entries for Sandbox code, execution, and provenance
-- focused Sandbox authentication, authorization, limits, MIME, validity, and cleanup checks
+## Preview and publication lifecycle
 
-Planner, Grafana Query, ArtifactStore authorization, and Renderer approval remain intact.
+The execution turn must create one complete Dashboard JSON. The host normalizes `ask-o11y-preview` to the first tag, records the writer-returned UID under org/user/session identity, disables all further tools, and lets the final response return the real URL and request confirmation. The intended final title is used; visible Preview state is only the tag.
+
+After explicit confirmation, the capability selector exposes only built-in Dashboard read/update tools. The host ignores any model-selected UID, derives the reviewed UID from its lifecycle record, reads the Dashboard, verifies both UID and first tag, and only then removes `$.tags[0]`. Missing state, selector uncertainty, UID mismatch, or missing Preview tag fails closed. A successful publication consumes the lifecycle record. This prevents query, Python, Skill selection, or panel regeneration in the publication turn.
+
+Only a successful built-in Grafana write and returned URL prove a Dashboard exists. A Sandbox output alone does not.
+
+## Cross-conversation recovery
+
+Artifacts persist for the configured retention period. Ask O11y compacts only successful refs, output schemas, and Dashboard identities into later turns. List/inspect/revise recover analysis source and provenance without restoring raw frames, MIME bodies, complete tool responses, or kernels.
+
+The reproducible Ask O11y v0.3.2 integration patch is `patches/ask-o11y-dynamic-tools-and-timeout.patch`. It contains dynamic capability/Skill selection, embedded dashboarding references, opaque binding middleware, Preview/publication enforcement, successful-state compaction, and the 10-minute external MCP timeout.
 
 ## Acceptance criteria
 
-1. Runtime capability config contains exactly Planner, Grafana Query, Sandbox Analysis, and Renderer.
-2. No Engineering/Finance MCP server, tool registration, `analysis_core`, or active method-specific test remains.
-3. Sandbox `tools/list` exposes only `execute_python_analysis`, `list_python_analyses`, `inspect_python_analysis`, and `revise_python_analysis`.
-4. Missing/forged identity, foreign ref, raw-frame arguments and oversized code fail before sandbox creation.
-5. The authorized Grafana columnar frame and validity rules are injected as bounded JSON; the trusted bootstrap constructs filtered `df`, and raw data is absent from the model-visible result.
-6. Captured named table/CSV/image MIME results are stored behind opaque authorized refs with bounded provenance; display names never control paths.
-7. Sandbox policy has deny-all egress, fixed CPU/memory/lifetime, empty environment and no volumes; cleanup is unconditional.
-8. If OpenSandbox is unavailable, the MCP fails closed and never executes Python locally.
-9. Later conversations can list, inspect and revise authorized analyses without persistent sandboxes or raw frame disclosure.
-10. The generic Renderer accepts only authorized plan/Sandbox refs, resolves datasource/query identity server-side, validates installed panel/field/display specs, and requires both its exact one-time capability and Ask O11y host approval before mutation.
-11. Grafana dashboard tools remain optional capabilities selected by Ask O11y, not hardcoded next steps; pure analysis returns Result Preview, while requested Grafana output returns an actual expiring Grafana Preview URL before separately confirmed publication.
-12. Preview and published dashboard use the same UID; UID, slug and URL are returned separately, and native-panel E2E evidence proves non-text preview panels contain query targets.
+1. Runtime config contains exactly Planner, Grafana Query, Sandbox Analysis, and hidden Artifact Bridge endpoints.
+2. Engineering/Finance Analysis, `analysis_core`, external Renderer tools, and method-specific runtime paths are absent.
+3. Grafana remains the only datasource executor; Sandbox has no datasource credentials.
+4. Missing identity, foreign refs, raw frames, unsupported arguments, and oversized inputs fail closed.
+5. Trusted validity filtering runs before generated code and is verified against the source row count.
+6. Sandbox execution has deny-all egress, bounded resources/output, no credentials, no volumes, and unconditional cleanup.
+7. Named CSV/image outputs remain behind authorized refs; signed URLs are host-resolved and never authored by the model.
+8. Artifact Bridge preserves model-authored panels/options, resolves only authorized bindings, and exposes no Grafana write tool.
+9. Preview is a real tagged Dashboard; publication removes the tag on the same UID without rerunning query or Python.
+10. E2E proves SHAP PNG visibility, native CSV Bar chart data, dynamic XY authoring, built-in-only publication, and absence of model-visible bridge calls.
+11. Production deployment adds OpenSandbox authentication and gVisor, Kata, or Firecracker; local `runc` evidence is not production attestation.
 
 ## Deferred
 
 - Multiple input frames.
-- Pre-warmed pools.
-- Cross-turn notebooks.
-- Inline Ask O11y Jupyter display.
-- Production gVisor/Kata installation and image attestation.
+- Pre-warmed sandbox pools.
+- Persistent kernels.
+- Arrow/Parquet transport before measured need.
+- Persistent download service beyond artifact retention.
+- Grafana Image Renderer for screenshots or PDF exports.

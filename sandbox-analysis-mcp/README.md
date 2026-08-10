@@ -42,9 +42,16 @@ uv run python scripts/run-sandbox-analysis-real-spike.py
 MCP_SHARED_TOKEN='<same-token>' uv run python scripts/run-sandbox-analysis-http-revision-e2e.py
 ```
 
+## Serving authorized image assets
+
+`GET /assets/<signed-token>` validates the token and artifact retention before streaming stored bytes with their trusted MIME type. It does not generate charts, HTML, or panel JSON. Tokens are created only by the hidden Artifact Bridge from an authorized execution ref and output index.
+
+For local Grafana use, the bridge defaults `ARTIFACT_PUBLIC_BASE` to `http://127.0.0.1:8777`. A non-local deployment must set it to the authenticated/TLS asset-gateway URL reachable by the Grafana user's browser.
+
 ## Production
 
 - Configure OpenSandbox with gVisor or Kata; do not enable `SANDBOX_ALLOW_RUNC`.
 - Pin and publish the custom image by digest.
 - Enable OpenSandbox API authentication and set `SANDBOX_API_KEY` only in the MCP process; it is never injected into a sandbox.
 - Keep deny-all egress, empty sandbox environment, no volumes, 1 CPU, 1 GiB memory, 10-minute lifetime, and bounded input/output.
+- Put the signed asset endpoint behind TLS and set `ARTIFACT_PUBLIC_BASE` to its browser-reachable URL; do not use loopback outside local development.
