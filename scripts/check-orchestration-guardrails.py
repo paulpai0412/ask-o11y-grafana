@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live guardrails for adaptive five-endpoint orchestration."""
+"""Live guardrails for adaptive four-endpoint orchestration."""
 from __future__ import annotations
 
 import json
@@ -26,8 +26,7 @@ MCP_HEADERS = {"Content-Type": "application/json", "Authorization": f"Bearer {MC
 SERVERS = {
     "data-query-planner": required_env("DATA_QUERY_PLANNER_MCP_URL"),
     "grafana-query": required_env("GRAFANA_QUERY_MCP_URL"),
-    "engineering-analysis": required_env("ENGINEERING_ANALYSIS_MCP_URL"),
-    "finance-analysis": required_env("FINANCE_ANALYSIS_MCP_URL"),
+    "sandbox-analysis": required_env("SANDBOX_ANALYSIS_MCP_URL"),
     "grafana-renderer": required_env("GRAFANA_RENDERER_MCP_URL"),
 }
 
@@ -89,7 +88,7 @@ def main() -> int:
     valid_token_forged_identity = {server: unauthenticated_status(server, {"Authorization": f"Bearer {MCP_SHARED_TOKEN}", "X-Grafana-Org-Id": "999", "X-Grafana-User": "attacker"}) for server in SERVERS}
     checks.append(require("live_mcp_requires_service_authentication", set(unauthenticated.values()) == {401} and set(forged_identity.values()) == {401} and set(wrong_token.values()) == {401} and set(valid_token_forged_identity.values()) == {401}, {"no_token": unauthenticated, "forged_identity_without_token": forged_identity, "wrong_token": wrong_token, "valid_token_forged_identity": valid_token_forged_identity}))
     live_tools = {server: tool_names(server) for server in SERVERS}
-    expected = {"data-query-planner": ["plan_query", "validate_query"], "grafana-query": ["discover_datasets", "inspect_dataset", "execute_planned_query"], "engineering-analysis": ["analyze_profile", "analyze_correlation", "analyze_predictive", "analyze_patterns", "analyze_timeseries"], "finance-analysis": ["analyze_cost_drivers", "analyze_variance"], "grafana-renderer": ["prepare_dashboard_write", "create_dashboard_from_analysis"]}
+    expected = {"data-query-planner": ["plan_query", "validate_query"], "grafana-query": ["discover_datasets", "inspect_dataset", "execute_planned_query"], "sandbox-analysis": ["execute_python_analysis", "list_python_analyses", "inspect_python_analysis", "revise_python_analysis"], "grafana-renderer": ["prepare_dashboard_write", "create_dashboard_from_artifacts"]}
     checks.append(require("live_endpoint_toolsets", live_tools == expected, live_tools))
     unknown_property_results = {f"{server}.{tool}": mcp_call(server, tool, {"unexpected": True}) for server, tools in live_tools.items() for tool in tools}
     checks.append(require("all_live_tools_reject_unknown_properties", all(not result.get("ok") and "unsupported tool arguments" in result.get("error", "") for result in unknown_property_results.values()), unknown_property_results))
@@ -102,15 +101,13 @@ def main() -> int:
     checks.append(require("grafana_query_requires_plan_ref", not query_missing.get("ok"), query_missing))
     query_raw = mcp_call("grafana-query", "execute_planned_query", {"plan_ref": "artifact://run_fake/query-plan", "query": {}})
     checks.append(require("grafana_query_rejects_raw_query", not query_raw.get("ok") and "unsupported" in query_raw.get("error", ""), query_raw))
-    engineering_raw = mcp_call("engineering-analysis", "analyze_correlation", {"frame_ref": "artifact://run_fake/grafana-frame", "fields": ["x", "y"], "frames": []})
-    checks.append(require("engineering_rejects_raw_frame", not engineering_raw.get("ok") and "unsupported" in engineering_raw.get("error", ""), engineering_raw))
-    finance_direct = mcp_call("finance-analysis", "analyze_cost_drivers", {"frame_ref": "artifact://run_fake/grafana-frame", "target": "cost", "drivers": ["volume"], "fiscal_period_field": "period", "currency": "USD", "datasource_uid": "secret"})
-    checks.append(require("finance_rejects_direct_datasource", not finance_direct.get("ok") and "unsupported" in finance_direct.get("error", ""), finance_direct))
-    renderer_raw = mcp_call("grafana-renderer", "create_dashboard_from_analysis", {"analysis_result": {}})
-    checks.append(require("renderer_rejects_raw_analysis", not renderer_raw.get("ok") and "unsupported" in renderer_raw.get("error", ""), renderer_raw))
-    renderer_unapproved = mcp_call("grafana-renderer", "create_dashboard_from_analysis", {"analysis_result_ref": "artifact://run_fake/analysis-result"})
+    sandbox_raw = mcp_call("sandbox-analysis", "execute_python_analysis", {"frame_ref": "artifact://run_fake/grafana-frame", "python_code": "df.describe()", "frames": []})
+    checks.append(require("sandbox_rejects_raw_frame", not sandbox_raw.get("ok") and "unsupported" in sandbox_raw.get("error", ""), sandbox_raw))
+    renderer_raw = mcp_call("grafana-renderer", "prepare_dashboard_write", {"execution_ref": "artifact://run_fake/sandbox-execution", "results": []})
+    checks.append(require("renderer_rejects_raw_mime", not renderer_raw.get("ok") and "unsupported" in renderer_raw.get("error", ""), renderer_raw))
+    renderer_unapproved = mcp_call("grafana-renderer", "create_dashboard_from_artifacts", {})
     checks.append(require("renderer_requires_server_capability", not renderer_unapproved.get("ok") and "approval_ref" in renderer_unapproved.get("error", ""), renderer_unapproved))
-    renderer_forged = mcp_call("grafana-renderer", "create_dashboard_from_analysis", {"analysis_result_ref": "artifact://run_fake/analysis-result", "approval_ref": "artifact://run_fake/render-approval-forged"})
+    renderer_forged = mcp_call("grafana-renderer", "create_dashboard_from_artifacts", {"approval_ref": "artifact://run_fake/render-approval-forged"})
     checks.append(require("renderer_rejects_forged_capability", not renderer_forged.get("ok"), renderer_forged))
 
     inspected = mcp_call("grafana-query", "inspect_dataset", {"dataset_id": "u1-operating-daily"})
@@ -124,11 +121,10 @@ def main() -> int:
     settings = load_json(ROOT / ".scratch" / "poc" / "ask-o11y-workflow-tools-settings.json")
     servers = settings.get("mcpServers") or settings.get("jsonData", {}).get("mcpServers") or []
     settings_blob = json.dumps(settings, ensure_ascii=False).lower()
-    checks.append(require("main_settings_five_endpoints", len(servers) == 5 and all(server in settings_blob for server in ["data-query-planner", "grafana-query", "engineering-analysis", "finance-analysis", "grafana-renderer"]), servers))
+    checks.append(require("main_settings_four_endpoints", len(servers) == 4 and all(server in settings_blob for server in ["data-query-planner", "grafana-query", "sandbox-analysis", "grafana-renderer"]), servers))
+    settings_json = settings.get("jsonData", settings) if isinstance(settings, dict) else {}
+    checks.append(require("ask_o11y_builtin_grafana_capabilities_enabled", settings_json.get("useBuiltInMCP") is True, settings_json.get("useBuiltInMCP")))
     checks.append(require("legacy_fixed_tools_not_registered", all(marker not in settings_blob for marker in ["scientific-method", "thermal-power-analysis", "analyze_process_variation"]), settings_blob[:500]))
-    differentiation = load_json(ROOT / ".scratch" / "poc" / "engineering-intent-differentiation.json")
-    checks.append(require("fresh_intents_have_distinct_contracts", bool(differentiation.get("ok")) and differentiation.get("after_fix", {}).get("tool_traces_distinct") and differentiation.get("after_fix", {}).get("visualizations_distinct"), differentiation.get("after_fix")))
-
     out = {"ok": True, "checks": checks, "live_tools": live_tools}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

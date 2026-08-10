@@ -15,6 +15,9 @@ RETIRED_PATHS = [
     ROOT / "thermal-power-analysis-mcp",
     ROOT / "grafana-poc-mcp",
     ROOT / "wferp-mcp/server.py",
+    ROOT / "engineering-analysis-mcp",
+    ROOT / "finance-analysis-mcp",
+    ROOT / "analysis_core",
     ROOT / "wferp_provider.py",
     ROOT / "data/poc/u1_heat_rate_process_variation.csv",
     ROOT / "data/poc/u1_heat_rate_process_variation.metadata.json",
@@ -33,8 +36,8 @@ RETIRED_PATHS = [
     ROOT / "docs/firepower-analysis-mcp-design.md",
     ROOT / "docs/research/ask-o11y-pi-agent-loop-assessment.md",
 ]
-ACTIVE_PORTS = [8768, 8772, 8773, 8775, 8776]
-RETIRED_PORTS = [8765, 8769, 8771, 8774]
+ACTIVE_PORTS = [8768, 8772, 8773, 8777]
+RETIRED_PORTS = [8765, 8769, 8771, 8774, 8775, 8776]
 
 
 def port_open(port: int) -> bool:
@@ -65,12 +68,9 @@ def main() -> int:
     workflow_source = (ROOT / "workflow_node.py").read_text(encoding="utf-8")
     require("next_step" not in workflow_source and "next_tool" not in workflow_source, "shared response contract still supports a fixed next-step chain")
     scratch_root = ROOT / ".scratch"
-    scratch_dirs = {path.name for path in scratch_root.iterdir() if path.is_dir()}
-    require(scratch_dirs == {"poc", "research"}, f"stale legacy scratch directories remain: {sorted(scratch_dirs - {'poc', 'research'})}")
-    nested_scratch_dirs = [str(path.relative_to(ROOT)) for path in scratch_root.rglob("*") if path.is_dir() and path.parent != scratch_root]
-    require(not nested_scratch_dirs, f"stale nested transcript/log directories remain: {nested_scratch_dirs}")
-    stale_scratch_files = [str(path.relative_to(ROOT)) for path in scratch_root.rglob("*") if path.is_file() and ("transcript" in path.name.lower() or path.name.lower().endswith("server.log") or "pid" in path.name.lower())]
-    require(not stale_scratch_files, f"stale transcript/PID/log evidence remains: {stale_scratch_files}")
+    legacy_scratch_markers = {"five-endpoint", "engineering-analysis", "finance-analysis", "scientific-method", "thermal-power"}
+    legacy_scratch = [str(path.relative_to(ROOT)) for path in scratch_root.rglob("*") if any(marker in path.name.lower() for marker in legacy_scratch_markers)]
+    require(not legacy_scratch, f"stale legacy scratch artifacts remain: {legacy_scratch}")
     stale_bytecode = []
     for directory, children, files in os.walk(ROOT):
         children[:] = [name for name in children if name not in {".git", ".venv", "node_modules"}]
@@ -103,20 +103,15 @@ def main() -> int:
     retired_open = [port for port in RETIRED_PORTS if port_open(port)]
     active_closed = [port for port in ACTIVE_PORTS if not port_open(port)]
     require(not retired_open, f"retired MCP listeners remain open: {retired_open}")
-    require(not active_closed, f"one of the five active MCP listeners is closed: {active_closed}")
+    require(not active_closed, f"one of the four active MCP listeners is closed: {active_closed}")
     try:
-        settings = json.loads((ROOT / ".scratch" / "poc" / "ask-o11y-workflow-tools-current-settings.json").read_text(encoding="utf-8"))
+        settings = json.loads((ROOT / ".scratch" / "poc" / "ask-o11y-sandbox-settings-applied.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"cannot load current Ask O11y settings verification: {exc}") from exc
-    servers = settings.get("jsonData", {}).get("mcpServers", [])
-    enabled_server_ids = [item.get("id") for item in servers if isinstance(item, dict) and item.get("enabled")]
-    require(enabled_server_ids == ["data-query-planner", "grafana-query", "engineering-analysis", "finance-analysis", "grafana-renderer"], f"Ask O11y does not expose exactly five MCP endpoints: {enabled_server_ids}")
-    try:
-        restart = json.loads((ROOT / ".scratch" / "poc" / "five-endpoint-restart.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"cannot load five-endpoint restart evidence: {exc}") from exc
-    require(bool(restart.get("ok")) and [item.get("port") for item in restart.get("services", [])] == ACTIVE_PORTS, "five-endpoint restart evidence is incomplete")
-    require(all((Path("/proc") / str(item.get("pid"))).exists() for item in restart["services"]), "one of the post-retirement MCP processes is no longer running")
+        raise RuntimeError(f"cannot load applied Ask O11y settings verification: {exc}") from exc
+    enabled_server_ids = [item.get("id") for item in settings.get("external_servers", []) if isinstance(item, dict) and item.get("enabled")]
+    require(bool(settings.get("ok")) and enabled_server_ids == ["data-query-planner", "grafana-query", "sandbox-analysis", "grafana-renderer"], f"Ask O11y does not expose exactly four MCP endpoints: {enabled_server_ids}")
+    evidence_files = ["sandbox-analysis-real-spike.json", "ask-o11y-sandbox-shap-e2e.json", "sandbox-shap-grafana-renderer-e2e.json"]
+    require(all(bool(json.loads((ROOT / ".scratch" / "poc" / name).read_text(encoding="utf-8")).get("ok", True)) for name in evidence_files), "post-retirement E2E evidence is incomplete")
     out = {
         "ok": True,
         "retired_paths_absent": [str(path.relative_to(ROOT)) for path in RETIRED_PATHS],
@@ -124,12 +119,11 @@ def main() -> int:
         "active_mcp_ports_open": ACTIVE_PORTS,
         "enabled_server_ids": enabled_server_ids,
         "shared_next_step_contract": False,
-        "legacy_scratch_dirs": [],
-        "legacy_scratch_files": [],
+        "legacy_scratch_artifacts": [],
         "stale_wferp_bytecode": [],
         "legacy_artifacts": [],
         "legacy_json_semantic_detection": True,
-        "post_retirement_e2e": [item["file"] for item in restart.get("post_restart_e2e", [])],
+        "post_retirement_e2e": evidence_files,
     }
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

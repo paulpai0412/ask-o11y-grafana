@@ -2,6 +2,7 @@
 """Security and fail-closed negatives for adaptive MCP trust boundaries."""
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import os
@@ -33,18 +34,15 @@ def require(name: str, condition: bool, details: Any) -> dict[str, Any]:
 def main() -> int:
     dqp = load_module("adaptive_dqp_security", ROOT / "data-query-planner-mcp" / "server.py")
     grafana_query = load_module("adaptive_gq_security", ROOT / "grafana-query-mcp" / "server.py")
-    engineering = load_module("adaptive_engineering_security", ROOT / "engineering-analysis-mcp" / "server.py")
-    finance = load_module("adaptive_finance_security", ROOT / "finance-analysis-mcp" / "server.py")
+    sandbox = load_module("adaptive_sandbox_security", ROOT / "sandbox-analysis-mcp" / "server.py")
     renderer = load_module("adaptive_renderer_security", ROOT / "grafana-renderer-mcp" / "server.py")
     checks: list[dict[str, Any]] = []
     old_org, old_user = os.environ.pop("ANALYSIS_CONTEXT_ORG_ID", None), os.environ.pop("ANALYSIS_CONTEXT_USER_ID", None)
     try:
         with tempfile.TemporaryDirectory() as tmp:
             store = dqp.ArtifactStore(Path(tmp) / "runs")
-            for module in [dqp, grafana_query, engineering, finance, renderer]:
+            for module in [dqp, grafana_query, sandbox, renderer]:
                 setattr(module, "ARTIFACTS", store)
-            renderer.CHART_OUTPUT_DIR = Path(tmp) / "charts"
-            renderer.CHART_URL_BASE = "http://example.invalid/analysis"
             renderer.GRAFANA_URL = "http://grafana.example.invalid"
             context = {"org_id": "1", "user_id": "security-owner"}
             other = {"org_id": "1", "user_id": "security-other"}
@@ -73,42 +71,35 @@ def main() -> int:
 
             frame = {"schema": {"fields": [{"name": "date"}, {"name": "x"}, {"name": "y"}, {"name": "constant_class"}]}, "data": {"values": [[f"2026-01-{day:02d}" for day in range(1, 31)], list(range(30)), [value * 2 for value in range(30)], ["same"] * 30]}}
             frame_ref = store.write_json(context, run_id, "grafana-frame", [frame])
-            raw_frame = engineering.correlation_analysis({"frame_ref": frame_ref, "fields": ["x", "y"], "frame": frame, "_server_context": context})
-            checks.append(require("engineering_raw_frame_rejected", not raw_frame.get("ok") and "forbidden" in raw_frame.get("error", ""), raw_frame))
-            direct_datasource = engineering.correlation_analysis({"frame_ref": frame_ref, "fields": ["x", "y"], "datasource_uid": "csv-poc", "_server_context": context})
-            checks.append(require("engineering_direct_datasource_rejected", not direct_datasource.get("ok") and "forbidden" in direct_datasource.get("error", ""), direct_datasource))
-            engineering_auth = engineering.correlation_analysis({"frame_ref": frame_ref, "fields": ["x", "y"], "_server_context": other})
-            checks.append(require("engineering_artifact_authorization", not engineering_auth.get("ok") and "context mismatch" in engineering_auth.get("error", ""), engineering_auth))
-            method_failure = engineering.high_level_analysis("analyze_predictive", {"frame_ref": frame_ref, "target": "constant_class", "features": ["x"], "task": "classification", "model_family": "linear", "_server_context": context})
-            checks.append(require("engineering_method_failure_stops", not method_failure.get("ok") and "at least two classes" in method_failure.get("error", ""), method_failure))
+            def fake_execution(*_args):
+                return {"execution_id": "security", "execution_count": 1, "exit_code": 0, "results": [], "stdout": [], "stderr": [], "error": None, "complete": {"timestamp": 1, "execution_time_in_millis": 1}}
 
-            finance_direct = finance.analyze_cost_drivers({"frame_ref": frame_ref, "target": "y", "drivers": ["x"], "currency": "USD", "fiscal_period_field": "date", "datasource_uid": "csv-poc", "_server_context": context})
-            checks.append(require("finance_direct_datasource_rejected", not finance_direct.get("ok") and "forbidden" in finance_direct.get("error", ""), finance_direct))
-            finance_auth = finance.analyze_cost_drivers({"frame_ref": frame_ref, "target": "y", "drivers": ["x"], "currency": "USD", "fiscal_period_field": "date", "_server_context": other})
-            checks.append(require("finance_artifact_authorization", not finance_auth.get("ok") and "context mismatch" in finance_auth.get("error", ""), finance_auth))
+            raw_frame = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "df.describe()", "frame": frame, "_server_context": context}, executor=fake_execution)
+            checks.append(require("sandbox_raw_frame_rejected", not raw_frame.get("ok") and "unsupported" in raw_frame.get("error", ""), raw_frame))
+            direct_datasource = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "df.describe()", "datasource_uid": "csv-poc", "_server_context": context}, executor=fake_execution)
+            checks.append(require("sandbox_direct_datasource_rejected", not direct_datasource.get("ok") and "unsupported" in direct_datasource.get("error", ""), direct_datasource))
+            sandbox_auth = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "df.describe()", "_server_context": other}, executor=fake_execution)
+            checks.append(require("sandbox_artifact_authorization", not sandbox_auth.get("ok") and "context mismatch" in sandbox_auth.get("error", ""), sandbox_auth))
+            oversized_code = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "x" * (sandbox.MAX_CODE_BYTES + 1), "_server_context": context}, executor=fake_execution)
+            checks.append(require("sandbox_oversized_code_rejected", not oversized_code.get("ok") and "exceeds" in oversized_code.get("error", ""), oversized_code))
 
-            source = {"mode": "deterministic_library", "implementation": "security-check", "method": "table", "algorithm": "identity", "algorithm_version": "1", "libraries": [{"name": "pandas", "version": "3.0.5"}], "runtime_agent": False, "runtime_llm": False, "runtime_skill": False}
-            method_ref = store.write_json(context, run_id, "method-security", {"method": "table", "method_source": source})
-            analysis = {"analysis_type": "security", "title": "Security", "summary": "Security check.", "severity": "info", "time_range": {"from": None, "to": None}, "subject": {"domain": "check"}, "findings": [{"level": "info", "message": "ready"}], "data_frames": [{"name": "table", "schema": {"fields": [{"name": "x"}, {"name": "y"}]}, "data": {"values": [[1, 2], [2, 4]]}}], "recommended_panels": [{"type": "table", "title": "Table", "data_frame": "table"}], "details": {"method_result_refs": {"security": method_ref}, "method_source": source}}
-            analysis_ref = store.write_json(context, run_id, "analysis-security", analysis)
+            png = base64.b64encode(b"\x89PNG\r\n\x1a\nsecurity").decode()
+            execution_ref = store.write_json(context, run_id, "sandbox-execution", {"results": [{"mime": {"image/png": png}}], "stdout": [], "stderr": [], "error": None})
             writes: list[dict[str, Any]] = []
 
             def fake_post(dashboard: dict[str, Any]) -> dict[str, Any]:
                 writes.append(dashboard)
                 return {"uid": dashboard["uid"], "url": "/d/security"}
 
-            no_approval = renderer.render_analysis({"analysis_result_ref": analysis_ref, "_server_context": context}, post_fn=fake_post)
+            no_approval = renderer.create_dashboard_from_artifacts({"_server_context": context}, post_fn=fake_post)
             checks.append(require("renderer_approval_gate_no_write", not no_approval.get("ok") and not writes, no_approval))
-            forged = renderer.render_analysis({"analysis_result_ref": analysis_ref, "approval_ref": "artifact://run_security01/render-approval-forged", "_server_context": context}, post_fn=fake_post)
+            forged = renderer.create_dashboard_from_artifacts({"approval_ref": f"artifact://{run_id}/render-approval-forged", "_server_context": context}, post_fn=fake_post)
             checks.append(require("renderer_forged_capability_no_write", not forged.get("ok") and not writes, forged))
-            prepared = renderer.prepare_dashboard_write({"analysis_result_ref": analysis_ref, "_server_context": context})
-            renderer_auth = renderer.render_analysis({"analysis_result_ref": analysis_ref, "approval_ref": prepared.get("approval_ref"), "_server_context": other}, post_fn=fake_post)
+            prepared = renderer.prepare_dashboard_write({"execution_ref": execution_ref, "_server_context": context})
+            renderer_auth = renderer.create_dashboard_from_artifacts({"approval_ref": prepared.get("approval_ref"), "_server_context": other}, post_fn=fake_post)
             checks.append(require("renderer_artifact_authorization_no_write", not renderer_auth.get("ok") and not writes and "context mismatch" in renderer_auth.get("error", ""), renderer_auth))
-            inconsistent = dict(analysis)
-            inconsistent["recommended_panels"] = [{"type": "scatter", "title": "Bad", "data_frame": "table", "x": "missing", "y": ["y"]}]
-            inconsistent_ref = store.write_json(context, run_id, "analysis-inconsistent", inconsistent)
-            inconsistent_out = renderer.prepare_dashboard_write({"analysis_result_ref": inconsistent_ref, "_server_context": context})
-            checks.append(require("renderer_inconsistent_spec_no_write", not inconsistent_out.get("ok") and not writes, inconsistent_out))
+            raw_output = renderer.prepare_dashboard_write({"execution_ref": execution_ref, "results": [], "_server_context": context})
+            checks.append(require("renderer_raw_output_rejected_no_write", not raw_output.get("ok") and not writes, raw_output))
 
             runtime_tools = {tool["name"] for tool in dqp.TOOLS}
             checks.append(require("legacy_wferp_route_not_exposed", "plan_wferp_query" not in runtime_tools and "plan_wferp_query" not in dqp.HANDLERS, sorted(runtime_tools)))

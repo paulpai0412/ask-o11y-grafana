@@ -2,49 +2,73 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
   "serialNumber": "urn:uuid:7d99a6c4-57ac-4d75-9b94-4fd7779acae8",
-  "version": 1,
+  "version": 3,
   "metadata": {
-    "component": {
-      "type": "application",
-      "name": "adaptive-ask-o11y-ml-platform",
-      "version": "poc-v1"
-    }
+    "component": {"type": "application", "name": "adaptive-ask-o11y-ml-platform", "version": "sandbox-poc-v1"}
   },
   "components": [
     {
-      "type": "library",
-      "name": "pandas",
-      "version": "3.0.5",
-      "purl": "pkg:pypi/pandas@3.0.5",
-      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
-      "externalReferences": [{"type": "vcs", "url": "https://github.com/pandas-dev/pandas/tree/e68db09ecf6427d1b62e565bacf17f2e525a3032"}],
-      "properties": [{"name": "notice", "value": "NOTICE#pandas"}, {"name": "lockfile", "value": "uv.lock"}]
+      "type": "application",
+      "name": "opensandbox-server",
+      "version": "0.2.2",
+      "purl": "pkg:pypi/opensandbox-server@0.2.2",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "externalReferences": [{"type": "vcs", "url": "https://github.com/opensandbox-group/OpenSandbox/tree/207d94c7dc7735c143856fe5c6538b743e478786"}],
+      "properties": [{"name": "notice", "value": "NOTICE#opensandbox-server"}, {"name": "runtime.pin", "value": "uvx opensandbox-server==0.2.2"}]
     },
     {
       "type": "library",
-      "name": "scikit-learn",
-      "version": "1.9.0",
-      "purl": "pkg:pypi/scikit-learn@1.9.0",
-      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
-      "externalReferences": [{"type": "vcs", "url": "https://github.com/scikit-learn/scikit-learn/tree/77def0ed6e3beab57244885d2a584470e96c103d"}],
-      "properties": [{"name": "notice", "value": "NOTICE#scikit-learn"}, {"name": "lockfile", "value": "uv.lock"}]
+      "name": "opensandbox",
+      "version": "0.1.15",
+      "purl": "pkg:pypi/opensandbox@0.1.15",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "externalReferences": [{"type": "vcs", "url": "https://github.com/opensandbox-group/OpenSandbox/tree/e9d0a63919739b1bed05914373acbacb11e37d43"}],
+      "properties": [{"name": "notice", "value": "NOTICE#opensandbox"}, {"name": "lockfile", "value": "uv.lock"}]
     },
     {
       "type": "library",
-      "name": "statsmodels",
-      "version": "0.14.6",
-      "purl": "pkg:pypi/statsmodels@0.14.6",
-      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
-      "externalReferences": [{"type": "vcs", "url": "https://github.com/statsmodels/statsmodels/tree/40e6a84d26ac74623c6b94b718f0987ef0351c53"}],
-      "properties": [{"name": "notice", "value": "NOTICE#statsmodels"}, {"name": "lockfile", "value": "uv.lock"}]
+      "name": "opensandbox-code-interpreter",
+      "version": "0.1.2",
+      "purl": "pkg:pypi/opensandbox-code-interpreter@0.1.2",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "externalReferences": [{"type": "vcs", "url": "https://github.com/opensandbox-group/OpenSandbox/tree/4609a56ef2a48d028caaccd8bff4aa9bff3549a4"}],
+      "properties": [{"name": "notice", "value": "NOTICE#opensandbox-code-interpreter"}, {"name": "lockfile", "value": "uv.lock"}]
     },
+    {
+      "type": "container",
+      "name": "opensandbox/code-interpreter",
+      "version": "v1.1.0",
+      "purl": "pkg:docker/opensandbox/code-interpreter@sha256:133a3c1720dd52291a019740c2987e7164ea6de79e23d8198798e58950ae2e6e",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "properties": [{"name": "derived.image", "value": "sandbox-analysis-mcp/Dockerfile"}]
+    },
+    {
+      "type": "container",
+      "name": "ask-o11y-sandbox-analysis",
+      "version": "sandbox-poc-v1",
+      "purl": "pkg:docker/ask-o11y-sandbox-analysis@sha256:31d6545b63f6e8ce2a4ce3fd8f44880939ee455546c108d92e91bba801c54024",
+      "properties": [{"name": "definition", "value": "sandbox-analysis-mcp/Dockerfile"}, {"name": "base.digest", "value": "sha256:133a3c1720dd52291a019740c2987e7164ea6de79e23d8198798e58950ae2e6e"}]
+    },
+    {"type": "library", "name": "numpy", "version": "2.4.6", "purl": "pkg:pypi/numpy@2.4.6", "licenses": [{"license": {"id": "BSD-3-Clause"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "scipy", "version": "1.18.0", "purl": "pkg:pypi/scipy@1.18.0", "licenses": [{"license": {"id": "BSD-3-Clause"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "pandas", "version": "3.0.5", "purl": "pkg:pypi/pandas@3.0.5", "licenses": [{"license": {"id": "BSD-3-Clause"}}], "properties": [{"name": "notice", "value": "NOTICE#pandas"}, {"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "matplotlib", "version": "3.11.1", "purl": "pkg:pypi/matplotlib@3.11.1", "licenses": [{"license": {"name": "PSF/BSD-compatible"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "seaborn", "version": "0.13.2", "purl": "pkg:pypi/seaborn@0.13.2", "licenses": [{"license": {"id": "BSD-3-Clause"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "plotly", "version": "6.9.0", "purl": "pkg:pypi/plotly@6.9.0", "licenses": [{"license": {"id": "MIT"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "scikit-learn", "version": "1.9.0", "purl": "pkg:pypi/scikit-learn@1.9.0", "licenses": [{"license": {"id": "BSD-3-Clause"}}], "properties": [{"name": "notice", "value": "NOTICE#scikit-learn"}, {"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "statsmodels", "version": "0.14.6", "purl": "pkg:pypi/statsmodels@0.14.6", "licenses": [{"license": {"id": "BSD-3-Clause"}}], "properties": [{"name": "notice", "value": "NOTICE#statsmodels"}, {"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "shap", "version": "0.52.0", "purl": "pkg:pypi/shap@0.52.0", "licenses": [{"license": {"id": "MIT"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "xgboost-cpu", "version": "3.4.0", "purl": "pkg:pypi/xgboost-cpu@3.4.0", "licenses": [{"license": {"id": "Apache-2.0"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "lightgbm", "version": "4.7.0", "purl": "pkg:pypi/lightgbm@4.7.0", "licenses": [{"license": {"id": "MIT"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "imbalanced-learn", "version": "0.14.2", "purl": "pkg:pypi/imbalanced-learn@0.14.2", "licenses": [{"license": {"id": "MIT"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "optuna", "version": "4.9.0", "purl": "pkg:pypi/optuna@4.9.0", "licenses": [{"license": {"id": "MIT"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
     {
       "type": "application",
       "name": "yesoreyeram-infinity-datasource",
       "version": "3.11.2",
       "licenses": [{"license": {"id": "Apache-2.0"}}],
       "externalReferences": [{"type": "vcs", "url": "https://github.com/grafana/grafana-infinity-datasource/tree/6d00d4d7fafc0c9371f71a60bb90842477186836"}],
-      "properties": [{"name": "notice", "value": "NOTICE#grafana-infinity-datasource"}, {"name": "runtime", "value": "Grafana datasource plugin"}, {"name": "compose.pin", "value": "yesoreyeram-infinity-datasource 3.11.2"}]
+      "properties": [{"name": "notice", "value": "NOTICE#grafana-infinity-datasource"}, {"name": "runtime", "value": "Grafana datasource plugin"}]
     },
     {
       "type": "application",

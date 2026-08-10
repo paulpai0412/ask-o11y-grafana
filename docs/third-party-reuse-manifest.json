@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "notice": "NOTICE",
   "sbom": "docs/sbom.json",
   "sources": [
@@ -26,43 +26,78 @@
       "evidence": ".scratch/poc/mcp-python-sdk-compatibility-spike.json"
     },
     {
+      "name": "opensandbox-group/OpenSandbox Server",
+      "url": "https://github.com/opensandbox-group/OpenSandbox",
+      "tag": "server/v0.2.2",
+      "commit": "207d94c7dc7735c143856fe5c6538b743e478786",
+      "license": "Apache-2.0",
+      "status": "adopted-separate-runtime",
+      "copyright": "Copyright 2025 Alibaba Group Holding Ltd.",
+      "notice": "NOTICE#opensandbox-server",
+      "local_patches": [],
+      "pin": "uvx opensandbox-server==0.2.2",
+      "integration": "separately operated Docker/Kubernetes sandbox lifecycle service; local config is runc-only development, production requires gVisor or Kata"
+    },
+    {
+      "name": "opensandbox-group/OpenSandbox Python SDK",
+      "url": "https://github.com/opensandbox-group/OpenSandbox",
+      "tag": "python/sandbox/v0.1.15",
+      "commit": "e9d0a63919739b1bed05914373acbacb11e37d43",
+      "license": "Apache-2.0",
+      "status": "adopted-locked-dependency",
+      "copyright": "Copyright 2025 Alibaba Group Holding Ltd.",
+      "notice": "NOTICE#opensandbox",
+      "local_patches": [],
+      "lockfile": "uv.lock",
+      "integration": "client SDK for separately operated isolated sandbox lifecycle, files, resources, network policy, and cleanup"
+    },
+    {
+      "name": "opensandbox-group/OpenSandbox Code Interpreter Python SDK",
+      "url": "https://github.com/opensandbox-group/OpenSandbox",
+      "tag": "python/code-interpreter/v0.1.2",
+      "commit": "4609a56ef2a48d028caaccd8bff4aa9bff3549a4",
+      "license": "Apache-2.0",
+      "status": "adopted-locked-dependency",
+      "copyright": "Copyright 2025 Alibaba Group Holding Ltd.",
+      "notice": "NOTICE#opensandbox-code-interpreter",
+      "local_patches": [],
+      "lockfile": "uv.lock",
+      "integration": "Code Interpreter execution transport; trusted in-image capture.py compensates for SDK v0.1.2 not preserving rich display payloads"
+    },
+    {
       "name": "pandas-dev/pandas",
       "url": "https://github.com/pandas-dev/pandas",
       "tag": "v3.0.5",
       "commit": "e68db09ecf6427d1b62e565bacf17f2e525a3032",
       "license": "BSD-3-Clause",
-      "status": "adopted-locked-dependency",
+      "status": "adopted-pinned-image-dependency",
       "copyright": "Copyright (c) 2008-2011 AQR Capital Management, LLC, Lambda Foundry, Inc. and PyData Development Team; Copyright (c) 2011-2026 Open source contributors",
       "notice": "NOTICE#pandas",
       "local_patches": [],
-      "lockfile": "uv.lock",
-      "integration": "released dependency in deterministic domain analysis runtime"
+      "pinfile": "sandbox-analysis-mcp/Dockerfile",
+      "integration": "trusted in-sandbox Grafana columnar-frame to DataFrame construction and generated analysis runtime"
     },
     {
-      "name": "scikit-learn/scikit-learn",
-      "url": "https://github.com/scikit-learn/scikit-learn",
-      "tag": "1.9.0",
-      "commit": "77def0ed6e3beab57244885d2a584470e96c103d",
-      "license": "BSD-3-Clause",
-      "status": "adopted-locked-dependency",
-      "copyright": "Copyright (c) 2007-2026 The scikit-learn developers",
-      "notice": "NOTICE#scikit-learn",
+      "name": "Sandbox analysis image package set",
+      "status": "adopted-pinned-image-dependencies",
+      "image": "ask-o11y-sandbox-analysis@sha256:31d6545b63f6e8ce2a4ce3fd8f44880939ee455546c108d92e91bba801c54024",
+      "pinfile": "sandbox-analysis-mcp/Dockerfile",
       "local_patches": [],
-      "lockfile": "uv.lock",
-      "integration": "released dependency for supervised/unsupervised methods"
-    },
-    {
-      "name": "statsmodels/statsmodels",
-      "url": "https://github.com/statsmodels/statsmodels",
-      "tag": "v0.14.6",
-      "commit": "40e6a84d26ac74623c6b94b718f0987ef0351c53",
-      "license": "BSD-3-Clause",
-      "status": "adopted-locked-dependency",
-      "copyright": "Copyright (C) 2006 Jonathan E. Taylor; Copyright (c) 2006-2008 Scipy Developers; Copyright (c) 2009-2018 statsmodels Developers",
-      "notice": "NOTICE#statsmodels",
-      "local_patches": [],
-      "lockfile": "uv.lock",
-      "integration": "released dependency for statistical inference and deterministic forecasting where required"
+      "components": [
+        {"name": "numpy", "version": "2.4.6", "license": "BSD-3-Clause", "url": "https://github.com/numpy/numpy"},
+        {"name": "scipy", "version": "1.18.0", "license": "BSD-3-Clause", "url": "https://github.com/scipy/scipy"},
+        {"name": "matplotlib", "version": "3.11.1", "license": "PSF-2.0/BSD-compatible", "url": "https://github.com/matplotlib/matplotlib"},
+        {"name": "seaborn", "version": "0.13.2", "license": "BSD-3-Clause", "url": "https://github.com/mwaskom/seaborn"},
+        {"name": "plotly", "version": "6.9.0", "license": "MIT", "url": "https://github.com/plotly/plotly.py"},
+        {"name": "scikit-learn", "version": "1.9.0", "license": "BSD-3-Clause", "url": "https://github.com/scikit-learn/scikit-learn"},
+        {"name": "statsmodels", "version": "0.14.6", "license": "BSD-3-Clause", "url": "https://github.com/statsmodels/statsmodels"},
+        {"name": "shap", "version": "0.52.0", "license": "MIT", "url": "https://github.com/shap/shap"},
+        {"name": "xgboost-cpu", "version": "3.4.0", "license": "Apache-2.0", "url": "https://github.com/dmlc/xgboost"},
+        {"name": "lightgbm", "version": "4.7.0", "license": "MIT", "url": "https://github.com/microsoft/LightGBM"},
+        {"name": "imbalanced-learn", "version": "0.14.2", "license": "MIT", "url": "https://github.com/scikit-learn-contrib/imbalanced-learn"},
+        {"name": "optuna", "version": "4.9.0", "license": "MIT", "url": "https://github.com/optuna/optuna"}
+      ],
+      "integration": "preinstalled offline analysis and rich-output libraries available only inside the network-denied custom sandbox image"
     },
     {
       "name": "grafana/grafana-infinity-datasource",

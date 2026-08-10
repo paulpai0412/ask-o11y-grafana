@@ -29,6 +29,10 @@ LARGE_ARTIFACT_NAMES = {
     "method-validation",
     "datasource-catalog",
     "dataset-metadata",
+    "sandbox-code",
+    "sandbox-execution",
+    "sandbox-provenance",
+    "dashboard",
 }
 LARGE_ARTIFACT_PREFIXES = (
     "method-engineering-",
@@ -88,6 +92,24 @@ class ArtifactStore:
             return json.loads(self._artifact_path(ref).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise WorkflowContractError(f"cannot read artifact: {ref}") from exc
+
+    def list_refs(self, context: dict[str, Any], name: str, limit: int = 20) -> list[str]:
+        make_artifact_ref("run_probe0", name)
+        refs = []
+        metadata_paths = sorted(self.root.glob("run_*/metadata.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        for metadata_path in metadata_paths:
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if str(context.get("org_id", "")) != metadata.get("org_id") or str(context.get("user_id", "")) != metadata.get("user_id"):
+                continue
+            ref = make_artifact_ref(metadata_path.parent.name, name)
+            if self._artifact_path(ref).is_file():
+                refs.append(ref)
+                if len(refs) == limit:
+                    break
+        return refs
 
     def cleanup_expired(self, now: float | None = None) -> dict[str, int]:
         now = time.time() if now is None else now

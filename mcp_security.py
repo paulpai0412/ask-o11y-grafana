@@ -1,4 +1,4 @@
-"""Authenticated local HTTP boundary shared by the five adaptive MCP servers."""
+"""Authenticated local HTTP boundary shared by the adaptive MCP servers."""
 from __future__ import annotations
 
 import hmac

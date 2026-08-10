@@ -46,6 +46,8 @@ def main() -> int:
         frame_ref = store.write_json(owner, run_id, "grafana-frame", {"rows": 3})
         analysis_ref = store.write_json(owner, run_id, "analysis-result", {"data_frames": [{"rows": 3}]})
         summary_ref = store.write_json(owner, run_id, "evidence", {"ok": True})
+        sandbox_ref = store.write_json(owner, run_id, "sandbox-provenance", {"code_sha256": "abc"})
+        store.write_json(owner, run_id, "dashboard", {"dashboard": {"panels": [{"content": "data:image/png;base64,..."}]}})
         chart_dir = chart_root / run_id
         chart_dir.mkdir(parents=True)
         (chart_dir / "panel.csv").write_text("a,b\n1,2\n", encoding="utf-8")
@@ -57,6 +59,8 @@ def main() -> int:
         expect_error(lambda: store.read_json(other, frame_ref), ArtifactAuthError)
         expect_error(lambda: store.read_json(owner, "artifact://run_artifact01/../secret"), WorkflowContractError)
         expect_error(lambda: store.read_json(owner, "artifact://run_artifact01/path/to/file"), WorkflowContractError)
+        if store.list_refs(owner, "sandbox-provenance") != [sandbox_ref] or store.list_refs(other, "sandbox-provenance"):
+            raise AssertionError("artifact listing did not enforce owner context")
 
         meta = Path(tmp) / "runs" / run_id / "metadata.json"
         try:
@@ -72,9 +76,9 @@ def main() -> int:
             __import__("os").environ.pop("ANALYSIS_CSV_OUTPUT_DIR", None)
         else:
             __import__("os").environ["ANALYSIS_CSV_OUTPUT_DIR"] = old_chart_root
-        if removed != {"removed_large": 2, "removed_runs": 0, "removed_chart_files": 1}:
+        if removed != {"removed_large": 4, "removed_runs": 0, "removed_chart_files": 1}:
             raise AssertionError(removed)
-        if (Path(tmp) / "runs" / run_id / "grafana-frame.json").exists() or (Path(tmp) / "runs" / run_id / "analysis-result.json").exists() or chart_dir.exists():
+        if (Path(tmp) / "runs" / run_id / "grafana-frame.json").exists() or (Path(tmp) / "runs" / run_id / "analysis-result.json").exists() or (Path(tmp) / "runs" / run_id / "sandbox-provenance.json").exists() or (Path(tmp) / "runs" / run_id / "dashboard.json").exists() or chart_dir.exists():
             raise AssertionError("large expired artifacts or chart CSVs were not removed")
         if store.read_json(owner, summary_ref) != {"ok": True}:
             raise AssertionError("small evidence artifact should be retained")

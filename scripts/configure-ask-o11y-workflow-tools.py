@@ -21,7 +21,7 @@ PLUGIN_ID = "consensys-asko11y-app"
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = ROOT / ".scratch" / "poc" / "ask-o11y-workflow-tools-settings.json"
 
-SYSTEM_PROMPT = """For analysis requests, act as an adaptive planner using only the currently enabled high-level tool schemas, the user's intent, authorized metadata, and intermediate results.
+SYSTEM_PROMPT = """For data, analysis, and dashboard requests, act as an adaptive planner using only currently enabled tool schemas, the user's intent, authorized metadata, and intermediate results.
 
 Before execution:
 - If the intent, desired outcome, or constraints are ambiguous, ask a focused clarification and call no execution tool.
@@ -29,14 +29,16 @@ Before execution:
 - Present an Analysis Preview containing the objective, candidate/selected datasource, fields and any target/features, requested visualizations, assumptions, risks, and expected artifacts. Include explicit `方法選擇理由` and `Validation / Evaluation 計畫` sections: explain why each proposed method fits the requested objective and available field types, and name concrete data-quality/precondition checks plus evaluation metrics or output-integrity checks (or explain why predictive evaluation is not applicable). Assumptions or generic limitations alone do not satisfy validation/evaluation. Then stop and ask the user to confirm or revise it.
 
 After explicit confirmation in the same conversation:
-- Select each next tool from its schema and the current results. There is no fixed workflow, mandatory next_step chain, method sequence, target, feature set, or panel template.
-- Call only capabilities required by the confirmed intent. Never call unrelated analysis methods "for completeness".
-- Pass opaque artifact refs and explicit scalar options; never place raw frames, full method results, full AnalysisResult payloads, physical paths, credentials, or secrets in model-visible arguments or prose.
-- Reuse an opaque artifact ref only when it came from a successful tool result in this session or the user's explicit input; copy it character-for-character and never reconstruct, shorten, extend, or guess it.
+- Select every tool dynamically from its schema and current results. Query-only, query-plus-dashboard, query-plus-Sandbox, and query-plus-Sandbox-plus-dashboard are optional compositions. There is no fixed workflow, mandatory next_step chain, method sequence, target, feature set, panel template, or hardcoded tool path.
+- Call only capabilities required by the confirmed intent. Never call Sandbox or a dashboard tool "for completeness".
+- Pass opaque artifact refs and explicit schema-declared options; never place raw frames, full Sandbox execution payloads, MIME bodies, physical paths, credentials, or secrets in model-visible arguments or prose.
+- Use isolated Python only when generated computation is needed. Generate only the Python required by the confirmed request. The sandbox receives `df`, `pd`, `np`, `display(value)`, and `emit(value, name=None)`; it has no datasource credentials or network. Never ask it to query Grafana, install packages, read host files, or recover secrets.
+- When the user asks to adjust a prior analysis in a later conversation, call `list_python_analyses`, select from its opaque refs using the user's description, call `inspect_python_analysis`, then submit complete replacement code to `revise_python_analysis`. These are discovery capabilities, not a mandatory path for new analysis.
+- Reuse an opaque artifact ref only when it came from a successful current tool result (including list/inspect) or the user's explicit input; copy it character-for-character and never reconstruct, shorten, extend, or guess it.
 - Inspect `ok` after every tool. On any `isError=true`, `ok=false`, non-recoverable error, clarification, rejected approval, invalid ref/field, or failed method, do not retry another tool in that run: stop observed execution and report it without claiming success.
 - If intermediate evidence requires a material change to datasource, fields, methods, evaluation, or outputs, present a revised preview and wait for confirmation before continuing.
-- Treat query planning as plan-only, datasource execution as Grafana-read-only, domain analysis as artifact-only deterministic computation, and rendering as an approval-gated Grafana write. The user's explicit confirmation of a preview that includes a dashboard authorizes that planned mutation: after AnalysisResult, call the Renderer preparation tool and immediately call its write tool with the returned short-lived one-time approval_ref; do not ask for a second chat confirmation. The Ask O11y host independently gates the write tool and must obtain its own user approval. Never invent, reconstruct, reuse, or omit approval_ref.
-- A VisualizationSpec or AnalysisResult is not a rendered chart. Claim that a chart/dashboard exists only after a successful Renderer write returns its Grafana URL. If the confirmed request produces separate AnalysisResults that all need visualization, render each required result and include every returned URL; never silently omit an output promised in the preview.
+- Treat query planning as plan-only, datasource execution as Grafana-read-only, isolated Python as artifact-only computation, and each registered mutation capability as its own approval-gated Grafana write boundary. Tool trust seams do not imply a required call order.
+- A sandbox MIME artifact is not automatically a Grafana chart. When the confirmed request needs a dashboard from Sandbox evidence, pass only its opaque `execution_ref` to the generic Renderer preview capability. SHAP and other plots should be generated as Matplotlib PNG; the Renderer also supports sanitized HTML, plain text, and JSON. After a successful Renderer preview in that same confirmed run, immediately call its write tool with the returned one-time `approval_ref`; do not ask for another chat message, because the Ask O11y host approval UI will pause that tool call for user approval. If host approval is rejected, stop. Claim that a dashboard exists only when the write tool returns its URL.
 - Preserve returned safety limitations and dashboard URLs in the final explanation.
 """
 
@@ -49,14 +51,14 @@ def load_server_specs() -> list[dict[str, Any]]:
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"cannot load adaptive MCP capability config: {exc}") from exc
     servers = raw.get("servers") if isinstance(raw, dict) else None
-    if not isinstance(servers, list) or len(servers) != 5 or any(not isinstance(item, dict) for item in servers):
-        raise SystemExit("adaptive MCP capability config must define exactly five trust-seam servers")
+    if not isinstance(servers, list) or len(servers) != 4 or any(not isinstance(item, dict) for item in servers):
+        raise SystemExit("adaptive MCP capability config must define exactly four trust-seam servers")
     required = {"id", "name", "url_env", "local_url", "enabled_tools", "disabled_tools"}
     for server in servers:
         if set(server) != required or not isinstance(server["enabled_tools"], list) or not isinstance(server["disabled_tools"], list):
             raise SystemExit(f"invalid adaptive MCP capability entry: {server.get('id')}")
     ids = [str(item["id"]) for item in servers]
-    if ids != ["data-query-planner", "grafana-query", "engineering-analysis", "finance-analysis", "grafana-renderer"]:
+    if ids != ["data-query-planner", "grafana-query", "sandbox-analysis", "grafana-renderer"]:
         raise SystemExit(f"capability config changed required trust seams: {ids}")
     return servers
 
@@ -110,8 +112,8 @@ def build_json_data(existing: dict[str, Any], use_local_defaults: bool) -> dict[
         {
             "mcpServers": build_servers(use_local_defaults),
             "trustedMCPServers": {str(spec["id"]): True for spec in SERVER_SPECS},
-            "useBuiltInMCP": False,
-            "builtInMCPToolSelections": {},
+            "useBuiltInMCP": True,
+            "builtInMCPToolSelections": dict(json_data.get("builtInMCPToolSelections") or {}),
             "defaultSystemPrompt": SYSTEM_PROMPT,
             "maxParallelToolCalls": 1,
             "approvalPolicy": json_data.get("approvalPolicy", "approval-gated-writes"),
@@ -125,8 +127,10 @@ def validate_payload(payload: dict[str, Any]) -> None:
     if not isinstance(json_data, dict):
         raise SystemExit("payload.jsonData is required")
     built_in_mcp = json_data.get("useBuiltInMCP")
-    if not isinstance(built_in_mcp, bool) or built_in_mcp:
-        raise SystemExit("useBuiltInMCP must be false for the high-level main flow")
+    if not isinstance(built_in_mcp, bool) or not built_in_mcp:
+        raise SystemExit("useBuiltInMCP must be true so Ask O11y retains native dynamic Grafana query/dashboard capabilities")
+    if not isinstance(json_data.get("builtInMCPToolSelections"), dict):
+        raise SystemExit("builtInMCPToolSelections must be an object")
     servers = json_data.get("mcpServers")
     if not isinstance(servers, list) or len(servers) != len(SERVER_SPECS):
         raise SystemExit("payload must contain exactly the high-level workflow-node servers")
@@ -180,6 +184,11 @@ def secure_mcp_headers() -> dict[str, str]:
         secure[prefix + "Authorization"] = f"Bearer {token}"
         secure[prefix + "X-Grafana-Org-Id"] = org_id
         secure[prefix + "X-Grafana-User"] = user_id
+    for retired_id in ("engineering-analysis", "finance-analysis"):
+        prefix = f"mcpServerHeader.{retired_id}."
+        secure[prefix + "Authorization"] = ""
+        secure[prefix + "X-Grafana-Org-Id"] = ""
+        secure[prefix + "X-Grafana-User"] = ""
     return secure
 
 

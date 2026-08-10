@@ -10,6 +10,46 @@ Copyright (c) 2011-2026 Open source contributors.
 Licensed under the BSD 3-Clause License.
 Source: https://github.com/pandas-dev/pandas (v3.0.5)
 
+## OpenSandbox Server and Code Interpreter Base Image
+Copyright 2025 Alibaba Group Holding Ltd.
+Licensed under the Apache License 2.0.
+Source: https://github.com/opensandbox-group/OpenSandbox (server/v0.2.2; code-interpreter v1.1.0)
+
+## OpenSandbox Python SDK
+Copyright 2025 Alibaba Group Holding Ltd.
+Licensed under the Apache License 2.0.
+Source: https://github.com/opensandbox-group/OpenSandbox (python/sandbox/v0.1.15)
+
+## OpenSandbox Code Interpreter Python SDK
+Copyright 2025 Alibaba Group Holding Ltd.
+Licensed under the Apache License 2.0.
+Source: https://github.com/opensandbox-group/OpenSandbox (python/code-interpreter/v0.1.2)
+
+## NumPy
+Copyright (c) 2005-2026, NumPy Developers.
+Licensed under the BSD 3-Clause License.
+Source: https://github.com/numpy/numpy (2.4.6)
+
+## SciPy
+Copyright (c) 2001-2026 SciPy Developers.
+Licensed under the BSD 3-Clause License.
+Source: https://github.com/scipy/scipy (1.18.0)
+
+## Matplotlib
+Copyright (c) 2012-2026 Matplotlib Development Team; original work copyright John D. Hunter.
+Licensed under the Matplotlib PSF/BSD-compatible license.
+Source: https://github.com/matplotlib/matplotlib (3.11.1)
+
+## seaborn
+Copyright (c) 2012-2026 Michael L. Waskom.
+Licensed under the BSD 3-Clause License.
+Source: https://github.com/mwaskom/seaborn (0.13.2)
+
+## Plotly.py
+Copyright (c) 2016-2026 Plotly, Inc.
+Licensed under the MIT License.
+Source: https://github.com/plotly/plotly.py (6.9.0)
+
 ## scikit-learn
 Copyright (c) 2007-2026 The scikit-learn developers.
 Licensed under the BSD 3-Clause License.
@@ -17,10 +57,31 @@ Source: https://github.com/scikit-learn/scikit-learn (1.9.0)
 
 ## statsmodels
 Copyright (C) 2006 Jonathan E. Taylor.
-Copyright (c) 2006-2008 Scipy Developers.
-Copyright (c) 2009-2018 statsmodels Developers.
+Copyright (c) 2006-2008 SciPy Developers.
+Copyright (c) 2009-2026 statsmodels Developers.
 Licensed under the BSD 3-Clause License.
 Source: https://github.com/statsmodels/statsmodels (v0.14.6)
+
+## SHAP
+Licensed under the MIT License.
+Source: https://github.com/shap/shap (v0.52.0)
+
+## XGBoost CPU
+Licensed under the Apache License 2.0.
+Source: https://github.com/dmlc/xgboost (v3.4.0)
+
+## LightGBM
+Copyright (c) Microsoft Corporation.
+Licensed under the MIT License.
+Source: https://github.com/microsoft/LightGBM (v4.7.0)
+
+## imbalanced-learn
+Licensed under the MIT License.
+Source: https://github.com/scikit-learn-contrib/imbalanced-learn (0.14.2)
+
+## Optuna
+Licensed under the MIT License.
+Source: https://github.com/optuna/optuna (v4.9.0)
 
 ## Grafana Infinity Datasource
 Copyright 2023 Grafana Labs.
