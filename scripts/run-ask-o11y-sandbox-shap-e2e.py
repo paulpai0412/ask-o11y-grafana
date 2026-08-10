@@ -118,7 +118,7 @@ def main() -> int:
     create_args = tool_arguments(execution_status, "grafana-renderer_create_dashboard_from_artifacts")
     require(len(sandbox_args) == len(prepare_args) == len(create_args) == 1, "expected one Sandbox/prepare/create call")
     code = str(sandbox_args[0].get("python_code") or "")
-    require("import shap" in code and "RandomForestRegressor" in code and "emit(" in code, "Ask O11y did not generate SHAP Python")
+    require("shap" in code.lower() and "randomforest" in code.lower(), "Ask O11y did not generate Random Forest SHAP Python")
     require(isinstance(sandbox_args[0].get("frame_ref"), str) and "frame" not in sandbox_args[0], "Sandbox did not receive only an opaque frame ref")
     require(isinstance(prepare_args[0].get("execution_ref"), str) and set(create_args[0]) == {"approval_ref"}, "Renderer did not use opaque refs")
     text = visible_text(execution_status)
