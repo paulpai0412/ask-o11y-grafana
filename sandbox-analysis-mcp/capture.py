@@ -2,15 +2,58 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib
 import json
+import os
 import random
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
 OUTPUT_DIR = Path("/tmp/sandbox-output")
 MAX_ITEM_BYTES = 4 * 1024 * 1024
+MAX_LOG_BYTES = 256 * 1024
+
+
+class BoundedLog:
+    def __init__(self) -> None:
+        self.data = bytearray()
+        self.overflow = False
+        self.lock = threading.Lock()
+
+    def append(self, value: bytes) -> None:
+        with self.lock:
+            remaining = MAX_LOG_BYTES - len(self.data)
+            self.data.extend(value[:remaining])
+            self.overflow = self.overflow or len(value) > remaining
+
+    def write(self, value: str) -> int:
+        self.append(value.encode("utf-8", errors="replace"))
+        return len(value)
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+
+def pipe_output(fd: int, sink: BoundedLog) -> tuple[int, threading.Thread]:
+    read_fd, write_fd = os.pipe()
+    original_fd = os.dup(fd)
+    os.dup2(write_fd, fd)
+    os.close(write_fd)
+
+    def drain() -> None:
+        with os.fdopen(read_fd, "rb", closefd=True) as reader:
+            while chunk := reader.read(65536):
+                sink.append(chunk)
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    return original_fd, thread
 
 
 def load_dataframe(bundle_path: str, pd: Any) -> tuple[Any, dict[str, Any]]:
@@ -109,18 +152,33 @@ def run(code: str, bundle_path: str, seed: int) -> None:
 
     namespace = {"df": data, "pd": pd, "np": np, "display": emit, "emit": emit}
     setattr(plt, "show", lambda *args, **kwargs: None)
+    stdout_log, stderr_log = BoundedLog(), BoundedLog()
+    stdout_fd, stdout_thread = pipe_output(1, stdout_log)
+    stderr_fd, stderr_thread = pipe_output(2, stderr_log)
     try:
-        tree = ast.parse(code, filename="<generated-analysis>", mode="exec")
-        if tree.body and isinstance(tree.body[-1], ast.Expr):
-            body = ast.Module(body=tree.body[:-1], type_ignores=[])
-            exec(compile(body, "<generated-analysis>", "exec"), namespace)
-            emit(eval(compile(ast.Expression(tree.body[-1].value), "<generated-analysis>", "eval"), namespace))
-        else:
-            exec(compile(tree, "<generated-analysis>", "exec"), namespace)
+        with contextlib.redirect_stdout(stdout_log), contextlib.redirect_stderr(stderr_log):
+            tree = ast.parse(code, filename="<generated-analysis>", mode="exec")
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                body = ast.Module(body=tree.body[:-1], type_ignores=[])
+                exec(compile(body, "<generated-analysis>", "exec"), namespace)
+                emit(eval(compile(ast.Expression(tree.body[-1].value), "<generated-analysis>", "eval"), namespace))
+            else:
+                exec(compile(tree, "<generated-analysis>", "exec"), namespace)
     finally:
+        for fd, original in ((1, stdout_fd), (2, stderr_fd)):
+            os.dup2(original, fd)
+            os.close(original)
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
         OUTPUT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         for number in plt.get_fignums():
             if number not in captured_figures:
                 emit(plt.figure(number))
+        for name, log in (("stdout.txt", stdout_log), ("stderr.txt", stderr_log)):
+            path = OUTPUT_DIR / name
+            path.write_bytes(log.data)
+            path.chmod(0o600)
         (OUTPUT_DIR / "audit.json").write_text(json.dumps(audit), encoding="utf-8")
         (OUTPUT_DIR / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        if stdout_log.overflow or stderr_log.overflow:
+            raise RuntimeError("generated output exceeded the sandbox log limit")

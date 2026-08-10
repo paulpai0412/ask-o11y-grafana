@@ -88,7 +88,7 @@ def main() -> int:
 
             invalid_audit = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "pass", "_server_context": context}, executor=lambda *_: audited_execution(input_rows=29))
             checks.append(require("sandbox_forged_audit_rejected", not invalid_audit.get("ok") and "invalid trusted input audit" in invalid_audit.get("error", ""), invalid_audit))
-            redacted_error = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "raise RuntimeError('DO_NOT_EXPOSE')", "_server_context": context}, executor=lambda *_: audited_execution({"name": "RuntimeError", "value": "DO_NOT_EXPOSE"}))
+            redacted_error = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "raise RuntimeError('DO_NOT_EXPOSE')", "_server_context": context}, executor=lambda *_: audited_execution({"name": "DO_NOT_EXPOSE", "value": "DO_NOT_EXPOSE"}))
             checks.append(require("sandbox_exception_value_redacted", not redacted_error.get("ok") and "DO_NOT_EXPOSE" not in json.dumps(redacted_error), redacted_error))
 
             png = base64.b64encode(b"\x89PNG\r\n\x1a\nsecurity").decode()

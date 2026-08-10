@@ -53,6 +53,7 @@ MAX_CODE_BYTES = 32 * 1024
 MAX_RPC_BODY_BYTES = 128 * 1024
 MAX_INPUT_BUNDLE_BYTES = 16 * 1024 * 1024
 MAX_OUTPUT_BYTES = 5 * 1024 * 1024
+MAX_LOG_BYTES = 256 * 1024
 DEFAULT_SEED = 42
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
@@ -230,7 +231,7 @@ def read_validity_rules(context: dict[str, str], source_run_id: str, field_names
 
 
 def wrapped_code(python_code: str, seed: int) -> str:
-    return f"from capture import run\nrun({python_code!r}, '/tmp/input-frame.json', {seed})"
+    return f"from capture import run\ntry:\n    run({python_code!r}, '/tmp/input-frame.json', {seed})\nexcept BaseException:\n    raise RuntimeError('generated analysis failed') from None"
 
 
 def serialize_execution(execution: Any) -> dict[str, Any]:
@@ -299,6 +300,20 @@ def read_captured_outputs(filesystem: Any) -> list[dict[str, Any]]:
     return outputs
 
 
+def read_captured_logs(filesystem: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    logs = []
+    for name in ("stdout", "stderr"):
+        payload = filesystem.read_bytes(f"/tmp/sandbox-output/{name}.txt", range_header=f"bytes=0-{MAX_LOG_BYTES}")
+        if len(payload) > MAX_LOG_BYTES:
+            raise WorkflowContractError(f"sandbox {name} exceeds limit")
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise WorkflowContractError(f"sandbox {name} is not UTF-8") from exc
+        logs.append([] if not text else [{"text": text, "timestamp": 0}])
+    return logs[0], logs[1]
+
+
 def read_input_audit(filesystem: Any) -> dict[str, Any]:
     payload = filesystem.read_bytes("/tmp/sandbox-output/audit.json", range_header="bytes=0-65535")
     try:
@@ -315,6 +330,7 @@ def execute_opensandbox(frame_bundle_json: str, python_code: str, seed: int) -> 
     from code_interpreter.models.code import SupportedLanguage
     from code_interpreter.sync.code_interpreter import CodeInterpreterSync
     from opensandbox.config import ConnectionConfigSync
+    from opensandbox.models.execd_sync import ExecutionHandlersSync
     from opensandbox.models.filesystem import WriteEntry
     from opensandbox.models.sandboxes import NetworkPolicy
     from opensandbox.sync.sandbox import SandboxSync
@@ -343,10 +359,15 @@ def execute_opensandbox(frame_bundle_json: str, python_code: str, seed: int) -> 
         )
         sandbox.files.write_files([WriteEntry(path="/tmp/input-frame.json", data=frame_bundle_json, mode=600)])
         interpreter = CodeInterpreterSync.create(sandbox=sandbox)
-        execution = interpreter.codes.run(wrapped_code(python_code, seed), language=SupportedLanguage.PYTHON)
+        execution = interpreter.codes.run(
+            wrapped_code(python_code, seed),
+            language=SupportedLanguage.PYTHON,
+            handlers=ExecutionHandlersSync(skip_accumulation=True),
+        )
         serialized = serialize_execution(execution)
         try:
             serialized["input_audit"] = read_input_audit(sandbox.files)
+            serialized["stdout"], serialized["stderr"] = read_captured_logs(sandbox.files)
             serialized["results"].extend(read_captured_outputs(sandbox.files))
         except Exception:
             if execution.error is None:
@@ -445,6 +466,14 @@ def execute_python_analysis(
         "seed": seed,
         "network": "deny",
         "resource": sandbox_policy()["resource"],
+        "limits": {
+            "timeout_seconds": sandbox_policy()["timeout_seconds"],
+            "source_bytes": MAX_CODE_BYTES,
+            "rpc_body_bytes": MAX_RPC_BODY_BYTES,
+            "input_bundle_bytes": MAX_INPUT_BUNDLE_BYTES,
+            "captured_execution_bytes": MAX_OUTPUT_BYTES,
+            "stdout_stderr_bytes_each": MAX_LOG_BYTES,
+        },
         "validity": validity,
         "output_summary": summary,
         "parent_provenance_ref": parent_provenance_ref,
@@ -453,11 +482,9 @@ def execute_python_analysis(
     provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
     refs = {"execution_ref": execution_ref, "provenance_ref": provenance_ref}
     if execution.get("error"):
-        error = execution["error"]
-        error_name = str(error.get("name", "Error"))[:100] if isinstance(error, dict) else "Error"
         return error_response(
             step=step,
-            error=f"sandbox Python failed: {error_name}; details retained only in the authorized execution artifact",
+            error="sandbox Python failed; details retained only in the authorized execution artifact",
             recoverable=False,
             instruction="Stop and report the opaque execution_ref; do not expose exception values or silently execute replacement code.",
             evidence={"refs": refs, "code_sha256": code_sha256},
@@ -679,6 +706,7 @@ def self_check() -> None:
         args = {"frame_ref": frame_ref, "python_code": "display(df)", "seed": 7, "_server_context": context}
         result = execute_python_analysis(args, executor=fake_executor)
         assert result["ok"] and result["output_summary"]["mime_types"] == ["image/png", "text/html", "text/plain"]
+        assert result["provenance"]["limits"] == {"timeout_seconds": 120, "source_bytes": MAX_CODE_BYTES, "rpc_body_bytes": MAX_RPC_BODY_BYTES, "input_bundle_bytes": MAX_INPUT_BUNDLE_BYTES, "captured_execution_bytes": MAX_OUTPUT_BYTES, "stdout_stderr_bytes_each": MAX_LOG_BYTES}
         assert observed["seed"] == 7 and observed["bundle"]["frame"]["data"]["values"][0] == [1, 2, 3]
         assert observed["bundle"]["validity_rules"][0]["field"] == "heat_rate_valid"
         assert "display(df)" not in json.dumps(result) and '"values"' not in json.dumps(result)

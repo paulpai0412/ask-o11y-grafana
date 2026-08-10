@@ -46,7 +46,7 @@
       "type": "container",
       "name": "ask-o11y-sandbox-analysis",
       "version": "sandbox-poc-v1",
-      "purl": "pkg:docker/ask-o11y-sandbox-analysis@sha256:370283eff42bb57908ac0599f8b50fc1c76284d30c7dc372e90409924f22961c",
+      "purl": "pkg:docker/ask-o11y-sandbox-analysis@sha256:8ade7ac494c440400fc7bdfbe055d149140b46be856ffabfdfeddffb9a90c21b",
       "properties": [{"name": "definition", "value": "sandbox-analysis-mcp/Dockerfile"}, {"name": "base.digest", "value": "sha256:133a3c1720dd52291a019740c2987e7164ea6de79e23d8198798e58950ae2e6e"}]
     },
     {"type": "library", "name": "numpy", "version": "2.4.6", "purl": "pkg:pypi/numpy@2.4.6", "licenses": [{"license": {"id": "BSD-3-Clause"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},

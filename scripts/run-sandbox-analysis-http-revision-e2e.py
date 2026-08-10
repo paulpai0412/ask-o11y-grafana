@@ -59,8 +59,10 @@ def main() -> int:
     revised = rpc("revise_python_analysis", {"provenance_ref": provenance_ref, "python_code": "display(df[['x', 'y']].head(2))", "seed": 42})
     require(bool(revised.get("ok")) and revised.get("provenance", {}).get("parent_provenance_ref") == provenance_ref, f"revision lineage failed: {revised}")
 
-    redacted = rpc("execute_python_analysis", {"frame_ref": frame_ref, "python_code": "raise RuntimeError(df.iloc[0]['secret'])", "seed": 43})
-    require(not redacted.get("ok") and secret_value not in json.dumps(redacted), "exception leaked a raw frame value")
+    redacted = rpc("execute_python_analysis", {"frame_ref": frame_ref, "python_code": "raise type(str(df.iloc[0]['secret']), (Exception,), {})()", "seed": 43})
+    require(not redacted.get("ok") and secret_value not in json.dumps(redacted), "exception name leaked a raw frame value")
+    flooded = rpc("execute_python_analysis", {"frame_ref": frame_ref, "python_code": "import os\nos.write(1, b'x' * (1024 * 1024))", "seed": 44})
+    require(not flooded.get("ok") and len(json.dumps(flooded)) < 4096, "sandbox log flood escaped the streaming bound")
 
     oversized_status = None
     oversized_request = urllib.request.Request(
@@ -81,7 +83,8 @@ def main() -> int:
         "inspect_code_sha256": inspected["code_sha256"],
         "revise_ok": True,
         "parent_linked": True,
-        "exception_value_redacted": True,
+        "exception_name_and_value_redacted": True,
+        "sandbox_log_flood_bounded": True,
         "oversized_http_status": oversized_status,
         "raw_frame_in_model_result": False,
     }

@@ -79,6 +79,7 @@ def main() -> int:
             "cross_conversation": {"listed": len(listed.get("analyses", [])), "inspect_code_sha256": inspected.get("code_sha256")},
             "sandbox_packages_imported": ["numpy", "scipy", "pandas", "matplotlib", "seaborn", "plotly", "scikit-learn", "statsmodels", "shap", "xgboost", "lightgbm", "imbalanced-learn", "optuna"],
             "runtime_config_attested": len(str(result["provenance"].get("server_config_sha256") or "")) == 64 and result["provenance"].get("runtime_class") == "runc",
+            "enforced_limits": result["provenance"].get("limits"),
             "shap_plot_captured": "image/png" in summary.get("mime_types", []),
             "egress": network,
             "refs_are_opaque": all(str(value).startswith("artifact://") for value in result["refs"].values()),
