@@ -39,9 +39,10 @@ After explicit confirmation in the same conversation:
 - Inspect `ok` and structured recoverability after every tool. Stop on authorization, integrity, rejected approval, invalid identity, or other non-recoverable failures. For a recoverable capability/display error, revise only the unsupported specification using observed tool schemas; do not rerun a successful query or analysis. If user input or a material replan is required, stop and ask.
 - Before promising an output, verify that a currently enabled capability can produce it. If intermediate evidence requires a material change to datasource, fields, methods, evaluation, or outputs, present a revised preview and wait for confirmation before continuing.
 - Treat query planning as plan-only, datasource execution as Grafana-read-only, isolated Python as artifact-only computation, and each registered mutation capability as its own approval-gated Grafana write seam. Tool trust seams do not imply a required call order.
-- After every successful datasource or Sandbox execution, present a `Result Preview` before any Grafana mutation: summarize executed inputs, method/evaluation evidence, validity/freshness, named output types, warnings, limitations, and which opaque ref types are reusable without exposing raw frames or MIME bodies. Exact successful refs are preserved in injected opaque tool state; do not retype them in prose unless the user explicitly asks. If the confirmed user intent includes Grafana publication, ask to formally publish by ending with the explicit question `是否確認正式發佈此 Result Preview 至 Grafana Dashboard？` and stop. Pure query/analysis requests end with their Result Preview and must not be forced into a dashboard flow.
-- After the user explicitly confirms formal publication, choose only the Renderer source that fits the Result Preview. For native query panels, inspect the installed visualization catalog and pass the authorized `plan_ref` plus dynamic field/display specifications. For Sandbox evidence, pass only its `execution_ref` and output selection. Then call `prepare_dashboard_write`; if successful, immediately call its write tool with only the returned one-time `approval_ref`, allowing the Ask O11y host to independently pause for mutation approval. If the capability expired, prepare it again from existing successful refs without rerunning analysis.
-- `prepare_dashboard_write` is a no-write publication preview; a successful approved `create_dashboard_from_artifacts` is the formal persistent publication. There is no separate draft-dashboard lifecycle. Preserve returned `dashboard_uid`, `dashboard_slug`, `dashboard_url`, safety limitations, and refs as distinct fields. Grafana URLs are `/d/{uid}/{slug}`: never use the final slug as the UID or reconstruct either value.
+- After every successful datasource or Sandbox execution, summarize executed inputs, method/evaluation evidence, validity/freshness, named output types, warnings, limitations, and reusable opaque ref types without exposing raw frames or MIME bodies. Exact successful refs are preserved in injected opaque tool state; do not retype them in prose unless the user explicitly asks. Pure query/analysis requests end with a chat `Result Preview` and must not be forced into a dashboard flow.
+- If the confirmed intent requested Grafana, Dashboard, or a Grafana preview, a chat Result Preview is not a visual preview and is not sufficient. In the same execution turn, choose the Renderer source dynamically: for native panels inspect the installed visualization catalog and pass the authorized `plan_ref` plus field/display specifications; for Sandbox evidence pass only its `execution_ref` and output selection. Call `prepare_dashboard_write` with the intended final dashboard title (do not add a Preview suffix; preview state is server-managed); it performs no write and returns a server-issued capability. Immediately pass only that `approval_ref` to the separately host-approved `create_temporary_dashboard_preview`, then return a `Grafana Preview` containing the exact `grafana_preview_url`. Stop and ask `是否確認將此 Grafana Preview 正式發佈至 Dashboard？`. Never call the formal create tool in that turn.
+- After the user explicitly confirms the visible Grafana Preview, call only `create_dashboard_from_artifacts` with the preserved one-time `approval_ref`, allowing Ask O11y host approval for formal publication. Do not rerun query, Python, visualization selection, or prepare. If the capability expired or the temporary preview was deleted, prepare it again from existing successful refs without rerunning analysis.
+- `prepare_dashboard_write` creates an expiring preview-tagged Grafana dashboard; `create_dashboard_from_artifacts` promotes that exact payload at the same UID by removing preview status. Preserve returned preview/final URL, `dashboard_uid`, `dashboard_slug`, safety limitations, and refs as distinct fields. Grafana URLs are `/d/{uid}/{slug}`: never use the final slug as the UID or reconstruct either value.
 - A Sandbox MIME artifact is not automatically a native Grafana chart. Never promise downloadable files, native panels, screenshots, or dashboards unless the selected capability returns direct evidence for them.
 """
 
@@ -104,6 +105,11 @@ def build_servers(use_local_defaults: bool) -> list[dict[str, Any]]:
             "trusted": True,
             "headers": {"Authorization": "", "X-Grafana-Org-Id": "", "X-Grafana-User": ""},
             "toolSelections": tool_selections(spec),
+            **({"riskOverrides": {
+                "prepare_dashboard_write": {"requiresApproval": False, "readOnly": True, "reason": "Prepares a server-side capability without writing Grafana."},
+                "create_temporary_dashboard_preview": {"requiresApproval": True, "readOnly": False, "reason": "Creates an expiring Grafana Preview dashboard."},
+                "create_dashboard_from_artifacts": {"requiresApproval": True, "readOnly": False, "reason": "Promotes a confirmed Grafana Preview to a formal dashboard."},
+            }} if spec["id"] == "grafana-renderer" else {}),
         }
         for spec in SERVER_SPECS
     ]
@@ -158,7 +164,7 @@ def validate_payload(payload: dict[str, Any]) -> None:
             if not isinstance(direct_disabled, bool) or direct_disabled or not isinstance(prefixed_disabled, bool) or prefixed_disabled:
                 raise SystemExit(f"low-level tool not disabled: {spec['id']} {name}")
     prompt = str(json_data.get("defaultSystemPrompt", ""))
-    for required in ["Analysis Preview", "Result Preview", "formally publish", "explicit confirmation", "There is no fixed workflow", "opaque artifact refs", "approval-gated Grafana write", "dashboard_uid"]:
+    for required in ["Analysis Preview", "Result Preview", "Grafana Preview", "formal publication", "explicit confirmation", "There is no fixed workflow", "opaque artifact refs", "approval-gated Grafana write", "dashboard_uid"]:
         if required not in prompt:
             raise SystemExit(f"adaptive system prompt missing: {required}")
 
@@ -224,7 +230,7 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if args.self_check:
-        print(json.dumps({"ok": True, "settings_payload": str(args.out.relative_to(ROOT)), "servers": [spec["id"] for spec in SERVER_SPECS], "built_in_mcp": False}, ensure_ascii=False, indent=2))
+        print(json.dumps({"ok": True, "settings_payload": str(args.out.relative_to(ROOT)), "servers": [spec["id"] for spec in SERVER_SPECS], "built_in_mcp": True}, ensure_ascii=False, indent=2))
         return 0
     if args.apply:
         if not args.grafana_url:

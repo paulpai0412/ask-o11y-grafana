@@ -98,31 +98,35 @@ def run_native_flow() -> dict[str, Any]:
     preview_status, _ = poll_run(preview["runId"], False)
     require(preview_status.get("status") == "completed" and not tool_errors(preview_status), "native preview failed")
     session_id = str(preview.get("sessionId") or preview_status.get("sessionId") or "")
-    execution = start_run("確認執行查詢。完成後只提供 Result Preview，不要寫入 Grafana；等我確認正式發佈。", session_id)
-    execution_status, _ = poll_run(execution["runId"], False)
+    execution = start_run("確認執行查詢並產生可直接打開檢視的 Grafana Preview。不要正式發佈；提供 preview URL 後等我確認。", session_id)
+    execution_status, preview_approvals = poll_run(execution["runId"], True)
     execution_names = tool_names(execution_status)
-    require(execution_status.get("status") == "completed" and not tool_errors(execution_status), "native execution failed")
-    require("grafana-query_execute_planned_query" in execution_names and not any(name.startswith("sandbox-analysis_") or name.startswith("grafana-renderer_") for name in execution_names), f"native Result Preview used wrong capabilities: {execution_names}")
-    require("Result Preview" in visible_text(execution_status), "native Result Preview missing")
-    publication = start_run("確認正式發佈剛才的 Result Preview。請重用既有 plan_ref，不要重新查詢；使用目前安裝的原生 Grafana visualization capability，讓 host approval UI 要求我核准。", session_id)
+    require(execution_status.get("status") == "completed" and not tool_errors(execution_status), "native execution/preview failed")
+    required_preview = {"grafana-query_execute_planned_query", "grafana-renderer_list_visualization_capabilities", "grafana-renderer_prepare_dashboard_write", "grafana-renderer_create_temporary_dashboard_preview"}
+    require(required_preview.issubset(execution_names) and "grafana-renderer_create_dashboard_from_artifacts" not in execution_names and not any(name.startswith("sandbox-analysis_") for name in execution_names), f"native Grafana Preview used wrong capabilities: {execution_names}")
+    prepare_args = tool_arguments(execution_status, "grafana-renderer_prepare_dashboard_write")
+    require(len(prepare_args) == 1 and isinstance(prepare_args[0].get("plan_ref"), str) and isinstance(prepare_args[0].get("visualizations"), list) and "execution_ref" not in prepare_args[0], "native Renderer did not use plan_ref plus visualization specs")
+    execution_text = visible_text(execution_status)
+    match = re.search(r"/d/([^/]+)/", execution_text)
+    require(match is not None and bool(preview_approvals) and "Grafana Preview" in execution_text, "native visible Grafana Preview missing")
+    if match is None:
+        raise RuntimeError("native Grafana Preview UID missing")
+    dashboard_uid = match.group(1)
+    preview_dashboard = request_json(f"/api/dashboards/uid/{dashboard_uid}").get("dashboard", {})
+    preview_panels = preview_dashboard.get("panels", [])
+    require("ask-o11y-preview" in preview_dashboard.get("tags", []) and bool(preview_panels) and all(panel.get("type") != "text" and panel.get("targets") for panel in preview_panels), "native preview is not a visible temporary Grafana dashboard")
+    publication = start_run("確認將剛才已檢視的 Grafana Preview 正式發佈。只使用既有 approval_ref，不要重新查詢、重新 prepare 或改動圖表。", session_id)
     publication_status, approvals = poll_run(publication["runId"], True)
     publication_names = tool_names(publication_status)
     require(publication_status.get("status") == "completed" and not tool_errors(publication_status), "native publication failed")
-    required = {"grafana-renderer_list_visualization_capabilities", "grafana-renderer_prepare_dashboard_write", "grafana-renderer_create_dashboard_from_artifacts"}
-    require(required.issubset(publication_names), f"native publication missing tools: {sorted(required - set(publication_names))}")
-    require(not any(name.startswith("grafana-query_") or name.startswith("sandbox-analysis_") for name in publication_names), f"native publication reran successful work: {publication_names}")
-    prepare_args = tool_arguments(publication_status, "grafana-renderer_prepare_dashboard_write")
-    require(len(prepare_args) == 1 and isinstance(prepare_args[0].get("plan_ref"), str) and isinstance(prepare_args[0].get("visualizations"), list) and "execution_ref" not in prepare_args[0], "native Renderer did not use plan_ref plus visualization specs")
+    require(publication_names == ["grafana-renderer_create_dashboard_from_artifacts"], f"native publication did more than promote preview: {publication_names}")
     text = visible_text(publication_status)
-    match = re.search(r"/d/([^/]+)/", text)
-    require(match is not None and bool(approvals), "native published dashboard UID missing")
-    if match is None:
-        raise RuntimeError("native published dashboard UID missing")
-    dashboard_uid = match.group(1)
+    require(f"/d/{dashboard_uid}/" in text and bool(approvals), "native published dashboard UID missing or changed")
     dashboard = request_json(f"/api/dashboards/uid/{dashboard_uid}")
-    panels = dashboard.get("dashboard", {}).get("panels", [])
-    require(bool(panels) and all(panel.get("type") != "text" and panel.get("targets") for panel in panels), "published native dashboard has text/no-target panels")
-    return {"preview_run_id": preview["runId"], "execution_run_id": execution["runId"], "publication_run_id": publication["runId"], "execution_tools": execution_names, "publication_tools": publication_names, "approval_count": len(approvals), "dashboard_uid": dashboard_uid, "panel_types": [panel.get("type") for panel in panels], "renderer_prepare_arguments": prepare_args[0]}
+    published_dashboard = dashboard.get("dashboard", {})
+    panels = published_dashboard.get("panels", [])
+    require("ask-o11y-preview" not in published_dashboard.get("tags", []) and bool(panels) and all(panel.get("type") != "text" and panel.get("targets") for panel in panels), "published native dashboard is still preview or has text/no-target panels")
+    return {"preview_run_id": preview["runId"], "execution_run_id": execution["runId"], "publication_run_id": publication["runId"], "execution_tools": execution_names, "publication_tools": publication_names, "approval_count": len(preview_approvals) + len(approvals), "dashboard_uid": dashboard_uid, "panel_types": [panel.get("type") for panel in panels], "renderer_prepare_arguments": prepare_args[0]}
 
 
 def main() -> int:
@@ -134,36 +138,42 @@ def main() -> int:
     session_id = str(preview.get("sessionId") or preview_status.get("sessionId") or "")
     require(bool(session_id), "preview session missing")
 
-    execution = start_run("確認依剛才 Analysis Preview 執行，包括最新 metadata、validity filtering、選定工程特徵、Random Forest、時間切分評估與 SHAP Matplotlib PNG。執行完成後只提供 Result Preview，不要寫入 Grafana；等我另行確認正式發佈。", session_id)
-    execution_status, execution_approvals = poll_run(execution["runId"], False)
+    execution = start_run("確認依剛才 Analysis Preview 執行，包括最新 metadata、validity filtering、選定工程特徵、Random Forest、時間切分評估與 SHAP Matplotlib PNG。完成後建立可直接打開檢視的 Grafana Preview，但不要正式發佈；提供 URL 後等我確認。", session_id)
+    execution_status, execution_approvals = poll_run(execution["runId"], True)
     execution_names = tool_names(execution_status)
     execution_errors = tool_errors(execution_status)
-    required_execution = {"grafana-query_execute_planned_query", "sandbox-analysis_execute_python_analysis"}
+    required_execution = {"grafana-query_execute_planned_query", "sandbox-analysis_execute_python_analysis", "grafana-renderer_prepare_dashboard_write", "grafana-renderer_create_temporary_dashboard_preview"}
     require(execution_status.get("status") == "completed" and not execution_errors, f"execution failed: {execution_errors}")
     require(required_execution.issubset(execution_names), f"missing execution tools: {sorted(required_execution - set(execution_names))}")
-    require(not any(name.startswith("grafana-renderer_") for name in execution_names), f"Result Preview run wrote/prepared Grafana: {execution_names}")
+    require("grafana-renderer_create_dashboard_from_artifacts" not in execution_names, f"Grafana Preview turn formally published: {execution_names}")
     sandbox_args = tool_arguments(execution_status, "sandbox-analysis_execute_python_analysis")
     require(len(sandbox_args) == 1, "expected one Sandbox execution")
     code = str(sandbox_args[0].get("python_code") or "")
     require("shap" in code.lower() and "randomforest" in code.lower(), "Ask O11y did not generate Random Forest SHAP Python")
     require(isinstance(sandbox_args[0].get("frame_ref"), str) and "frame" not in sandbox_args[0], "Sandbox did not receive only an opaque frame ref")
+    prepare_args = tool_arguments(execution_status, "grafana-renderer_prepare_dashboard_write")
+    require(len(prepare_args) == 1 and isinstance(prepare_args[0].get("execution_ref"), str), "Grafana Preview did not use the Sandbox execution ref")
     execution_text = visible_text(execution_status)
-    require("Result Preview" in execution_text and "正式" in execution_text, "post-execution Result Preview/publication prompt missing")
+    preview_match = re.search(r"/d/([^/]+)/", execution_text)
+    require(preview_match is not None and "Grafana Preview" in execution_text and bool(execution_approvals), "visible Grafana Preview URL/publication prompt missing")
+    if preview_match is None:
+        raise RuntimeError("Grafana Preview UID missing")
+    preview_uid = preview_match.group(1)
+    preview_dashboard = request_json(f"/api/dashboards/uid/{preview_uid}").get("dashboard", {})
+    require("ask-o11y-preview" in preview_dashboard.get("tags", []) and bool(preview_dashboard.get("panels")), "temporary artifact Grafana Preview is not visible")
 
-    publication = start_run("確認正式發佈剛才的 Result Preview。請重用既有成功 refs，不要重新查詢或重新執行 Python；綁定精確輸出後讓 host approval UI 要求我核准。", session_id)
+    publication = start_run("確認將剛才已檢視的 Grafana Preview 正式發佈。只使用既有 approval_ref，不要重新查詢、重新執行 Python 或重新 prepare。", session_id)
     publication_status, publication_approvals = poll_run(publication["runId"], True)
     publication_names = tool_names(publication_status)
     publication_errors = tool_errors(publication_status)
-    required_publication = {"grafana-renderer_prepare_dashboard_write", "grafana-renderer_create_dashboard_from_artifacts"}
     require(publication_status.get("status") == "completed" and not publication_errors, f"publication failed: {publication_errors}")
-    require(required_publication.issubset(publication_names), f"missing publication tools: {sorted(required_publication - set(publication_names))}")
-    require(not any(name.startswith("grafana-query_") or name.startswith("sandbox-analysis_") for name in publication_names), f"publication reran successful work: {publication_names}")
-    prepare_args = tool_arguments(publication_status, "grafana-renderer_prepare_dashboard_write")
+    require(publication_names == ["grafana-renderer_create_dashboard_from_artifacts"], f"publication did more than promote preview: {publication_names}")
     create_args = tool_arguments(publication_status, "grafana-renderer_create_dashboard_from_artifacts")
-    require(len(prepare_args) == len(create_args) == 1, "expected one prepare/create call")
-    require(isinstance(prepare_args[0].get("execution_ref"), str) and set(create_args[0]) == {"approval_ref"}, "Renderer did not use opaque refs")
+    require(len(create_args) == 1 and set(create_args[0]) == {"approval_ref"}, "Renderer did not publish with only the preserved capability")
     publication_text = visible_text(publication_status)
-    require("http://" in publication_text and bool(publication_approvals), "approved dashboard URL missing")
+    require(f"/d/{preview_uid}/" in publication_text and bool(publication_approvals), "approved dashboard URL missing or UID changed")
+    published_dashboard = request_json(f"/api/dashboards/uid/{preview_uid}").get("dashboard", {})
+    require("ask-o11y-preview" not in published_dashboard.get("tags", []), "formal dashboard still has preview status")
     native = run_native_flow()
     evidence = {
         "ok": True,
@@ -171,11 +181,11 @@ def main() -> int:
         "execution": {"run_id": execution["runId"], "tools": execution_names, "approval_count": len(execution_approvals), "sandbox_arguments": sandbox_args[0], "text": execution_text},
         "publication": {"run_id": publication["runId"], "tools": publication_names, "approval_count": len(publication_approvals), "renderer_prepare_arguments": prepare_args[0], "renderer_create_arguments": create_args[0], "text": publication_text},
         "native": native,
-        "validation": {"ask_o11y_generated_shap_python": True, "result_preview_before_write": True, "same_session_refs_reused": True, "opaque_refs_only": True, "host_approval": True, "artifact_dashboard_created": True, "native_dashboard_has_query_targets": True},
+        "validation": {"ask_o11y_generated_shap_python": True, "grafana_preview_before_publication": True, "same_preview_uid_promoted": True, "same_session_refs_reused": True, "opaque_refs_only": True, "host_approval": True, "artifact_dashboard_created": True, "native_dashboard_has_query_targets": True},
     }
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"ok": True, "preview_tools": preview_tools, "execution_tools": execution_names, "publication_tools": publication_names, "native_publication_tools": native["publication_tools"], "approval_count": len(publication_approvals) + native["approval_count"], "artifact": str(OUT.relative_to(ROOT))}, ensure_ascii=False, indent=2))
+    print(json.dumps({"ok": True, "preview_tools": preview_tools, "execution_tools": execution_names, "publication_tools": publication_names, "native_publication_tools": native["publication_tools"], "approval_count": len(execution_approvals) + len(publication_approvals) + native["approval_count"], "artifact": str(OUT.relative_to(ROOT))}, ensure_ascii=False, indent=2))
     return 0
 
 

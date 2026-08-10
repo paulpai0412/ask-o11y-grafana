@@ -42,10 +42,12 @@ def main() -> int:
             "error": None,
         })
         dashboards = []
+        fake_post = lambda dashboard: dashboards.append(dashboard) or {"uid": dashboard["uid"], "url": "/d/dynamic"}
         prepared = renderer.prepare_dashboard_write({"execution_ref": execution_ref, "_server_context": context})
+        previewed = renderer.create_temporary_dashboard_preview({"approval_ref": prepared.get("approval_ref"), "_server_context": context}, post_fn=fake_post)
         created = renderer.create_dashboard_from_artifacts(
             {"approval_ref": prepared.get("approval_ref"), "_server_context": context},
-            post_fn=lambda dashboard: dashboards.append(dashboard) or {"url": "/d/dynamic"},
+            post_fn=fake_post,
         )
         unsupported = renderer.prepare_dashboard_write({"execution_ref": execution_ref, "output_indices": [2], "_server_context": context})
         replay = renderer.create_dashboard_from_artifacts(
@@ -58,6 +60,7 @@ def main() -> int:
                 {"output_index": 0, "mime_type": "image/png"},
                 {"output_index": 1, "mime_type": "text/html"},
             ],
+            "grafana_preview_precedes_publication": prepared.get("ok") and previewed.get("ok") and len(dashboards) == 2 and renderer.PREVIEW_TAG in dashboards[0].get("tags", []) and renderer.PREVIEW_TAG not in dashboards[1].get("tags", []),
             "created_two_panels": created.get("ok") and created.get("panel_count") == 2,
             "html_sanitized": "script" not in content and "alert(1)" not in content,
             "plotly_requires_compatible_panel_or_png": not unsupported.get("ok"),

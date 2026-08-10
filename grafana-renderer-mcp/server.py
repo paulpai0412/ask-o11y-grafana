@@ -55,14 +55,15 @@ try:
     PORT = int(os.environ.get("GRAFANA_RENDERER_MCP_PORT", "8773"))
 except ValueError:
     PORT = 8773
-SERVER_INFO = {"name": "grafana-renderer-mcp", "version": "0.3.0"}
+SERVER_INFO = {"name": "grafana-renderer-mcp", "version": "0.4.0"}
 PROTOCOL = "2025-03-26"
 GRAFANA_URL = os.environ.get("GRAFANA_URL", "").rstrip("/")
 GRAFANA_USER = os.environ.get("GRAFANA_USER", "admin")
 GRAFANA_PASSWORD = os.environ.get("GRAFANA_PASSWORD", "admin")
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
-APPROVAL_TTL_SECONDS = 10 * 60
+APPROVAL_TTL_SECONDS = 30 * 60
+PREVIEW_TAG = "ask-o11y-preview"
 APPROVAL_LOCK = threading.Lock()
 MAX_PANELS = 8
 MAX_RPC_BODY_BYTES = 128 * 1024
@@ -413,6 +414,28 @@ def post_dashboard(dashboard: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"Grafana dashboard request failed: {exc}") from exc
 
 
+def delete_if_preview(dashboard_uid: str) -> None:
+    if not GRAFANA_URL:
+        return
+    token = base64.b64encode(f"{GRAFANA_USER}:{GRAFANA_PASSWORD}".encode()).decode()
+    headers = {"Authorization": f"Basic {token}"}
+    try:
+        with urllib.request.urlopen(urllib.request.Request(GRAFANA_URL + "/api/dashboards/uid/" + dashboard_uid, headers=headers), timeout=30) as response:
+            dashboard = json.loads(response.read()).get("dashboard", {})
+        if PREVIEW_TAG not in dashboard.get("tags", []):
+            return
+        with urllib.request.urlopen(urllib.request.Request(GRAFANA_URL + "/api/dashboards/uid/" + dashboard_uid, headers=headers, method="DELETE"), timeout=30):
+            return
+    except (OSError, urllib.error.HTTPError, json.JSONDecodeError):
+        return
+
+
+def schedule_preview_cleanup(dashboard_uid: str) -> None:
+    timer = threading.Timer(APPROVAL_TTL_SECONDS, delete_if_preview, args=(dashboard_uid,))
+    timer.daemon = True
+    timer.start()
+
+
 def list_visualization_capabilities(args: dict[str, Any], catalog_fn=fetch_panel_catalog) -> dict[str, Any]:
     step = "list_visualization_capabilities"
     try:
@@ -456,6 +479,7 @@ def prepare_dashboard_write(args: dict[str, Any], catalog_fn=fetch_panel_catalog
             preview = [{"title": item["title"], "panel_type": item["panel_type"], "fields": item["fields"], **({"output_index": item["output_index"]} if "output_index" in item else {"source": "query-plan"})} for item in visualizations]
             approval = {"mode": "native-query", "plan_ref": plan_ref, "visualizations": visualizations, **({"execution_ref": execution_ref} if execution_ref is not None else {})}
             refs = {"plan_ref": plan_ref, **({"execution_ref": execution_ref} if execution_ref is not None else {})}
+            dashboard = build_native_dashboard(title, plan, visualizations, run_id, execution)
         else:
             run_id, parts = parse_artifact_ref(execution_ref)
             if parts != ("sandbox-execution",):
@@ -465,8 +489,9 @@ def prepare_dashboard_write(args: dict[str, Any], catalog_fn=fetch_panel_catalog
             preview = [{"output_index": index, "mime_type": item["mime_type"]} for index, item in selected]
             approval = {"mode": "sandbox-artifacts", "execution_ref": execution_ref, "output_indices": [index for index, _ in selected]}
             refs = {"execution_ref": execution_ref}
+            dashboard = build_dashboard(title, selected, run_id)
         name = "render-approval-" + uuid.uuid4().hex
-        approval.update({"status": "pending", "title": title, "issued_at": issued_at, "expires_at": issued_at + APPROVAL_TTL_SECONDS})
+        approval.update({"status": "prepared", "title": title, "issued_at": issued_at, "expires_at": issued_at + APPROVAL_TTL_SECONDS, "dashboard": dashboard})
         approval_ref = ARTIFACTS.write_json(context, run_id, name, approval)
         refs["approval_ref"] = approval_ref
     except (ArtifactAuthError, PermissionError) as exc:
@@ -477,10 +502,65 @@ def prepare_dashboard_write(args: dict[str, Any], catalog_fn=fetch_panel_catalog
         step=step,
         run_id=run_id,
         refs=refs,
-        instruction="The user already confirmed formal publication. Immediately call create_dashboard_from_artifacts with only this one-time approval_ref; the Ask O11y host will independently pause for mutation approval.",
+        instruction="Immediately call create_temporary_dashboard_preview with only this one-time approval_ref. That separate host-approved mutation returns the visible Grafana Preview URL; do not formally publish it in this turn.",
         evidence={"grafana_write": False, "publication_preview": preview, "mode": approval["mode"], "expires_in_seconds": APPROVAL_TTL_SECONDS},
         approval_ref=approval_ref,
         publication_preview=preview,
+    )
+
+
+def create_temporary_dashboard_preview(args: dict[str, Any], post_fn=post_dashboard) -> dict[str, Any]:
+    step = "create_temporary_dashboard_preview"
+    if forbidden := sorted(FORBIDDEN_INPUT_KEYS & args.keys()):
+        return error_response(step=step, error="forbidden raw/invented input keys: " + ", ".join(forbidden), recoverable=False, instruction="Pass only the server-issued approval_ref.")
+    approval_ref = args.get("approval_ref")
+    if not isinstance(approval_ref, str):
+        return error_response(step=step, error="server-issued approval_ref is required", recoverable=True, instruction="Prepare the exact Grafana Preview first.")
+    try:
+        context = context_from_args(args)
+        run_id, parts = parse_artifact_ref(approval_ref)
+        if not parts[0].startswith("render-approval-"):
+            raise WorkflowContractError("approval_ref is not a renderer capability")
+        with APPROVAL_LOCK:
+            approval = ARTIFACTS.read_json(context, approval_ref)
+            if not isinstance(approval, dict) or approval.get("status") != "prepared" or float(approval.get("expires_at", 0)) < time.time():
+                raise WorkflowContractError("approval_ref is invalid, expired, or already used for preview")
+            dashboard = approval.get("dashboard")
+            if not isinstance(dashboard, dict) or not isinstance(dashboard.get("uid"), str) or not isinstance(dashboard.get("panels"), list):
+                raise WorkflowContractError("approval_ref has no valid bound dashboard")
+            approval["status"] = "previewing"
+            ARTIFACTS.write_json(context, run_id, parts[0], approval)
+        try:
+            created = post_fn({**dashboard, "tags": [*dashboard.get("tags", []), PREVIEW_TAG]})
+        except Exception:
+            with APPROVAL_LOCK:
+                approval["status"] = "prepared"
+                ARTIFACTS.write_json(context, run_id, parts[0], approval)
+            raise
+        dashboard_uid = str(created.get("uid") or dashboard["uid"])
+        relative_url = str(created.get("url") or f"/d/{dashboard_uid}")
+        dashboard_slug = relative_url.rstrip("/").split("/")[-1] if relative_url else ""
+        dashboard_url = GRAFANA_URL + relative_url
+        with APPROVAL_LOCK:
+            approval.update({"status": "previewed", "preview_dashboard_uid": dashboard_uid, "preview_dashboard_url": dashboard_url, "previewed_at": time.time()})
+            ARTIFACTS.write_json(context, run_id, parts[0], approval)
+        if post_fn is post_dashboard:
+            schedule_preview_cleanup(dashboard_uid)
+    except (ArtifactAuthError, PermissionError) as exc:
+        return error_response(step=step, error=f"unauthorized artifact access: {exc}", recoverable=False, instruction="Stop; the capability is not authorized for this context.")
+    except (WorkflowContractError, RuntimeError, OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=True, instruction="Retry only the temporary preview write from the existing approval_ref; never rerun analysis.")
+    return success_response(
+        step=step,
+        run_id=run_id,
+        refs={"approval_ref": approval_ref},
+        instruction="Open grafana_preview_url for the user and stop. Ask whether to publish this exact Grafana Preview. Do not call create_dashboard_from_artifacts until a later explicit confirmation.",
+        evidence={"grafana_write": True, "temporary_preview": True, "expires_in_seconds": APPROVAL_TTL_SECONDS},
+        approval_ref=approval_ref,
+        grafana_preview_url=dashboard_url,
+        preview_dashboard_uid=dashboard_uid,
+        preview_dashboard_slug=dashboard_slug,
+        preview_expires_in_seconds=APPROVAL_TTL_SECONDS,
     )
 
 
@@ -497,7 +577,7 @@ def create_dashboard_from_artifacts(args: dict[str, Any], post_fn=post_dashboard
         if not parts[0].startswith("render-approval-"):
             raise WorkflowContractError("approval_ref is not a renderer capability")
         approval = ARTIFACTS.read_json(context, approval_ref)
-        if not isinstance(approval, dict) or approval.get("status") != "pending" or float(approval.get("expires_at", 0)) < time.time():
+        if not isinstance(approval, dict) or approval.get("status") != "previewed" or float(approval.get("expires_at", 0)) < time.time():
             raise WorkflowContractError("approval_ref is invalid, expired, or already consumed")
         mode = approval.get("mode")
         if mode == "native-query":
@@ -512,7 +592,6 @@ def create_dashboard_from_artifacts(args: dict[str, Any], post_fn=post_dashboard
                     raise WorkflowContractError("approval execution_ref is invalid")
                 execution = validate_execution(ARTIFACTS.read_json(context, execution_ref))
             visualizations = validate_visualizations(plan, approval.get("visualizations"), catalog_fn(), execution)
-            dashboard = build_native_dashboard(str(approval.get("title") or "Ask O11y Analysis"), plan, visualizations, run_id, execution)
             source_refs = {"plan_ref": plan_ref, **({"execution_ref": execution_ref} if execution_ref is not None else {})}
             panel_evidence = {"panel_types": [item["panel_type"] for item in visualizations]}
         elif mode == "sandbox-artifacts":
@@ -521,14 +600,18 @@ def create_dashboard_from_artifacts(args: dict[str, Any], post_fn=post_dashboard
                 raise WorkflowContractError("approval_ref is not bound to this execution run")
             execution = validate_execution(ARTIFACTS.read_json(context, execution_ref))
             selected = select_outputs(execution, approval.get("output_indices"))
-            dashboard = build_dashboard(str(approval.get("title") or "Sandbox Analysis"), selected, run_id)
             source_refs = {"execution_ref": execution_ref}
             panel_evidence = {"mime_types": [item["mime_type"] for _, item in selected]}
         else:
             raise WorkflowContractError("approval_ref publication mode is invalid")
+        dashboard = approval.get("dashboard")
+        if not isinstance(dashboard, dict) or not isinstance(dashboard.get("uid"), str) or dashboard.get("uid") != approval.get("preview_dashboard_uid") or not isinstance(dashboard.get("panels"), list):
+            raise WorkflowContractError("approval_ref has no valid bound Grafana Preview")
+        if PREVIEW_TAG in dashboard.get("tags", []):
+            raise WorkflowContractError("approval_ref final dashboard still has preview status")
         with APPROVAL_LOCK:
             latest = ARTIFACTS.read_json(context, approval_ref)
-            if not isinstance(latest, dict) or latest.get("status") != "pending":
+            if not isinstance(latest, dict) or latest.get("status") != "previewed":
                 raise WorkflowContractError("approval_ref is invalid or already consumed")
             latest["status"] = "consumed"
             latest["consumed_at"] = time.time()
@@ -548,6 +631,7 @@ def create_dashboard_from_artifacts(args: dict[str, Any], post_fn=post_dashboard
             "panel_count": len(dashboard["panels"]),
             **panel_evidence,
             "approval_ref": approval_ref,
+            "preview_dashboard_uid": approval.get("preview_dashboard_uid"),
             "approval_consumed": True,
         }
         evidence_ref = ARTIFACTS.write_json(context, run_id, "render-evidence", evidence)
@@ -579,7 +663,7 @@ TOOLS = [
     },
     {
         "name": "prepare_dashboard_write",
-        "description": "After successful execution, first show the user a Result Preview and wait for explicit formal-publication confirmation. Only then call this no-write tool. Use execution_ref alone for Sandbox artifact panels. For native panels use plan_ref plus dynamic visualization specs; optionally include execution_ref and an output_index per visualization to use a named CSV Sandbox output as an inline native data source. It issues a short-lived exact capability and never writes Grafana.",
+        "description": "Prepare the exact payload for an expiring Grafana Preview after successful analysis. Pass the intended final title; preview status is server-managed. Use execution_ref alone for Sandbox artifact panels. For native panels use plan_ref plus dynamic visualization specs; optionally include execution_ref and an output_index per visualization to use a named CSV Sandbox output as an inline native data source. This tool does not write Grafana; it returns a short-lived one-time capability for the separately approved preview write.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -594,8 +678,13 @@ TOOLS = [
         },
     },
     {
+        "name": "create_temporary_dashboard_preview",
+        "description": "Create the visible, expiring Grafana Preview bound by prepare_dashboard_write. Call immediately after prepare with only its approval_ref. This temporary mutation requires Ask O11y host approval and must stop before formal publication.",
+        "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"approval_ref": {"type": "string"}}, "required": ["approval_ref"]},
+    },
+    {
         "name": "create_dashboard_from_artifacts",
-        "description": "Formally publish the exact dashboard bound by prepare_dashboard_write. Call only after chat confirmation of the Result Preview; the Ask O11y host must independently approve this mutation before dispatch.",
+        "description": "Promote the exact Grafana Preview bound by prepare_dashboard_write to a formal dashboard at the same UID. Call only after the user explicitly confirms that visible Grafana Preview; the Ask O11y host must independently approve this mutation before dispatch.",
         "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"approval_ref": {"type": "string"}}, "required": ["approval_ref"]},
     },
 ]
@@ -634,6 +723,8 @@ def handle_rpc(msg: dict[str, Any]):
             output = list_visualization_capabilities(arguments)
         elif name == "prepare_dashboard_write":
             output = prepare_dashboard_write(arguments)
+        elif name == "create_temporary_dashboard_preview":
+            output = create_temporary_dashboard_preview(arguments)
         else:
             output = create_dashboard_from_artifacts(arguments)
         return rpc_result(rid, {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}], "isError": not bool(output.get("ok"))})
@@ -708,6 +799,8 @@ def self_check() -> int:
             return {"uid": dashboard["uid"], "url": f"/d/{dashboard['uid']}/self-check"}
 
         prepared = prepare_dashboard_write({"execution_ref": execution_ref, "title": "SHAP analysis", "_server_context": context})
+        prepared_writes = len(writes)
+        previewed = create_temporary_dashboard_preview({"approval_ref": prepared.get("approval_ref"), "_server_context": context}, post_fn=fake_post)
         preview_writes = len(writes)
         created = create_dashboard_from_artifacts({"approval_ref": prepared.get("approval_ref"), "_server_context": context}, post_fn=fake_post)
         replay = create_dashboard_from_artifacts({"approval_ref": prepared.get("approval_ref"), "_server_context": context}, post_fn=fake_post)
@@ -720,19 +813,21 @@ def self_check() -> int:
         })
         catalog = [{"id": "table", "name": "Table", "description": "table"}, {"id": "timeseries", "name": "Time series", "description": "time"}]
         native_prepared = prepare_dashboard_write({"plan_ref": plan_ref, "execution_ref": execution_ref, "title": "Native analysis", "visualizations": [{"title": "Heat rate", "panel_type": "timeseries", "fields": ["date", "heat_rate"], "field_config": {"defaults": {"unit": "kcal/kWh"}, "overrides": []}}, {"title": "Scores", "panel_type": "table", "fields": ["date", "score"], "output_index": 3}], "_server_context": context}, catalog_fn=lambda: catalog)
+        native_previewed = create_temporary_dashboard_preview({"approval_ref": native_prepared.get("approval_ref"), "_server_context": context}, post_fn=fake_post)
         native_preview_writes = len(writes)
         native_created = create_dashboard_from_artifacts({"approval_ref": native_prepared.get("approval_ref"), "_server_context": context}, post_fn=fake_post, catalog_fn=lambda: catalog)
         forged = create_dashboard_from_artifacts({"approval_ref": f"artifact://{run_id}/render-approval-forged", "_server_context": context}, post_fn=fake_post)
         foreign = prepare_dashboard_write({"execution_ref": execution_ref, "_server_context": other})
         raw = prepare_dashboard_write({"execution_ref": execution_ref, "results": [], "_server_context": context})
         html_content = writes[0]["panels"][1]["options"]["content"] if writes else ""
-        native_panel = writes[1]["panels"][0] if len(writes) > 1 else {}
-        native_csv_panel = writes[1]["panels"][1] if len(writes) > 1 else {}
+        native_panel = writes[2]["panels"][0] if len(writes) > 2 else {}
+        native_csv_panel = writes[2]["panels"][1] if len(writes) > 2 else {}
         checks = {
-            "preview_no_write": prepared.get("ok") and preview_writes == 0 and native_prepared.get("ok") and native_preview_writes == 1,
-            "named_png_html_text_and_csv_panels": created.get("ok") and created.get("panel_count") == 4 and writes[0]["panels"][0]["title"] == "SHAP plot.png" and writes[0]["panels"][3]["title"] == "scores.csv" and "script" not in html_content and "bad()" not in html_content,
+            "server_capability_before_preview_write": prepared.get("ok") and prepared_writes == 0 and previewed.get("ok") and native_prepared.get("ok") and native_previewed.get("ok"),
+            "grafana_preview_written_before_publish": preview_writes == 1 and previewed.get("preview_dashboard_uid") == writes[0].get("uid") and f"/d/{writes[0].get('uid')}/" in previewed.get("grafana_preview_url", "") and PREVIEW_TAG in writes[0].get("tags", []) and native_preview_writes == 3,
+            "named_png_html_text_and_csv_panels": created.get("ok") and created.get("panel_count") == 4 and writes[1]["panels"][0]["title"] == "SHAP plot.png" and writes[1]["panels"][3]["title"] == "scores.csv" and "script" not in html_content and "bad()" not in html_content,
             "native_installed_panels_with_query_targets": native_created.get("ok") and native_panel.get("type") == "timeseries" and len(native_panel.get("targets", [])) == 1 and [column["selector"] for column in native_panel["targets"][0]["columns"]] == ["date", "heat_rate"] and native_csv_panel.get("type") == "table" and native_csv_panel["targets"][0].get("source") == "inline" and [column["selector"] for column in native_csv_panel["targets"][0]["columns"]] == ["date", "score"],
-            "structured_dashboard_identity": created.get("dashboard_uid") == writes[0].get("uid") and created.get("dashboard_slug") == "self-check",
+            "structured_dashboard_identity": created.get("dashboard_uid") == writes[0].get("uid") and created.get("dashboard_slug") == "self-check" and "ask-o11y-preview" not in writes[1].get("tags", []),
             "approval_consumed": created.get("evidence", {}).get("approval_consumed") is True and not replay.get("ok"),
             "forged_rejected": not forged.get("ok"),
             "foreign_context_rejected": not foreign.get("ok"),

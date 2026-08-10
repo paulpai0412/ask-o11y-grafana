@@ -1,52 +1,75 @@
 diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
-index c22dd6f..566a3ff 100644
+index c22dd6f..a9fda27 100644
 --- a/pkg/agent/loop.go
 +++ b/pkg/agent/loop.go
-@@ -30,6 +30,8 @@ const nearLimitWarning = "[SYSTEM: You are approaching the iteration limit. Prod
+@@ -30,6 +30,9 @@ const nearLimitWarning = "[SYSTEM: You are approaching the iteration limit. Prod
  // model to reissue a tool call whose arguments arrived truncated/invalid. Beyond
  // this the run ends with a clean, retryable error instead of spinning.
  const maxTruncationRetries = 1
 +const maxSelectedTools = 24
-+const publicationQuestion = "是否確認正式發佈此 Result Preview 至 Grafana Dashboard？"
++const publicationQuestion = "是否確認將此 Grafana Preview 正式發佈至 Dashboard？"
++const grafanaPreviewNudge = "[SYSTEM: The confirmed intent requires a visually inspectable Grafana Preview, not a chat-only Result Preview. With existing successful refs, call Renderer prepare (no write), then pass only its approval_ref to the separately approved temporary-preview tool. Return the exact grafana_preview_url and stop for publication confirmation. Do not call the formal publication tool in this turn.]"
  
  // truncatedToolCallNudge is injected after a truncated tool call is discarded so
  // the model reissues a smaller, complete call rather than repeating the cutoff.
-@@ -116,6 +118,8 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+@@ -116,6 +119,8 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
  		}
  		mcpTools = filtered
  	}
-+	var offerPublicationAfterExecution bool
-+	mcpTools, offerPublicationAfterExecution = a.selectRelevantTools(ctx, req, mcpTools)
++	var prepareGrafanaPreviewAfterExecution bool
++	mcpTools, prepareGrafanaPreviewAfterExecution = a.selectRelevantTools(ctx, req, mcpTools)
  	openAITools := ConvertMCPToolsToOpenAI(mcpTools)
  
  	messages := BuildContextWindow(req.SystemPrompt, req.Messages, req.Summary, req.RecentMessageCount)
-@@ -128,6 +132,7 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+@@ -128,6 +133,9 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
  	mcpUnavailableEmitted := false
  	truncationRetries := 0
  	pendingTruncationNudge := false
++	pendingGrafanaPreviewNudge := false
 +	successfulExecutionObserved := false
++	grafanaPreviewObserved := false
  
  	for iteration := 0; iteration < maxIter; iteration++ {
  		if ctx.Err() != nil {
-@@ -223,6 +228,9 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+@@ -154,6 +162,10 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 			oneShot = append(oneShot, Message{Role: "system", Content: truncatedToolCallNudge})
+ 			pendingTruncationNudge = false
+ 		}
++		if pendingGrafanaPreviewNudge {
++			oneShot = append(oneShot, Message{Role: "system", Content: grafanaPreviewNudge})
++			pendingGrafanaPreviewNudge = false
++		}
+ 		if len(oneShot) > 0 {
+ 			callMessages = append(append([]Message{}, messages...), oneShot...)
+ 		}
+@@ -223,6 +235,17 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
  		}
  
  		if len(msg.ToolCalls) == 0 {
-+			if offerPublicationAfterExecution && successfulExecutionObserved && msg.Content != "" && !strings.Contains(msg.Content, publicationQuestion) {
++			if prepareGrafanaPreviewAfterExecution && successfulExecutionObserved && !grafanaPreviewObserved {
++				if iteration < maxIter-1 {
++					pendingGrafanaPreviewNudge = true
++					continue
++				}
++				a.send(ctx, eventCh, SSEEvent{Type: "error", Data: ErrorEvent{Message: "Analysis completed, but the requested Grafana Preview was not created. Retry using the existing successful refs; do not rerun analysis.", Code: "grafana_preview_missing", Retryable: true}})
++				return
++			}
++			if prepareGrafanaPreviewAfterExecution && grafanaPreviewObserved && msg.Content != "" && !strings.Contains(msg.Content, publicationQuestion) {
 +				msg.Content = strings.TrimSpace(msg.Content) + "\n\n" + publicationQuestion
 +			}
  			if msg.Content != "" {
  				a.send(ctx, eventCh, SSEEvent{
  					Type: "final_report",
-@@ -299,6 +307,7 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+@@ -299,6 +322,8 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
  				})
  			}
  			if !isError {
 +				successfulExecutionObserved = successfulExecutionObserved || isExecutionResult(toolContent)
++				grafanaPreviewObserved = grafanaPreviewObserved || isGrafanaPreviewResult(toolContent)
  				a.send(ctx, eventCh, SSEEvent{
  					Type: "evidence",
  					Data: EvidenceEvent{
-@@ -320,6 +329,110 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+@@ -320,6 +345,132 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
  	})
  }
  
@@ -57,6 +80,15 @@ index c22dd6f..566a3ff 100644
 +	}
 +	step, _ := result["step"].(string)
 +	return strings.HasPrefix(step, "execute_")
++}
++
++func isGrafanaPreviewResult(content string) bool {
++	var result map[string]interface{}
++	if json.Unmarshal([]byte(content), &result) != nil || result["ok"] != true || result["step"] != "create_temporary_dashboard_preview" {
++		return false
++	}
++	previewURL, _ := result["grafana_preview_url"].(string)
++	return previewURL != ""
 +}
 +
 +func (a *AgentLoop) selectRelevantTools(ctx context.Context, req LoopRequest, tools []mcp.Tool) ([]mcp.Tool, bool) {
@@ -93,7 +125,7 @@ index c22dd6f..566a3ff 100644
 +	if err != nil {
 +		return tools, false
 +	}
-+	selectionPrompt := "You are the tool-capability selector for the same Ask O11y planner. Select only tools plausibly needed for the current user turn and its direct safe follow-up work. Do not invent identifiers or execute tools. Preserve optional compositions; do not impose a workflow. Return only JSON: {\"tools\":[exact names from catalog, at most 24],\"offer_publication_after_execution\":boolean}. Set the boolean true only when this current turn authorizes data/analysis execution, prior/current intent explicitly includes later Grafana publication, and the correct next response after successful execution is a Result Preview asking for formal publication. It is false for initial Analysis Preview, pure analysis, and the later formal-publication turn.\nConversation: " + string(conversationJSON) + "\nCatalog: " + string(catalogJSON)
++	selectionPrompt := "You are the tool-capability selector for the same Ask O11y planner. Select only tools plausibly needed for the current user turn and its direct safe follow-up work. Do not invent identifiers or execute tools. Preserve optional compositions; do not impose a workflow. Return only JSON: {\"tools\":[exact names from catalog, at most 24],\"prepare_grafana_preview_after_execution\":boolean}. Set the boolean true only when this current turn authorizes data/analysis execution and prior/current intent explicitly requests Grafana, Dashboard, or a Grafana preview. That turn must create a temporary visually inspectable Grafana Preview after successful execution, but must not formally publish it. It is false for initial Analysis Preview, pure analysis, and the later turn that explicitly confirms publication of an existing Grafana Preview.\nConversation: " + string(conversationJSON) + "\nCatalog: " + string(catalogJSON)
 +	selectionReq := ChatCompletionRequest{
 +		Model:     req.Model,
 +		Messages:  []Message{{Role: "system", Content: selectionPrompt}},
@@ -111,8 +143,8 @@ index c22dd6f..566a3ff 100644
 +		}
 +	}
 +	var decision struct {
-+		Tools                          []string `json:"tools"`
-+		OfferPublicationAfterExecution bool     `json:"offer_publication_after_execution"`
++		Tools                               []string `json:"tools"`
++		PrepareGrafanaPreviewAfterExecution bool     `json:"prepare_grafana_preview_after_execution"`
 +	}
 +	if err := json.Unmarshal([]byte(content), &decision); err != nil || len(decision.Tools) > maxSelectedTools {
 +		a.logger.Warn("Dynamic tool selection returned invalid JSON; retaining authorized tool set", "response", content)
@@ -140,6 +172,18 @@ index c22dd6f..566a3ff 100644
 +			}
 +		}
 +	}
++	previewToolAvailable := false
++	if decision.PrepareGrafanaPreviewAfterExecution {
++		for _, tool := range tools {
++			switch {
++			case strings.HasSuffix(tool.Name, "_list_visualization_capabilities"), strings.HasSuffix(tool.Name, "_prepare_dashboard_write"), strings.HasSuffix(tool.Name, "_create_temporary_dashboard_preview"):
++				selected[tool.Name] = struct{}{}
++				previewToolAvailable = previewToolAvailable || strings.HasSuffix(tool.Name, "_create_temporary_dashboard_preview")
++			case strings.HasSuffix(tool.Name, "_create_dashboard_from_artifacts"):
++				delete(selected, tool.Name)
++			}
++		}
++	}
 +	filtered := make([]mcp.Tool, 0, len(selected))
 +	for _, tool := range tools {
 +		if _, ok := selected[tool.Name]; ok {
@@ -150,18 +194,35 @@ index c22dd6f..566a3ff 100644
 +		a.logger.Warn("Dynamic tool selection chose no known tools; retaining authorized tool set")
 +		return tools, false
 +	}
-+	a.logger.Info("Dynamically selected tools", "available", len(tools), "selected", len(filtered), "offerPublicationAfterExecution", decision.OfferPublicationAfterExecution)
-+	return filtered, decision.OfferPublicationAfterExecution
++	preparePreview := decision.PrepareGrafanaPreviewAfterExecution && previewToolAvailable
++	a.logger.Info("Dynamically selected tools", "available", len(tools), "selected", len(filtered), "prepareGrafanaPreviewAfterExecution", preparePreview)
++	return filtered, preparePreview
 +}
 +
  func (a *AgentLoop) chatCompletionWithFallback(ctx context.Context, llmReq ChatCompletionRequest, req LoopRequest) (*ChatCompletionResponse, error) {
  	resp, err := a.llmClient.ChatCompletion(ctx, llmReq, req.GrafanaURL, req.AuthToken, req.OrgID)
  	if err == nil {
 diff --git a/pkg/agent/loop_test.go b/pkg/agent/loop_test.go
-index e1592cb..388a27c 100644
+index e1592cb..ccbf01f 100644
 --- a/pkg/agent/loop_test.go
 +++ b/pkg/agent/loop_test.go
-@@ -1017,3 +1017,14 @@ func TestAgentLoop_ContextCancellation(t *testing.T) {
+@@ -157,6 +157,15 @@ func TestAgentLoop_SimpleTextResponse(t *testing.T) {
+ 	}
+ }
+ 
++func TestIsGrafanaPreviewResult(t *testing.T) {
++	if !isGrafanaPreviewResult(`{"ok":true,"step":"create_temporary_dashboard_preview","grafana_preview_url":"http://grafana/d/preview"}`) {
++		t.Fatal("expected prepared Grafana Preview to be detected")
++	}
++	if isGrafanaPreviewResult(`{"ok":true,"step":"create_temporary_dashboard_preview"}`) || isGrafanaPreviewResult(`{"ok":false,"step":"create_temporary_dashboard_preview","grafana_preview_url":"http://grafana/d/preview"}`) {
++		t.Fatal("invalid preview result was accepted")
++	}
++}
++
+ func TestAgentLoop_ForwardsRequestedModel(t *testing.T) {
+ 	receivedModel := make(chan string, 1)
+ 	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+@@ -1017,3 +1026,14 @@ func TestAgentLoop_ContextCancellation(t *testing.T) {
  		}
  	}
  }
