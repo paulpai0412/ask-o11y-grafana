@@ -110,7 +110,7 @@ def main() -> int:
         raise RuntimeError(f"cannot load applied Ask O11y settings verification: {exc}") from exc
     enabled_server_ids = [item.get("id") for item in settings.get("external_servers", []) if isinstance(item, dict) and item.get("enabled")]
     require(bool(settings.get("ok")) and enabled_server_ids == ["data-query-planner", "grafana-query", "sandbox-analysis", "grafana-renderer"], f"Ask O11y does not expose exactly four MCP endpoints: {enabled_server_ids}")
-    evidence_files = ["sandbox-analysis-real-spike.json", "ask-o11y-sandbox-shap-e2e.json", "sandbox-shap-grafana-renderer-e2e.json"]
+    evidence_files = ["sandbox-analysis-real-spike.json", "sandbox-analysis-http-e2e.json", "ask-o11y-sandbox-shap-e2e.json"]
     require(all(bool(json.loads((ROOT / ".scratch" / "poc" / name).read_text(encoding="utf-8")).get("ok", True)) for name in evidence_files), "post-retirement E2E evidence is incomplete")
     out = {
         "ok": True,
