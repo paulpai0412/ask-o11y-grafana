@@ -747,7 +747,7 @@ new file mode 100644
 index 0000000..6a06a18
 --- /dev/null
 +++ b/pkg/agent/skills/grafana-dashboarding/references/advanced-panels.md
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,87 @@
 +# Installed advanced panel contracts
 +
 +Use these as authoring references, not as a required panel sequence. Keep the user's requested panel type unless its data contract cannot be satisfied.
@@ -759,6 +759,7 @@ index 0000000..6a06a18
 +```json
 +{
 +  "type": "xychart",
++  "pluginVersion": "13.1.2",
 +  "options": {
 +    "mapping": "manual",
 +    "series": [{
@@ -770,7 +771,7 @@ index 0000000..6a06a18
 +}
 +```
 +
-+In manual mapping, `frame.matcher` is required; use `{"id":"byIndex","options":0}` for the first query result frame. Use `{"mapping":"auto","series":[]}` only when the first numeric/time field is X and all remaining numeric fields are intended Y series.
++In manual mapping, `frame.matcher` is required; use `{"id":"byIndex","options":0}` for the first query result frame. Set `pluginVersion` to the installed Grafana version (`13.1.2` here); omitting it triggers the legacy pre-11.1 migration and corrupts these matcher objects. Use `{"mapping":"auto","series":[]}` only when the first numeric/time field is X and all remaining numeric fields are intended Y series.
 +
 +Source: Grafana `public/app/plugins/panel/xychart/panelcfg.cue`.
 +
