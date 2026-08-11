@@ -1,31 +1,31 @@
 diff --git a/package-lock.json b/package-lock.json
-index b678fe7..e662af1 100644
+index b678fe7..4d58e35 100644
 --- a/package-lock.json
 +++ b/package-lock.json
 @@ -1,12 +1,12 @@
  {
    "name": "Ask O11y",
 -  "version": "0.3.2",
-+  "version": "0.3.3",
++  "version": "0.3.4",
    "lockfileVersion": 3,
    "requires": true,
    "packages": {
      "": {
        "name": "Ask O11y",
 -      "version": "0.3.2",
-+      "version": "0.3.3",
++      "version": "0.3.4",
        "hasInstallScript": true,
        "license": "MIT",
        "dependencies": {
 diff --git a/package.json b/package.json
-index a66fe57..c71ce93 100644
+index a66fe57..bfc065f 100644
 --- a/package.json
 +++ b/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "Ask O11y",
 -  "version": "0.3.2",
-+  "version": "0.3.3",
++  "version": "0.3.4",
    "scripts": {
      "postinstall": "node -e \"const fs=require('fs');const p=require('path');const d=p.join('node_modules','flatted','golang');try{fs.rmSync(d,{recursive:true,force:true});}catch(e){if(e.code!=='ENOENT')throw e;}\"",
      "build": "npm run build:frontend:prod && npm run build:backend:all",
@@ -1337,7 +1337,7 @@ index 263e5e0..8b77f63 100644
  ---
  
 diff --git a/src/components/Chat/Chat.tsx b/src/components/Chat/Chat.tsx
-index 0c6dbaa..016db83 100644
+index 0c6dbaa..61e48fe 100644
 --- a/src/components/Chat/Chat.tsx
 +++ b/src/components/Chat/Chat.tsx
 @@ -1,5 +1,5 @@
@@ -1371,7 +1371,7 @@ index 0c6dbaa..016db83 100644
 +      {visiblePageRefs.length > 0 && allowEmbedding === true && !showSidePanel && (
 +        <button
 +          onClick={handleSidePanelToggle}
-+          className="absolute right-0 top-1/2 z-10 flex items-center gap-1 rounded-l-md border px-2 py-2 text-xs font-medium shadow"
++          className="absolute right-0 top-4 z-10 flex items-center gap-1 rounded-l-md border px-2 py-2 text-xs font-medium shadow"
 +          aria-label="Show dashboard preview"
 +          title="Show preview"
 +          style={{
