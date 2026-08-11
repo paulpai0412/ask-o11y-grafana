@@ -1,9 +1,9 @@
 diff --git a/pkg/agent/dashboard_resolver.go b/pkg/agent/dashboard_resolver.go
 new file mode 100644
-index 0000000..a7ca849
+index 0000000..2469cf6
 --- /dev/null
 +++ b/pkg/agent/dashboard_resolver.go
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,149 @@
 +package agent
 +
 +import (
@@ -14,6 +14,99 @@ index 0000000..a7ca849
 +
 +const artifactBridgeResolveTool = "artifact-bridge_resolve_dashboard_refs"
 +const previewDashboardTag = "ask-o11y-preview"
++
++func hasOpaqueDashboardRefs(value interface{}) (bool, error) {
++	encoded, err := json.Marshal(value)
++	if err != nil {
++		return false, fmt.Errorf("dashboard JSON is invalid: %w", err)
++	}
++	return strings.Contains(string(encoded), `"$plan_ref"`) || strings.Contains(string(encoded), `"$execution_ref"`), nil
++}
++
++func (a *AgentLoop) resolveDashboardBindings(dashboard map[string]interface{}, req LoopRequest) (map[string]interface{}, error) {
++	hasRefs, err := hasOpaqueDashboardRefs(dashboard)
++	if err != nil || !hasRefs {
++		return dashboard, err
++	}
++	result, err := a.mcpProxy.CallToolWithContext(artifactBridgeResolveTool, map[string]interface{}{"dashboard": dashboard}, req.OrgID, req.OrgName, req.ScopeOrgID)
++	if err != nil {
++		return nil, fmt.Errorf("artifact binding resolution failed: %w", err)
++	}
++	if result.IsError {
++		return nil, fmt.Errorf("artifact binding resolution failed: %s", extractText(result))
++	}
++	var resolved struct {
++		OK        bool                   `json:"ok"`
++		Error     string                 `json:"error"`
++		Dashboard map[string]interface{} `json:"dashboard"`
++	}
++	if err := json.Unmarshal([]byte(extractText(result)), &resolved); err != nil {
++		return nil, fmt.Errorf("artifact bridge returned invalid JSON: %w", err)
++	}
++	if !resolved.OK || resolved.Dashboard == nil {
++		return nil, fmt.Errorf("artifact bridge rejected dashboard bindings: %s", resolved.Error)
++	}
++	return resolved.Dashboard, nil
++}
++
++func (a *AgentLoop) resolvePatchBindings(args map[string]interface{}, req LoopRequest) (map[string]interface{}, error) {
++	hasRefs, err := hasOpaqueDashboardRefs(args)
++	if err != nil || !hasRefs {
++		return args, err
++	}
++	operations, ok := args["operations"].([]interface{})
++	if !ok {
++		return nil, fmt.Errorf("opaque dashboard bindings require a complete dashboard or panel add/replace operation")
++	}
++	output := make(map[string]interface{}, len(args))
++	for key, value := range args {
++		output[key] = value
++	}
++	resolvedOperations := make([]interface{}, 0, len(operations))
++	for index, rawOperation := range operations {
++		operation, ok := rawOperation.(map[string]interface{})
++		if !ok {
++			return nil, fmt.Errorf("dashboard operation %d is invalid", index)
++		}
++		value, hasValue := operation["value"]
++		hasValueRefs, err := hasOpaqueDashboardRefs(value)
++		if err != nil {
++			return nil, err
++		}
++		if !hasValueRefs {
++			resolvedOperations = append(resolvedOperations, operation)
++			continue
++		}
++		path, _ := operation["path"].(string)
++		if !hasValue || !strings.HasPrefix(strings.TrimSpace(path), "$.panels/") {
++			return nil, fmt.Errorf("opaque dashboard bindings in patch mode require a complete panel add/replace operation")
++		}
++		panel, ok := value.(map[string]interface{})
++		if !ok {
++			return nil, fmt.Errorf("opaque dashboard panel operation %d requires an object value", index)
++		}
++		resolved, err := a.resolveDashboardBindings(map[string]interface{}{"panels": []interface{}{panel}}, req)
++		if err != nil {
++			return nil, err
++		}
++		panels, ok := resolved["panels"].([]interface{})
++		if !ok || len(panels) != 1 {
++			return nil, fmt.Errorf("artifact bridge returned an invalid resolved panel")
++		}
++		resolvedPanel, ok := panels[0].(map[string]interface{})
++		if !ok {
++			return nil, fmt.Errorf("artifact bridge returned an invalid resolved panel")
++		}
++		resolvedOperation := make(map[string]interface{}, len(operation))
++		for key, item := range operation {
++			resolvedOperation[key] = item
++		}
++		resolvedOperation["value"] = resolvedPanel
++		resolvedOperations = append(resolvedOperations, resolvedOperation)
++	}
++	output["operations"] = resolvedOperations
++	return output, nil
++}
 +
 +func (a *AgentLoop) prepareBuiltInDashboardArgs(args map[string]interface{}, req LoopRequest) (map[string]interface{}, error) {
 +	dashboard, hasDashboard := args["dashboard"].(map[string]interface{})
@@ -37,7 +130,7 @@ index 0000000..a7ca849
 +		return output, nil
 +	}
 +	if !hasDashboard {
-+		return args, nil
++		return a.resolvePatchBindings(args, req)
 +	}
 +	if req.ForceGrafanaPreview {
 +		tags, _ := dashboard["tags"].([]interface{})
@@ -49,44 +142,23 @@ index 0000000..a7ca849
 +		}
 +		dashboard["tags"] = normalized
 +	}
-+	encoded, err := json.Marshal(dashboard)
++	resolved, err := a.resolveDashboardBindings(dashboard, req)
 +	if err != nil {
-+		return nil, fmt.Errorf("dashboard JSON is invalid: %w", err)
-+	}
-+	if !strings.Contains(string(encoded), `"$plan_ref"`) && !strings.Contains(string(encoded), `"$execution_ref"`) {
-+		return args, nil
-+	}
-+	result, err := a.mcpProxy.CallToolWithContext(artifactBridgeResolveTool, map[string]interface{}{"dashboard": dashboard}, req.OrgID, req.OrgName, req.ScopeOrgID)
-+	if err != nil {
-+		return nil, fmt.Errorf("artifact binding resolution failed: %w", err)
-+	}
-+	if result.IsError {
-+		return nil, fmt.Errorf("artifact binding resolution failed: %s", extractText(result))
-+	}
-+	var resolved struct {
-+		OK        bool                   `json:"ok"`
-+		Error     string                 `json:"error"`
-+		Dashboard map[string]interface{} `json:"dashboard"`
-+	}
-+	if err := json.Unmarshal([]byte(extractText(result)), &resolved); err != nil {
-+		return nil, fmt.Errorf("artifact bridge returned invalid JSON: %w", err)
-+	}
-+	if !resolved.OK || resolved.Dashboard == nil {
-+		return nil, fmt.Errorf("artifact bridge rejected dashboard bindings: %s", resolved.Error)
++		return nil, err
 +	}
 +	output := make(map[string]interface{}, len(args))
 +	for key, value := range args {
 +		output[key] = value
 +	}
-+	output["dashboard"] = resolved.Dashboard
++	output["dashboard"] = resolved
 +	return output, nil
 +}
 diff --git a/pkg/agent/dashboard_resolver_test.go b/pkg/agent/dashboard_resolver_test.go
 new file mode 100644
-index 0000000..9cd166c
+index 0000000..b1c5a9d
 --- /dev/null
 +++ b/pkg/agent/dashboard_resolver_test.go
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,50 @@
 +package agent
 +
 +import "testing"
@@ -124,8 +196,21 @@ index 0000000..9cd166c
 +		t.Fatal("preview patch unexpectedly accepted")
 +	}
 +}
++
++func TestPrepareBuiltInDashboardArgsRejectsOpaqueNonPanelPatch(t *testing.T) {
++	loop := &AgentLoop{}
++	args := map[string]interface{}{
++		"uid": "existing",
++		"operations": []interface{}{map[string]interface{}{
++			"op": "add", "path": "$.tags/-", "value": map[string]interface{}{"$plan_ref": "artifact://run/query-plan"},
++		}},
++	}
++	if _, err := loop.prepareBuiltInDashboardArgs(args, LoopRequest{}); err == nil {
++		t.Fatal("opaque non-panel patch unexpectedly bypassed resolver")
++	}
++}
 diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
-index c22dd6f..2550b09 100644
+index c22dd6f..b9349b4 100644
 --- a/pkg/agent/loop.go
 +++ b/pkg/agent/loop.go
 @@ -30,6 +30,9 @@ const nearLimitWarning = "[SYSTEM: You are approaching the iteration limit. Prod
@@ -744,7 +829,7 @@ index 0000000..d1a0acf
 +- [Transformations](https://grafana.com/docs/grafana/latest/panels-visualizations/query-transform-data/transform-data/)
 diff --git a/pkg/agent/skills/grafana-dashboarding/references/advanced-panels.md b/pkg/agent/skills/grafana-dashboarding/references/advanced-panels.md
 new file mode 100644
-index 0000000..6a06a18
+index 0000000..b06e3a5
 --- /dev/null
 +++ b/pkg/agent/skills/grafana-dashboarding/references/advanced-panels.md
 @@ -0,0 +1,87 @@
@@ -1193,7 +1278,7 @@ index 39554ef..fe3ce5e 100644
 +	}
 +}
 diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
-index 263e5e0..aa5697f 100644
+index 263e5e0..8b77f63 100644
 --- a/pkg/plugin/prompt_defaults.go
 +++ b/pkg/plugin/prompt_defaults.go
 @@ -62,15 +62,17 @@ For questions about alerts, incidents, or "what's wrong":
