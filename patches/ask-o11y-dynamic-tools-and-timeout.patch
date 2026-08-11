@@ -747,7 +747,7 @@ new file mode 100644
 index 0000000..6a06a18
 --- /dev/null
 +++ b/pkg/agent/skills/grafana-dashboarding/references/advanced-panels.md
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,86 @@
 +# Installed advanced panel contracts
 +
 +Use these as authoring references, not as a required panel sequence. Keep the user's requested panel type unless its data contract cannot be satisfied.
@@ -762,6 +762,7 @@ index 0000000..6a06a18
 +  "options": {
 +    "mapping": "manual",
 +    "series": [{
++      "frame": {"matcher": {"id": "byIndex", "options": 0}},
 +      "x": {"matcher": {"id": "byName", "options": "avg_generation_mw"}},
 +      "y": {"matcher": {"id": "byName", "options": "heat_rate"}}
 +    }]
@@ -769,7 +770,7 @@ index 0000000..6a06a18
 +}
 +```
 +
-+Use `{"mapping":"auto","series":[]}` when the first numeric/time field is X and all remaining numeric fields are intended Y series.
++In manual mapping, `frame.matcher` is required; use `{"id":"byIndex","options":0}` for the first query result frame. Use `{"mapping":"auto","series":[]}` only when the first numeric/time field is X and all remaining numeric fields are intended Y series.
 +
 +Source: Grafana `public/app/plugins/panel/xychart/panelcfg.cue`.
 +
