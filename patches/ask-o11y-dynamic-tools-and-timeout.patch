@@ -1357,6 +1357,32 @@ index 0c6dbaa..238c80b 100644
        modelSelector,
        graphitiEnabled,
        clearChat,
+diff --git a/src/components/Chat/hooks/useSessionManager.ts b/src/components/Chat/hooks/useSessionManager.ts
+index 2ee39c5..ef07dcd 100644
+--- a/src/components/Chat/hooks/useSessionManager.ts
++++ b/src/components/Chat/hooks/useSessionManager.ts
+@@ -1,5 +1,6 @@
+ import { useState, useEffect, useCallback, useRef } from 'react';
+ import { ChatMessage } from '../types';
++import { parseGrafanaLinks } from '../utils/grafanaLinkParser';
+ import {
+   listSessions,
+   getSession,
+@@ -99,7 +100,13 @@ export function useSessionManager(
+       try {
+         const session = await getSession(sessionId);
+         setCurrentSessionId_(session.id);
+-        setChatHistory(session.messages as ChatMessage[]);
++        setChatHistory(
++          (session.messages as ChatMessage[]).map((message) =>
++            message.role === 'assistant'
++              ? { ...message, pageRefs: parseGrafanaLinks(message.content) }
++              : message
++          )
++        );
+         setSessions((prev) => {
+           const metadata = {
+             id: session.id,
 diff --git a/src/components/Chat/hooks/useSidePanelState.ts b/src/components/Chat/hooks/useSidePanelState.ts
 index 0ed2b0e..05db5f7 100644
 --- a/src/components/Chat/hooks/useSidePanelState.ts
