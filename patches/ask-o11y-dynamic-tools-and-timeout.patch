@@ -1306,22 +1306,17 @@ index 263e5e0..8b77f63 100644
  ---
  
 diff --git a/src/components/Chat/Chat.tsx b/src/components/Chat/Chat.tsx
-index 0c6dbaa..238c80b 100644
+index 0c6dbaa..016db83 100644
 --- a/src/components/Chat/Chat.tsx
 +++ b/src/components/Chat/Chat.tsx
 @@ -1,5 +1,5 @@
  import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 -import { useTheme2 } from '@grafana/ui';
-+import { Button, useTheme2 } from '@grafana/ui';
++import { Icon, useTheme2 } from '@grafana/ui';
  
  import { useChat } from './hooks/useChat';
  import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
-@@ -102,10 +102,12 @@ function ChatComponent({
-   const [isHistoryOpen, setIsHistoryOpen] = useState(!readOnly);
- 
-   const {
-+    isOpen: isSidePanelOpen,
-     visiblePageRefs,
+@@ -106,6 +106,7 @@ function ChatComponent({
      showSidePanel,
      handleRemoveTab,
      handleClose: handleSidePanelClose,
@@ -1329,34 +1324,53 @@ index 0c6dbaa..238c80b 100644
    } = useSidePanelState({
      detectedPageRefs,
      currentSessionId: sessionManager.currentSessionId,
-@@ -174,6 +176,17 @@ function ChatComponent({
-       ) : modelSelector,
-       rightSlot: (
-         <div className="flex items-center gap-1">
-+          {visiblePageRefs.length > 0 && (
-+            <Button
-+              variant="secondary"
-+              size="sm"
-+              icon="columns"
-+              onClick={handleSidePanelToggle}
-+              aria-label={isSidePanelOpen ? 'Hide dashboard preview' : 'Show dashboard preview'}
-+            >
-+              {isSidePanelOpen ? 'Hide preview' : 'Show preview'}
-+            </Button>
-+          )}
-           {graphitiEnabled && hasMessages && <SaveToMemoryButton messages={chatHistory} />}
-           <HistoryButton onClick={openHistory} sessionCount={sessionManager.sessions.length} />
+@@ -228,7 +229,7 @@ function ChatComponent({
+   return (
+     <div
+       ref={containerRef}
+-      className="w-full h-full flex"
++      className="w-full h-full flex relative"
+       role="main"
+       aria-label="Chat interface"
+       style={{
+@@ -248,6 +249,22 @@ function ChatComponent({
+           <chatScene.Component model={chatScene} />
          </div>
-@@ -199,6 +212,9 @@ function ChatComponent({
-       chatInputRef,
-       bottomSpacerRef,
-       hasMessages,
-+      isSidePanelOpen,
-+      visiblePageRefs.length,
-+      handleSidePanelToggle,
-       modelSelector,
-       graphitiEnabled,
-       clearChat,
+       )}
++      {visiblePageRefs.length > 0 && allowEmbedding === true && !showSidePanel && (
++        <button
++          onClick={handleSidePanelToggle}
++          className="absolute right-0 top-1/2 z-10 flex items-center gap-1 rounded-l-md border px-2 py-2 text-xs font-medium shadow"
++          aria-label="Show dashboard preview"
++          title="Show preview"
++          style={{
++            backgroundColor: theme.colors.background.primary,
++            borderColor: theme.colors.border.weak,
++            color: theme.colors.text.primary,
++          }}
++        >
++          <Icon name="columns" size="sm" />
++          <span>Preview</span>
++        </button>
++      )}
+     </div>
+   );
+ }
+diff --git a/src/components/Chat/components/SidePanel/SidePanel.tsx b/src/components/Chat/components/SidePanel/SidePanel.tsx
+index 6233a98..18412ef 100644
+--- a/src/components/Chat/components/SidePanel/SidePanel.tsx
++++ b/src/components/Chat/components/SidePanel/SidePanel.tsx
+@@ -90,8 +90,8 @@ export const SidePanel: React.FC<SidePanelProps> = ({
+         <button
+           onClick={onClose}
+           className={cx('p-1.5 rounded-md transition-colors text-secondary', styles.hoverButton)}
+-          aria-label="Close panel"
+-          title="Close panel"
++          aria-label="Hide dashboard preview"
++          title="Hide preview"
+         >
+           <Icon name="times" size="md" />
+         </button>
 diff --git a/src/components/Chat/hooks/useSessionManager.ts b/src/components/Chat/hooks/useSessionManager.ts
 index 2ee39c5..ef07dcd 100644
 --- a/src/components/Chat/hooks/useSessionManager.ts
