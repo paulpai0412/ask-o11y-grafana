@@ -15,7 +15,7 @@ The four external MCP endpoints are independent capabilities:
 1. **Data Query Planner** creates bounded plans from authorized metadata and never executes them.
 2. **Grafana Query** is the only datasource-read executor for analysis frames and returns opaque authorized refs.
 3. **Sandbox Analysis** runs generated Python in a fresh network-denied OpenSandbox Code Interpreter and returns retained opaque outputs. It also supports cross-conversation list, inspect, and revise.
-4. **Artifact Bridge** is hidden from the model. Immediately before a built-in Grafana write, it resolves authorized `$plan_ref`, `$execution_ref`, CSV field bindings, and opaque asset URL placeholders. It does not select panels, generate chart JSON, or write Grafana.
+4. **Artifact Bridge** is hidden from the model. Immediately before a built-in Grafana write, it resolves authorized `$plan_ref` query targets or PNG asset URL placeholders. It does not select panels, generate chart JSON, or write Grafana.
 
 Ask O11y's built-in `mcp-grafana_update_dashboard` is the sole Dashboard writer. The dynamically selected Grafana dashboarding Skill advises the same LLM that authors the complete Dashboard JSON; live tool schemas remain authoritative. The host enforces approval, opaque-ref resolution, Preview state, and same-UID publication.
 
@@ -28,7 +28,7 @@ Grafana /api/ds/query
   → authorized query-plan and grafana-frame refs
   → trusted validity filtering
   → isolated generated Python
-  → named bounded CSV/image outputs plus schema metadata
+  → PNG analysis artifact plus bounded summary/provenance
   → LLM + selected Grafana Skill author Dashboard JSON
   → hidden Artifact Bridge resolves opaque bindings
   → approved built-in mcp-grafana_update_dashboard
@@ -37,7 +37,7 @@ Grafana /api/ds/query
   → host-normalized patch removes the Preview tag on the same UID
 ```
 
-Model-visible arguments never contain physical paths, credentials, raw frames, datasource query bodies, full execution payloads, MIME bodies, or signed asset URLs. Native panels receive trusted query/CSV targets from the bridge. Image panels contain an LLM-authored `$asset_url_NAME` placeholder plus an opaque `askO11yAssetBindings` entry; the bridge replaces only the URL. Sandbox's generic signed asset endpoint validates authorization and streams stored bytes without producing HTML, panel JSON, or charts.
+Model-visible arguments never contain physical paths, credentials, raw frames, datasource query bodies, full execution payloads, MIME bodies, or signed asset URLs. Native panels receive trusted query targets only when Sandbox was not called. Analysis dashboards contain image/text panels: the LLM authors a `$asset_url_NAME` placeholder plus an opaque `askO11yAssetBindings` entry, and the bridge replaces only the URL. Sandbox's generic signed asset endpoint validates authorization and streams stored bytes without producing HTML, panel JSON, or charts.
 
 Preview state lives only in the host-enforced first `ask-o11y-preview` tag. After a successful Preview write, the host retains its returned UID under the org/user/session identity and disables further tools for that turn. Publication exposes only built-in Dashboard read/update tools, derives the UID from that state, verifies the stored Dashboard still has the Preview tag first, removes that tag, and does not rerun queries, Python, or panel selection. Missing or stale lifecycle state fails closed.
 

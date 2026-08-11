@@ -7,9 +7,7 @@ built-in Grafana MCP remains the only dashboard writer.
 from __future__ import annotations
 
 import argparse
-import csv
 import importlib.util
-import io
 import json
 import os
 import sys
@@ -61,10 +59,9 @@ MAX_RPC_BODY_BYTES = 512 * 1024
 MAX_DASHBOARD_BYTES = 384 * 1024
 MAX_PANELS = 24
 MAX_TARGETS = 48
-MAX_INLINE_CSV_BYTES = 1024 * 1024
 MAX_ASSET_BINDINGS = 24
 ARTIFACT_PUBLIC_BASE = os.environ.get("ARTIFACT_PUBLIC_BASE", "http://127.0.0.1:8777").rstrip("/")
-PLACEHOLDER_KEYS = {"$plan_ref", "$execution_ref", "output_index", "fields", "refId", "datasource"}
+QUERY_PLACEHOLDER_KEYS = {"$plan_ref", "fields", "refId", "datasource"}
 
 
 def context_from_headers(headers) -> dict[str, str] | None:
@@ -95,6 +92,20 @@ def context_from_args(args: dict[str, Any]) -> dict[str, str]:
     return {"org_id": str(context["org_id"]), "user_id": str(context["user_id"])}
 
 
+def json_clone(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise WorkflowContractError("dashboard JSON is invalid") from exc
+
+
+def asset_expiry() -> int:
+    try:
+        return int(time.time()) + ARTIFACTS.retention_seconds
+    except (TypeError, ValueError) as exc:
+        raise WorkflowContractError("artifact retention is invalid") from exc
+
+
 def validate_plan(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or not isinstance(value.get("grafana_query"), dict):
         raise WorkflowContractError("plan_ref payload is invalid")
@@ -108,44 +119,6 @@ def validate_plan(value: Any) -> dict[str, Any]:
     return value
 
 
-def validate_execution(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or not isinstance(value.get("results"), list) or value.get("error"):
-        raise WorkflowContractError("execution_ref payload is invalid")
-    return value
-
-
-def csv_output(execution: dict[str, Any], index: Any) -> tuple[str, list[dict[str, str]]]:
-    if not isinstance(index, int) or index < 0 or index >= len(execution["results"]):
-        raise WorkflowContractError("output_index is invalid")
-    result = execution["results"][index]
-    mime = result.get("mime") if isinstance(result, dict) else None
-    data = mime.get("text/csv") if isinstance(mime, dict) else None
-    if not isinstance(data, str):
-        raise WorkflowContractError("artifact dashboard targets require a bounded text/csv output")
-    if len(data.encode()) > MAX_INLINE_CSV_BYTES:
-        raise WorkflowContractError("CSV output is too large for an inline Grafana target")
-    reader = csv.DictReader(io.StringIO(data))
-    if not reader.fieldnames or len(reader.fieldnames) > 100 or len(set(reader.fieldnames)) != len(reader.fieldnames):
-        raise WorkflowContractError("CSV output schema is invalid")
-    rows = []
-    for _, row in zip(range(100), reader):
-        rows.append(row)
-    columns = []
-    for field in reader.fieldnames:
-        values = [row.get(field, "") for row in rows if row.get(field, "") != ""]
-        value_type = "string"
-        if values:
-            try:
-                for value in values:
-                    float(value)
-                value_type = "number"
-            except ValueError:
-                if all("-" in value and ":" in value for value in values):
-                    value_type = "timestamp"
-        columns.append({"selector": field, "text": field, "type": value_type})
-    return data, columns
-
-
 def selected_columns(columns: list[dict[str, Any]], fields: list[str]) -> list[dict[str, Any]]:
     by_name = {str(item.get("selector")): item for item in columns if isinstance(item, dict) and item.get("selector")}
     unknown = sorted(set(fields) - set(by_name))
@@ -155,28 +128,19 @@ def selected_columns(columns: list[dict[str, Any]], fields: list[str]) -> list[d
 
 
 def resolve_target(context: dict[str, str], target: dict[str, Any]) -> dict[str, Any]:
-    if "$plan_ref" not in target and "$execution_ref" not in target:
+    if "$execution_ref" in target:
+        raise WorkflowContractError("analysis artifacts may only be attached through an image asset binding")
+    if "$plan_ref" not in target:
         if target:
             raise WorkflowContractError("nonempty dashboard targets require an authorized opaque binding")
         return target
-    unexpected = sorted(set(target) - PLACEHOLDER_KEYS)
+    unexpected = sorted(set(target) - QUERY_PLACEHOLDER_KEYS)
     if unexpected:
         raise WorkflowContractError("opaque dashboard target has unsupported keys: " + ", ".join(unexpected))
     plan_ref = target.get("$plan_ref")
-    execution_ref = target.get("$execution_ref")
-    if plan_ref is None and isinstance(execution_ref, str):
-        execution_run_id, execution_parts = parse_artifact_ref(execution_ref)
-        if execution_parts != ("sandbox-execution",):
-            raise WorkflowContractError("$execution_ref must reference sandbox-execution")
-        provenance_ref = f"artifact://{execution_run_id}/sandbox-provenance"
-        provenance = ARTIFACTS.read_json(context, provenance_ref)
-        input_ref = provenance.get("input_frame_ref") if isinstance(provenance, dict) else None
-        if not isinstance(input_ref, str) or parse_artifact_ref(input_ref)[1] != ("grafana-frame",):
-            raise WorkflowContractError("Sandbox provenance has no authorized Grafana input ref")
-        plan_ref = f"artifact://{parse_artifact_ref(input_ref)[0]}/query-plan"
     if not isinstance(plan_ref, str):
-        raise WorkflowContractError("opaque dashboard target requires $plan_ref or derivable $execution_ref provenance")
-    run_id, parts = parse_artifact_ref(plan_ref)
+        raise WorkflowContractError("opaque query target requires $plan_ref")
+    _, parts = parse_artifact_ref(plan_ref)
     if parts != ("query-plan",):
         raise WorkflowContractError("$plan_ref must reference query-plan")
     plan = validate_plan(ARTIFACTS.read_json(context, plan_ref))
@@ -184,36 +148,15 @@ def resolve_target(context: dict[str, str], target: dict[str, Any]) -> dict[str,
     ref_id = target.get("refId", "A")
     if not isinstance(ref_id, str) or not ref_id or len(ref_id) > 8:
         raise WorkflowContractError("dashboard target refId is invalid")
-    if execution_ref is None:
-        if not isinstance(fields, list) or not fields or len(fields) > 100 or not all(isinstance(item, str) and item for item in fields):
-            raise WorkflowContractError("opaque query target requires bounded fields")
-        query = json.loads(json.dumps(plan["grafana_query"]))
-        columns = query.get("columns")
-        if not isinstance(columns, list):
-            raise WorkflowContractError("query plan has no trusted column mapping")
-        query["columns"] = selected_columns(columns, fields)
-        query["refId"] = ref_id
-        return query
-    if not isinstance(execution_ref, str) or parse_artifact_ref(execution_ref)[1] != ("sandbox-execution",):
-        raise WorkflowContractError("$execution_ref must reference sandbox-execution")
-    execution = validate_execution(ARTIFACTS.read_json(context, execution_ref))
-    data, columns = csv_output(execution, target.get("output_index"))
-    if fields is None:
-        fields = [column["selector"] for column in columns]
     if not isinstance(fields, list) or not fields or len(fields) > 100 or not all(isinstance(item, str) and item for item in fields):
-        raise WorkflowContractError("opaque artifact target requires bounded fields")
-    return {
-        "refId": ref_id,
-        "datasource": {"uid": plan["datasource_uid"], "type": plan["datasource_type"]},
-        "type": "csv",
-        "source": "inline",
-        "data": data,
-        "parser": "backend",
-        "format": "table",
-        "columns": selected_columns(columns, fields),
-        "csv_options": {"delimiter": ",", "skip_empty_lines": True},
-        "url_options": {"method": "GET", "data": ""},
-    }
+        raise WorkflowContractError("opaque query target requires bounded fields")
+    query = json_clone(plan["grafana_query"])
+    columns = query.get("columns")
+    if not isinstance(columns, list):
+        raise WorkflowContractError("query plan has no trusted column mapping")
+    query["columns"] = selected_columns(columns, fields)
+    query["refId"] = ref_id
+    return query
 
 
 def replace_asset_placeholder(value: Any, placeholder: str, asset_url: str) -> tuple[Any, int]:
@@ -271,7 +214,7 @@ def resolve_asset_bindings(context: dict[str, str], panel: dict[str, Any], count
             context=context,
             execution_ref=execution_ref,
             output_index=output_index,
-            expires_at=int(time.time()) + ARTIFACTS.retention_seconds,
+            expires_at=asset_expiry(),
         )
         panel, replacements = replace_asset_placeholder(panel, placeholder, asset_url)
         if replacements == 0:
@@ -291,7 +234,7 @@ def resolve_panels(context: dict[str, str], panels: Any, counters: dict[str, int
             raise WorkflowContractError(f"dashboard has more than {MAX_PANELS} panels")
         if not isinstance(panel, dict):
             raise WorkflowContractError("dashboard panel is invalid")
-        item = resolve_asset_bindings(context, json.loads(json.dumps(panel)), counters)
+        item = resolve_asset_bindings(context, json_clone(panel), counters)
         targets = item.get("targets", [])
         if not isinstance(targets, list):
             raise WorkflowContractError("dashboard panel targets must be an array")
@@ -317,9 +260,11 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
             raise WorkflowContractError("dashboard is required")
         if len(json.dumps(dashboard, ensure_ascii=False).encode()) > MAX_DASHBOARD_BYTES:
             raise WorkflowContractError("dashboard exceeds resolver size limit")
-        output = json.loads(json.dumps(dashboard))
+        output = json_clone(dashboard)
         counters = {"panels": 0, "targets": 0, "assets": 0}
         output["panels"] = resolve_panels(context, output.get("panels", []), counters)
+        if counters["assets"] and counters["targets"]:
+            raise WorkflowContractError("analysis dashboards may only contain image/text panels, not Grafana data targets")
     except (ArtifactAuthError, PermissionError) as exc:
         return error_response(step=step, error=f"unauthorized artifact access: {exc}", recoverable=False, instruction="Stop; the opaque dashboard binding is not authorized for this context.")
     except (WorkflowContractError, OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
@@ -426,15 +371,18 @@ def self_check() -> int:
             "grafana_query": {"refId": "A", "datasource": {"uid": "csv-poc", "type": "yesoreyeram-infinity-datasource"}, "type": "csv", "source": "url", "url": "http://data.example/input.csv", "parser": "backend", "format": "table", "columns": [{"selector": "date", "text": "date", "type": "timestamp"}, {"selector": "x", "text": "x", "type": "number"}, {"selector": "y", "text": "y", "type": "number"}]},
         })
         execution_ref = ARTIFACTS.write_json(context, run_id, "sandbox-execution", {"results": [
-            {"mime": {"text/csv": "date,x,y\n2026-01-01,1,2\n"}, "display_name": "derived.csv"},
             {"mime": {"image/png": "iVBORw0KGgo="}, "display_name": "plot.png"},
         ], "error": None})
-        dashboard = {"title": "Dynamic", "panels": [
+        query_dashboard = {"title": "Query", "panels": [
             {"type": "xychart", "targets": [{"$plan_ref": plan_ref, "fields": ["x", "y"], "refId": "A"}]},
-            {"type": "trend", "targets": [{"$plan_ref": plan_ref, "$execution_ref": execution_ref, "output_index": 0, "fields": ["date", "x", "y"], "refId": "B"}]},
-            {"type": "text", "options": {"mode": "html", "content": "<img src=\"$asset_url_plot\">"}, "askO11yAssetBindings": [{"placeholder": "$asset_url_plot", "$execution_ref": execution_ref, "output_index": 1}]},
         ]}
-        result = resolve_dashboard_refs({"dashboard": dashboard, "_server_context": context})
+        image_dashboard = {"title": "Analysis", "panels": [
+            {"type": "text", "options": {"mode": "html", "content": "<img src=\"$asset_url_plot\">"}, "askO11yAssetBindings": [{"placeholder": "$asset_url_plot", "$execution_ref": execution_ref, "output_index": 0}]},
+        ]}
+        result = resolve_dashboard_refs({"dashboard": query_dashboard, "_server_context": context})
+        image_result = resolve_dashboard_refs({"dashboard": image_dashboard, "_server_context": context})
+        analysis_target = resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$execution_ref": execution_ref}]}]}, "_server_context": context})
+        mixed_dashboard = resolve_dashboard_refs({"dashboard": {"panels": [*query_dashboard["panels"], *image_dashboard["panels"]]}, "_server_context": context})
         bad = resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$plan_ref": plan_ref, "fields": ["missing"]}]}]}, "_server_context": context})
         raw_target = resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"datasource": {"uid": "raw"}, "expr": "up"}]}]}, "_server_context": context})
         nested = {"targets": []}
@@ -444,15 +392,16 @@ def self_check() -> int:
         checks = {
             "panel_json_untouched": result.get("dashboard", {}).get("panels", [{}])[0].get("type") == "xychart",
             "plan_ref_resolved_server_side": result.get("dashboard", {}).get("panels", [{}])[0].get("targets", [{}])[0].get("url") == "http://data.example/input.csv",
-            "artifact_ref_resolved_to_inline_csv": result.get("dashboard", {}).get("panels", [{}, {}])[1].get("targets", [{}])[0].get("source") == "inline",
             "opaque_refs_removed_before_grafana": "$plan_ref" not in json.dumps(result.get("dashboard", {})),
-            "asset_url_resolved_without_panel_generation": "/assets/" in result.get("dashboard", {}).get("panels", [{}, {}, {}])[2].get("options", {}).get("content", "") and "askO11yAssetBindings" not in result.get("dashboard", {}).get("panels", [{}, {}, {}])[2],
+            "asset_url_resolved_without_panel_generation": image_result.get("ok") and "/assets/" in image_result.get("dashboard", {}).get("panels", [{}])[0].get("options", {}).get("content", "") and "askO11yAssetBindings" not in image_result.get("dashboard", {}).get("panels", [{}])[0],
+            "analysis_target_rejected": not analysis_target.get("ok"),
+            "mixed_analysis_and_native_targets_rejected": not mixed_dashboard.get("ok"),
             "unknown_field_rejected": not bad.get("ok"),
             "raw_target_rejected": not raw_target.get("ok"),
             "nested_panel_limit_enforced": not excessive_panels.get("ok"),
         }
         if not result.get("ok") or not all(checks.values()):
-            raise SystemExit(json.dumps({"ok": False, "checks": checks, "result": result, "bad": bad}, indent=2))
+            raise SystemExit(json.dumps({"ok": False, "checks": checks, "result": result, "image_result": image_result, "bad": bad}, indent=2))
         print(json.dumps({"ok": True, "checks": list(checks)}, indent=2))
     return 0
 

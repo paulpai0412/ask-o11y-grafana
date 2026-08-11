@@ -134,7 +134,7 @@ index c22dd6f..2550b09 100644
  const maxTruncationRetries = 1
 +const maxSelectedTools = 24
 +const publicationQuestion = "是否確認將此 Grafana Preview 正式發佈至 Dashboard？"
-+const grafanaPreviewNudge = "[SYSTEM: The confirmed intent requires a visually inspectable Grafana Preview, not a chat-only Result Preview. Use the selected dashboarding skill and mcp-grafana_update_dashboard with one complete dashboard JSON. Use only opaque $plan_ref/$execution_ref target placeholders; the trusted host resolves them. The host will enforce preview status. Return the exact Grafana URL and stop for publication confirmation.]"
++const grafanaPreviewNudge = "[SYSTEM: The confirmed intent requires a visually inspectable Grafana Preview, not a chat-only Result Preview. Use the selected dashboarding skill and mcp-grafana_update_dashboard with one complete dashboard JSON. For an analysis result, use only an opaque PNG asset binding and image/text panels; use $plan_ref targets only when Sandbox was not called. The trusted host resolves them. The host will enforce preview status. Return the exact Grafana URL and stop for publication confirmation.]"
  
  // truncatedToolCallNudge is injected after a truncated tool call is discarded so
  // the model reissues a smaller, complete call rather than repeating the cutoff.
@@ -1194,7 +1194,7 @@ diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
 index 263e5e0..aa5697f 100644
 --- a/pkg/plugin/prompt_defaults.go
 +++ b/pkg/plugin/prompt_defaults.go
-@@ -62,15 +62,19 @@ For questions about alerts, incidents, or "what's wrong":
+@@ -62,15 +62,17 @@ For questions about alerts, incidents, or "what's wrong":
  - Discover available attribute names and values before constructing TraceQL queries
  - Use attribute discovery tools to find the exact schema before filtering
  
@@ -1210,10 +1210,8 @@ index 263e5e0..aa5697f 100644
 +When Sandbox output metadata includes an image asset and the user requested that image in the Dashboard, use an opaque panel asset binding according to the selected skill. Never author, copy, or invent an ` + "`/assets/`" + ` URL or base64/MIME body.
  
 -This keeps each tool call payload small and reliable.
-+When an authorized query plan or Sandbox CSV output supplies panel data, put only opaque target placeholders in model-authored dashboard JSON:
-+- ` + "`$plan_ref`" + ` + ` + "`fields`" + ` for the trusted Grafana query.
-+- ` + "`$plan_ref`" + ` + ` + "`$execution_ref`" + ` + ` + "`output_index`" + ` + ` + "`fields`" + ` for a named Sandbox CSV output. The output index must appear in ` + "`output_summary.tabular_outputs`" + `; never bind a non-tabular output as a target.
-+Placeholder targets contain only these opaque keys plus ` + "`refId`" + `; do not add datasource, URL, query, parser, or data fields because the trusted host supplies them. A Sandbox table intended for a native Grafana panel must be emitted with a display name ending exactly in ` + "`.csv`" + ` so trusted capture returns a typed CSV artifact.
++When an authorized query plan supplies panel data and Sandbox was not called, put only ` + "`$plan_ref`" + ` + ` + "`fields`" + ` plus ` + "`refId`" + ` in a model-authored target. Do not add datasource, URL, query, parser, or data fields because the trusted host supplies them.
++An analysis dashboard may contain only image/text panels. Bind the requested Sandbox PNG as an opaque asset; never put ` + "`$execution_ref`" + ` in a panel target or combine an analysis asset with a Grafana data target.
 +The host resolves these placeholders immediately before dispatch; never reconstruct datasource queries or expose raw artifact data.
 +
 +For requested previews, create one complete dashboard using the intended final title; preview status lives only in the host-enforced first tag. Stop with its exact Grafana URL. After explicit publication confirmation, patch that same UID; the host normalizes the mutation to remove only the preview tag. Never change the requested panel type or analytical meaning without confirmation.

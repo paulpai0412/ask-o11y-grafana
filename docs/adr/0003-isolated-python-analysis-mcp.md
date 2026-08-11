@@ -21,7 +21,7 @@ The external runtime endpoints are:
 - Sandbox Analysis: isolated artifact-only computation.
 - Artifact Bridge: hidden opaque-binding resolver with no Grafana write tool.
 
-Ask O11y's built-in `mcp-grafana_update_dashboard` is the sole Dashboard writer. The same Ask O11y LLM dynamically selects the embedded Grafana dashboarding Skill and authors complete Dashboard JSON. The bridge resolves only authorized query, CSV, and asset bindings immediately before dispatch; it never selects panels, layouts, methods, or chart options.
+Ask O11y's built-in `mcp-grafana_update_dashboard` is the sole Dashboard writer. The same Ask O11y LLM dynamically selects the embedded Grafana dashboarding Skill and authors complete Dashboard JSON. The bridge resolves query bindings for dashboards that did not use Sandbox, or PNG asset bindings for analysis dashboards; it never selects panels, layouts, methods, or chart options.
 
 A requested Grafana visualization creates a real host-approved Dashboard tagged `ask-o11y-preview`. The host binds the returned UID to the org/user/session and disables further tools for that turn. After confirmation, it exposes only built-in Dashboard read/update capabilities, derives and verifies that reviewed UID/tag, then removes the Preview tag. Missing or mismatched lifecycle state fails closed; query execution, Python, and panel selection are not repeated.
 
@@ -37,7 +37,7 @@ This ADR supersedes ADR 0002's deterministic analysis topology and the earlier R
 - One LLM owns both analysis planning and Dashboard authoring; Skills supply advisory Grafana knowledge.
 - Live Grafana tool schemas outrank embedded Skill documentation.
 - The hidden bridge remains a narrow trust boundary rather than a visualization service.
-- Named `.csv` outputs provide bounded field metadata for native Grafana targets; PNG and other supported assets are delivered without model-visible bytes or signed URLs.
+- Analysis dashboards are static image reports: Sandbox PNG assets are delivered without model-visible bytes or signed URLs, and may not become native Grafana data targets.
 - Preview/publication lifecycle is host-enforced safety state, not a general workflow DAG.
 - The pinned analysis image can provide NumPy, SciPy, pandas, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU XGBoost, LightGBM, imbalanced-learn, Optuna, and CJK fonts without runtime installation.
 

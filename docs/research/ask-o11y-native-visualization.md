@@ -24,18 +24,18 @@ MCP `tools/call` 的回應不是 Grafana datasource。原始 Ask O11y 的 MCP pr
 它不會將任意 JSON、DataFrame 或 artifact 註冊成 Grafana query target。因此，分析結果若不再能從原始 datasource 重算，就至少需要一個 Grafana 可查詢的表面：
 
 - 只使用 Grafana transformations 能完成的計算：Dashboard 直接 query 原 datasource，將 transformation 寫進 panel；無須 Analysis MCP。
-- ML／預測／相關矩陣等結果：將輸出保存成受控 artifact。命名 CSV 可被橋接成原生 panel target；PNG 等資產由橋接器解析為短效簽名 URL，供模型撰寫的 dashboard panel 顯示。
+- ML／預測／相關矩陣等結果：將輸出保存成受控 PNG artifact；橋接器解析為短效簽名 URL，供模型撰寫的 image/text dashboard panel 顯示。
 
 這不是多餘資料流，而是 Grafana 必須在 panel render 時取得資料的必要介面。不能安全地讓 dashboard 直接引用一次性 MCP tool result。
 
 ## 對此 repo 的影響
 
-目前已採用 sandbox 路徑：Ask O11y built-in `mcp-grafana_update_dashboard` 是唯一 dashboard writer；隱藏的 Artifact Bridge 只解析授權的 `$plan_ref`、`$execution_ref`、CSV target 與 PNG asset placeholders。舊 Engineering/Finance MCP 與外部 Renderer 已移除。
+目前已採用 sandbox 路徑：Ask O11y built-in `mcp-grafana_update_dashboard` 是唯一 dashboard writer；隱藏的 Artifact Bridge 只解析 query-only 的 `$plan_ref` 或 analysis PNG asset placeholders。舊 Engineering/Finance MCP 與外部 Renderer 已移除。
 
 分流如下：
 
 - **query-only**：built-in Grafana MCP 建立保有原 datasource targets 的 dashboard。
-- **analysis-required**：Sandbox Analysis 產出命名 CSV 或 PNG artifact；Bridge 安全地解析 binding，仍由 built-in MCP 寫入 dashboard。
+- **analysis-required**：Sandbox Analysis 產出 PNG artifact 與摘要；Bridge 安全地解析 image binding，仍由 built-in MCP 寫入 dashboard。
 
 不要要求 Ask O11y 從任意 JSON 猜圖；分析輸出至少應包含 panel type 與欄位語意（time/value、category/value、x/y 等）。
 

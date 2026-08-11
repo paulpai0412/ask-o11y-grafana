@@ -53,7 +53,7 @@ Rules:
 - Trusted bootstrap constructs and filters `df` before generated code runs, then unlinks the input bundle.
 - Source is UTF-8 and limited to 32 KiB. The MCP hashes and transfers it but never executes it locally.
 - The sandbox receives `df`, `pd`, `np`, `display(value)`, and `emit(value, name=None)`.
-- A table intended for a native panel is emitted with a display name ending in `.csv`; trusted capture records `text/csv`, row count, field names, and logical types.
+- An analysis dashboard is a static report: generated Python emits a Matplotlib PNG plus optional textual summary; no Sandbox output becomes a native Grafana chart target.
 - Output names are sanitized metadata and never filesystem paths.
 - Raw frames, query bodies, physical paths, credentials, full MIME payloads, stdout values, and exception values are not returned to the model.
 
@@ -67,21 +67,10 @@ Success returns opaque refs, validity evidence, provenance, and compact output m
     "provenance_ref": "artifact://run_…/sandbox-provenance"
   },
   "output_summary": {
-    "result_count": 2,
-    "tabular_outputs": [
-      {
-        "output_index": 0,
-        "display_name": "importance.csv",
-        "row_count": 16,
-        "fields": [
-          {"name": "feature", "type": "string"},
-          {"name": "mean_abs_shap", "type": "number"}
-        ]
-      }
-    ],
+    "result_count": 1,
     "assets": [
       {
-        "output_index": 1,
+        "output_index": 0,
         "display_name": "shap.png",
         "mime_type": "image/png",
         "$execution_ref": "artifact://run_…/sandbox-execution"
@@ -133,7 +122,7 @@ A native query target is model-authored as:
 }
 ```
 
-A named CSV target additionally uses `$execution_ref` and `output_index`. If its fields are omitted, the bridge binds the actual bounded CSV header; it never guesses fields. The trusted plan supplies datasource identity, URL/query body, parser, and column mapping.
+An analysis dashboard may not contain Grafana data targets. It uses only PNG asset bindings and optional text panels. A dashboard that did not call Sandbox may use `$plan_ref` query targets; the bridge rejects a dashboard that mixes an analysis asset with a data target.
 
 For an image, the LLM authors its chosen panel and an opaque URL placeholder:
 
@@ -180,10 +169,10 @@ The reproducible Ask O11y v0.3.2 integration patch is `patches/ask-o11y-dynamic-
 4. Missing identity, foreign refs, raw frames, unsupported arguments, and oversized inputs fail closed.
 5. Trusted validity filtering runs before generated code and is verified against the source row count.
 6. Sandbox execution has deny-all egress, bounded resources/output, no credentials, no volumes, and unconditional cleanup.
-7. Named CSV/image outputs remain behind authorized refs; signed URLs are host-resolved and never authored by the model.
+7. Analysis PNG outputs remain behind authorized refs; signed URLs are host-resolved and never authored by the model.
 8. Artifact Bridge preserves model-authored panels/options, resolves only authorized bindings, and exposes no Grafana write tool.
 9. Preview is a real tagged Dashboard; publication removes the tag on the same UID without rerunning query or Python.
-10. E2E proves SHAP PNG visibility, native CSV Bar chart data, dynamic XY authoring, built-in-only publication, and absence of model-visible bridge calls.
+10. E2E proves SHAP PNG visibility without an analysis data target, query-only dynamic XY authoring, built-in-only publication, and absence of model-visible bridge calls.
 11. Production deployment adds OpenSandbox authentication and gVisor, Kata, or Firecracker; local `runc` evidence is not production attestation.
 
 ## Deferred

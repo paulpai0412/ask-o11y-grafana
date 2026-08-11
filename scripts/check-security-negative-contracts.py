@@ -89,9 +89,9 @@ def main() -> int:
             redacted_error = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "raise RuntimeError('DO_NOT_EXPOSE')", "_server_context": context}, executor=lambda *_: audited_execution({"name": "DO_NOT_EXPOSE", "value": "DO_NOT_EXPOSE"}))
             checks.append(require("sandbox_exception_value_redacted", not redacted_error.get("ok") and "DO_NOT_EXPOSE" not in json.dumps(redacted_error), redacted_error))
             syntax_error = sandbox.execute_python_analysis({"frame_ref": frame_ref, "python_code": "x = [{", "_server_context": context}, executor=lambda *_: audited_execution({"name": "SyntaxError", "value": "'[' was never closed"}))
-            checks.append(require("sandbox_syntax_error_recoverable_without_value", not syntax_error.get("ok") and syntax_error.get("recoverable") is True and "SyntaxError" in syntax_error.get("error", "") and "never closed" not in json.dumps(syntax_error), syntax_error))
+            checks.append(require("sandbox_syntax_error_recoverable_without_value", not syntax_error.get("ok") and bool(syntax_error.get("recoverable")) and "SyntaxError" in syntax_error.get("error", "") and "never closed" not in json.dumps(syntax_error), syntax_error))
 
-            execution_ref = store.write_json(context, run_id, "sandbox-execution", {"results": [{"mime": {"text/csv": "date,x,y\n2026-01-01,1,2\n"}, "display_name": "derived.csv"}], "stdout": [], "stderr": [], "error": None})
+            execution_ref = store.write_json(context, run_id, "sandbox-execution", {"results": [{"mime": {"image/png": "iVBORw0KGgo="}, "display_name": "derived.png"}], "stdout": [], "stderr": [], "error": None})
             foreign_binding = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$plan_ref": valid["plan_ref"], "fields": ["x"]}]}]}, "_server_context": other})
             checks.append(require("artifact_bridge_authorization", not foreign_binding.get("ok") and "context mismatch" in foreign_binding.get("error", ""), foreign_binding))
             unknown_binding = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$plan_ref": valid["plan_ref"], "fields": ["missing"]}]}]}, "_server_context": context})
@@ -105,10 +105,12 @@ def main() -> int:
                 nested = {"targets": [], "panels": [nested]}
             excessive_panels = bridge.resolve_dashboard_refs({"dashboard": {"panels": [nested]}, "_server_context": context})
             checks.append(require("artifact_bridge_nested_panel_limit", not excessive_panels.get("ok") and "more than" in excessive_panels.get("error", ""), excessive_panels))
-            resolved = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"type": "trend", "options": {"xField": "date"}, "targets": [{"$plan_ref": valid["plan_ref"], "$execution_ref": execution_ref, "output_index": 0, "fields": ["date", "x", "y"]}]}]}, "_server_context": context})
+            resolved = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"type": "trend", "options": {"xField": "date"}, "targets": [{"$plan_ref": valid["plan_ref"], "fields": ["date", "x", "y"]}]}]}, "_server_context": context})
+            analysis_target = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$execution_ref": execution_ref}]}]}, "_server_context": context})
             panel = resolved.get("dashboard", {}).get("panels", [{}])[0]
             checks.append(require("artifact_bridge_preserves_model_panel_json", resolved.get("ok") and panel.get("type") == "trend" and panel.get("options") == {"xField": "date"}, resolved))
-            checks.append(require("artifact_bridge_resolves_refs_without_writes", panel.get("targets", [{}])[0].get("source") == "inline" and [tool["name"] for tool in bridge.TOOLS] == ["resolve_dashboard_refs"], resolved))
+            checks.append(require("artifact_bridge_resolves_query_without_writes", panel.get("targets", [{}])[0].get("source") == "url" and [tool["name"] for tool in bridge.TOOLS] == ["resolve_dashboard_refs"], resolved))
+            checks.append(require("artifact_bridge_rejects_analysis_as_chart_data", not analysis_target.get("ok") and "image asset binding" in analysis_target.get("error", ""), analysis_target))
 
             runtime_tools = {tool["name"] for tool in dqp.TOOLS}
             checks.append(require("legacy_wferp_route_not_exposed", "plan_wferp_query" not in runtime_tools and "plan_wferp_query" not in dqp.HANDLERS, sorted(runtime_tools)))

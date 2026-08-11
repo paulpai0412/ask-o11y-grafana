@@ -76,7 +76,13 @@ def tool_arguments(status: dict[str, Any], name: str) -> list[dict[str, Any]]:
     for event in status.get("events", []):
         data = event.get("data") or {}
         if event.get("type") == "tool_call_start" and data.get("name") == name:
-            output.append(json.loads(data.get("arguments") or "{}"))
+            try:
+                arguments = json.loads(data.get("arguments") or "{}")
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"invalid {name} arguments") from exc
+            if not isinstance(arguments, dict):
+                raise RuntimeError(f"invalid {name} arguments")
+            output.append(arguments)
     return output
 
 
@@ -140,7 +146,7 @@ def run_xy_skill_flow() -> dict[str, Any]:
 
 
 def main() -> int:
-    preview = start_run("請用 `u1-operating-daily` 做 Random Forest heat_rate 解釋與時間切分評估，產生 SHAP beeswarm PNG，並輸出 feature、mean_abs_shap 的命名 CSV；Grafana Preview 必須同時顯示 SHAP 圖與原生 Bar chart。使用 dashboarding skill 與內建 Grafana MCP。先提供 Analysis Preview；未確認前不要執行查詢、Python 或 Grafana 寫入。")
+    preview = start_run("請用 `u1-operating-daily` 做 Random Forest heat_rate 解釋與時間切分評估，產生 SHAP beeswarm PNG。Grafana Preview 只顯示這張分析 PNG 與文字摘要，不要建立任何原生 Grafana data chart。使用 dashboarding skill 與內建 Grafana MCP。先提供 Analysis Preview；未確認前不要執行查詢、Python 或 Grafana 寫入。")
     preview_status, _ = poll_run(preview["runId"], False)
     preview_tools = tool_names(preview_status)
     require(preview_status.get("status") == "completed" and not tool_errors(preview_status), "Analysis Preview failed")
@@ -148,7 +154,7 @@ def main() -> int:
     session_id = str(preview.get("sessionId") or preview_status.get("sessionId") or "")
     require(bool(session_id), "session missing")
 
-    execution = start_run("確認執行並建立可檢視的 Grafana Preview；不要正式發佈。Dashboard 必須使用 opaque asset binding 顯示 SHAP PNG，並使用命名 CSV 的 feature 與 mean_abs_shap 建立原生 Bar chart。", session_id)
+    execution = start_run("確認執行並建立可檢視的 Grafana Preview；不要正式發佈。Dashboard 必須使用 opaque asset binding 顯示 SHAP PNG，並可附文字摘要；不得建立原生 Grafana data chart 或任何 panel target。", session_id)
     execution_status, execution_approvals = poll_run(execution["runId"], True)
     execution_names = tool_names(execution_status)
     errors = tool_errors(execution_status)
@@ -170,7 +176,7 @@ def main() -> int:
     require("$execution_ref" not in json.dumps(stored) and "askO11yAssetBindings" not in json.dumps(stored), "opaque refs reached Grafana")
     image_panels = [panel for panel in stored["panels"] if "/assets/" in json.dumps(panel)]
     data_panels = [panel for panel in stored["panels"] if panel.get("targets")]
-    require(bool(image_panels) and bool(data_panels), "Grafana Preview does not contain both SHAP image and native data chart")
+    require(bool(image_panels) and not data_panels, "analysis Grafana Preview must contain only image/text panels")
     asset_match = re.search(r'(http://[^"\\ ]+/assets/[^"\\ ]+)', json.dumps(image_panels[0]))
     require(asset_match is not None, "signed SHAP asset URL missing")
     asset_evidence = {}
@@ -180,8 +186,6 @@ def main() -> int:
             png_magic = response.read(8).startswith(b"\x89PNG")
             require(content_type == "image/png" and png_magic, "SHAP asset URL did not return PNG")
             asset_evidence = {"content_type": content_type, "png_magic": png_magic}
-    data_evidence = assert_target_has_data(data_panels[0]["targets"][0])
-
     publication = start_run("確認將剛才已檢視的 Grafana Preview 正式發佈。只 patch 同一 UID 移除 preview 狀態，不要重跑查詢、Python 或圖表選擇。", session_id)
     publication_status, publication_approvals = poll_run(publication["runId"], True)
     publication_names = tool_names(publication_status)
@@ -194,7 +198,7 @@ def main() -> int:
     evidence = {
         "ok": True,
         "preview": {"tools": preview_tools},
-        "analysis_preview": {"uid": uid, "tools": execution_names, "approval_count": len(execution_approvals), "asset_evidence": asset_evidence, "data_evidence": data_evidence},
+        "analysis_preview": {"uid": uid, "tools": execution_names, "approval_count": len(execution_approvals), "asset_evidence": asset_evidence, "analysis_has_no_data_targets": True},
         "publication": {"tools": publication_names, "approval_count": len(publication_approvals)},
         "xy_skill_flow": xy,
         "validation": {
@@ -205,7 +209,8 @@ def main() -> int:
             "preview_before_publication": True,
             "same_uid_promoted": True,
             "xy_mapping_valid": True,
-            "panel_targets_return_data": True,
+            "query_only_panel_targets_return_data": True,
+            "analysis_uses_image_only": True,
             "shap_png_visible_in_preview": True,
         },
     }
