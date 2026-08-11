@@ -1,3 +1,34 @@
+diff --git a/package-lock.json b/package-lock.json
+index b678fe7..e662af1 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "Ask O11y",
+-  "version": "0.3.2",
++  "version": "0.3.3",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "Ask O11y",
+-      "version": "0.3.2",
++      "version": "0.3.3",
+       "hasInstallScript": true,
+       "license": "MIT",
+       "dependencies": {
+diff --git a/package.json b/package.json
+index a66fe57..c71ce93 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "Ask O11y",
+-  "version": "0.3.2",
++  "version": "0.3.3",
+   "scripts": {
+     "postinstall": "node -e \"const fs=require('fs');const p=require('path');const d=p.join('node_modules','flatted','golang');try{fs.rmSync(d,{recursive:true,force:true});}catch(e){if(e.code!=='ENOENT')throw e;}\"",
+     "build": "npm run build:frontend:prod && npm run build:backend:all",
 diff --git a/pkg/agent/dashboard_resolver.go b/pkg/agent/dashboard_resolver.go
 new file mode 100644
 index 0000000..2469cf6
