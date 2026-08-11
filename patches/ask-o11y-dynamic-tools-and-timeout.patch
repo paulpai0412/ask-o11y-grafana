@@ -1305,3 +1305,85 @@ index 263e5e0..8b77f63 100644
  
  ---
  
+diff --git a/src/components/Chat/Chat.tsx b/src/components/Chat/Chat.tsx
+index 0c6dbaa..238c80b 100644
+--- a/src/components/Chat/Chat.tsx
++++ b/src/components/Chat/Chat.tsx
+@@ -1,5 +1,5 @@
+ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+-import { useTheme2 } from '@grafana/ui';
++import { Button, useTheme2 } from '@grafana/ui';
+ 
+ import { useChat } from './hooks/useChat';
+ import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
+@@ -102,10 +102,12 @@ function ChatComponent({
+   const [isHistoryOpen, setIsHistoryOpen] = useState(!readOnly);
+ 
+   const {
++    isOpen: isSidePanelOpen,
+     visiblePageRefs,
+     showSidePanel,
+     handleRemoveTab,
+     handleClose: handleSidePanelClose,
++    handleToggle: handleSidePanelToggle,
+   } = useSidePanelState({
+     detectedPageRefs,
+     currentSessionId: sessionManager.currentSessionId,
+@@ -174,6 +176,17 @@ function ChatComponent({
+       ) : modelSelector,
+       rightSlot: (
+         <div className="flex items-center gap-1">
++          {visiblePageRefs.length > 0 && (
++            <Button
++              variant="secondary"
++              size="sm"
++              icon="columns"
++              onClick={handleSidePanelToggle}
++              aria-label={isSidePanelOpen ? 'Hide dashboard preview' : 'Show dashboard preview'}
++            >
++              {isSidePanelOpen ? 'Hide preview' : 'Show preview'}
++            </Button>
++          )}
+           {graphitiEnabled && hasMessages && <SaveToMemoryButton messages={chatHistory} />}
+           <HistoryButton onClick={openHistory} sessionCount={sessionManager.sessions.length} />
+         </div>
+@@ -199,6 +212,9 @@ function ChatComponent({
+       chatInputRef,
+       bottomSpacerRef,
+       hasMessages,
++      isSidePanelOpen,
++      visiblePageRefs.length,
++      handleSidePanelToggle,
+       modelSelector,
+       graphitiEnabled,
+       clearChat,
+diff --git a/src/components/Chat/hooks/useSidePanelState.ts b/src/components/Chat/hooks/useSidePanelState.ts
+index 0ed2b0e..05db5f7 100644
+--- a/src/components/Chat/hooks/useSidePanelState.ts
++++ b/src/components/Chat/hooks/useSidePanelState.ts
+@@ -13,6 +13,7 @@ interface UseSidePanelStateReturn {
+   showSidePanel: boolean;
+   handleRemoveTab: (index: number) => void;
+   handleClose: () => void;
++  handleToggle: () => void;
+ }
+ 
+ export function useSidePanelState({
+@@ -44,6 +45,10 @@ export function useSidePanelState({
+     setIsOpen(false);
+   }, []);
+ 
++  const handleToggle = useCallback(() => {
++    setIsOpen((open) => !open);
++  }, []);
++
+   useEffect(() => {
+     const currentSourceIndex = detectedPageRefs.length > 0 ? detectedPageRefs[0].messageIndex : null;
+     const prevSourceIndex = prevSourceMessageIndexRef.current;
+@@ -80,5 +85,6 @@ export function useSidePanelState({
+     showSidePanel,
+     handleRemoveTab,
+     handleClose,
++    handleToggle,
+   };
+ }
