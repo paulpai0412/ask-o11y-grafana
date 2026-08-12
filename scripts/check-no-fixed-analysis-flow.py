@@ -14,7 +14,6 @@ CHECKS = {
     "data-query-planner-mcp/server.py": [
         'all(token in request for token in ["一號機", "熱耗率"])',
         "用於熱耗率製程變異分析",
-        "plan_wferp_query",
         "Call next_step",
     ],
 }

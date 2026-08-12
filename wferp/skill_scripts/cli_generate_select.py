@@ -14,7 +14,7 @@ from skill_scripts.sql_router import RoutingOptions, route_generate_sql
 
 
 def _artifacts_dir() -> Path:
-    return Path(__file__).resolve().parent / "artifacts"
+    return Path(__file__).resolve().parents[2] / "data-query-planner-mcp" / "metadata" / "wferp"
 
 
 def _write_json(path: Path, data):

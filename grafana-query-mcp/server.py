@@ -186,21 +186,44 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
         live = get_grafana("/api/datasources/uid/" + urllib.parse.quote(uid, safe=""))
         if not isinstance(live, dict) or live.get("type") != configured.get("datasource_type"):
             raise workflow_node.WorkflowContractError("configured dataset does not match the live Grafana datasource")
-        metadata = load_json(ROOT / str(configured.get("metadata_file")))
-        profile = load_json(ROOT / str(configured.get("query_profile_file")))
-        fields = [{key: field.get(key) for key in ["name", "type", "display_name", "unit", "description", "aliases", "validity_for", "accepted_values"]} for field in metadata.get("fields", []) if isinstance(field, dict)]
-        csv_url = os.environ.get(str(profile.get("csv_url_env") or ""), "")
-        if not csv_url:
-            raise workflow_node.WorkflowContractError("configured Infinity dataset URL is unavailable")
-        query_columns = [{"selector": field["name"], "text": field["name"], "type": "timestamp" if field.get("type") == "date" else field.get("type", "string")} for field in fields]
-        query_template = {"refId": "A", "datasource": {"uid": uid, "type": live.get("type")}, "type": "csv", "source": "url", "url": csv_url, "parser": "backend", "format": "table", "url_options": {"method": "GET", "data": ""}, "csv_options": {"delimiter": ",", "skip_empty_lines": True}, "columns": query_columns}
+        query_kind = str(configured.get("query_kind") or "")
+        if query_kind == "wferp_llm_sql":
+            schema_bundle = load_json(ROOT / "data-query-planner-mcp" / "metadata" / "wferp" / "schema_bundle.json")
+            metadata_artifact = {
+                "dataset_id": dataset_id,
+                "title": configured.get("title"),
+                "description": configured.get("description"),
+                "domain_hints": configured.get("domain_hints", []),
+                "datasource_uid": uid,
+                "datasource_type": live.get("type"),
+                "query_kind": query_kind,
+                "schema_summary": {
+                    "module_count": len(schema_bundle.get("modules", [])),
+                    "table_count": len(schema_bundle.get("tables", [])),
+                    "languages": ["zh-TW", "vi", "field-id"],
+                    "sql_author": "Ask O11y LLM",
+                },
+            }
+        elif query_kind == "infinity_csv":
+            metadata = load_json(ROOT / str(configured.get("metadata_file")))
+            profile = load_json(ROOT / str(configured.get("query_profile_file")))
+            fields = [{key: field.get(key) for key in ["name", "type", "display_name", "unit", "description", "aliases", "validity_for", "accepted_values"]} for field in metadata.get("fields", []) if isinstance(field, dict)]
+            csv_url = os.environ.get(str(profile.get("csv_url_env") or ""), "")
+            if not csv_url:
+                raise workflow_node.WorkflowContractError("configured Infinity dataset URL is unavailable")
+            query_columns = [{"selector": field["name"], "text": field["name"], "type": "timestamp" if field.get("type") == "date" else field.get("type", "string")} for field in fields]
+            query_template = {"refId": "A", "datasource": {"uid": uid, "type": live.get("type")}, "type": "csv", "source": "url", "url": csv_url, "parser": "backend", "format": "table", "url_options": {"method": "GET", "data": ""}, "csv_options": {"delimiter": ",", "skip_empty_lines": True}, "columns": query_columns}
+            metadata_artifact = {"dataset_id": dataset_id, "title": configured.get("title"), "description": configured.get("description"), "domain_hints": configured.get("domain_hints", []), "datasource_uid": uid, "datasource_type": live.get("type"), "query_kind": query_kind, "fields": fields, "minimum_rows": metadata.get("minimum_rows", 1), "row_count_hint": (metadata.get("row_counts") or {}).get("total"), "date_range": metadata.get("date_range", {}), "query_template": query_template}
+        else:
+            raise workflow_node.WorkflowContractError("configured dataset query_kind is unsupported")
         run_id = ARTIFACTS.create_run(context)
-        metadata_artifact = {"dataset_id": dataset_id, "title": configured.get("title"), "description": configured.get("description"), "domain_hints": configured.get("domain_hints", []), "datasource_uid": uid, "datasource_type": live.get("type"), "fields": fields, "minimum_rows": metadata.get("minimum_rows", 1), "row_count_hint": (metadata.get("row_counts") or {}).get("total"), "date_range": metadata.get("date_range", {}), "query_template": query_template}
         metadata_ref = ARTIFACTS.write_json(context, run_id, "dataset-metadata", metadata_artifact)
     except (RuntimeError, workflow_node.WorkflowContractError, OSError, StopIteration) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; authorized dataset inspection failed.")
-    preview = {key: metadata_artifact[key] for key in ["dataset_id", "title", "description", "domain_hints", "datasource_uid", "datasource_type", "fields", "minimum_rows", "row_count_hint", "date_range"]}
-    return success_response(step=step, run_id=run_id, refs={"dataset_metadata_ref": metadata_ref}, instruction="Use this sanitized metadata to choose fields, methods, validation, and visualization for the user-visible preview. No datasource query has executed.", evidence={"grafana_metadata_read": True, "datasource_query_executed": False}, dataset_metadata_ref=metadata_ref, metadata=preview)
+    preview_keys = ["dataset_id", "title", "description", "domain_hints", "datasource_uid", "datasource_type", "query_kind", "fields", "minimum_rows", "row_count_hint", "date_range", "schema_summary"]
+    preview = {key: metadata_artifact[key] for key in preview_keys if key in metadata_artifact}
+    instruction = "For WFERP, search its bounded schema context before authoring SQL. For other datasets, use sanitized fields to prepare the user-visible preview. No datasource query has executed."
+    return success_response(step=step, run_id=run_id, refs={"dataset_metadata_ref": metadata_ref}, instruction=instruction, evidence={"grafana_metadata_read": True, "datasource_query_executed": False}, dataset_metadata_ref=metadata_ref, metadata=preview)
 
 
 def validate_frame(response: dict[str, Any], contract: dict[str, Any], ref_id: str = "A") -> dict[str, Any]:

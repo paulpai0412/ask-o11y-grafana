@@ -1,0 +1,7 @@
+{
+  "dataset_id": "wferp",
+  "datasource_uid": "afu9h8zppg64gd",
+  "datasource_type": "mssql",
+  "database": "wferp_test",
+  "schema": "dbo"
+}

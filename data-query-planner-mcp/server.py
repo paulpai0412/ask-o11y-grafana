@@ -7,6 +7,7 @@ executes datasource queries; Grafana Query owns execution.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -33,6 +34,8 @@ def load_module(name: str, path: Path):
 workflow_node = load_module("workflow_node", ROOT / "workflow_node.py")
 artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
+wferp_sql = load_module("wferp_sql", HERE / "wferp_sql.py")
+WFERP_METADATA = wferp_sql.load_metadata()
 authenticate_headers = mcp_security.authenticate_headers
 require_runtime_token = mcp_security.require_runtime_token
 require_service_identity = mcp_security.require_service_identity
@@ -178,6 +181,109 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
     return success_response(step=step, run_id=run_id, refs={"dataset_metadata_ref": metadata_ref, "plan_ref": plan_ref}, instruction="The safe bounded query plan is ready. Execute it through Grafana Query only after the user confirms the analysis preview; there is no domain-analysis next step in this plan.", evidence={"datasource_query_executed": False, "selected_fields": selected_fields}, plan_ref=plan_ref, dataset_id=plan["dataset_id"], datasource_uid=plan["datasource_uid"], selected_fields=selected_fields, validation={"ok": True, "minimum_rows": minimum_rows, "maximum_rows": maximum_rows, "time_range": time_range})
 
 
+def _wferp_dataset_metadata(args: dict[str, Any]) -> tuple[dict[str, str], str, dict[str, Any]]:
+    context = context_from_args(args)
+    metadata_ref = args.get("dataset_metadata_ref")
+    if not isinstance(metadata_ref, str):
+        raise workflow_node.WorkflowContractError("dataset_metadata_ref is required")
+    run_id, parts = parse_artifact_ref(metadata_ref)
+    if parts != ("dataset-metadata",):
+        raise workflow_node.WorkflowContractError("dataset_metadata_ref must reference dataset-metadata")
+    metadata = ARTIFACTS.read_json(context, metadata_ref)
+    if not isinstance(metadata, dict) or metadata.get("dataset_id") != "wferp" or metadata.get("query_kind") != "wferp_llm_sql":
+        raise workflow_node.WorkflowContractError("dataset_metadata_ref is not an authorized WFERP dataset")
+    return context, run_id, metadata
+
+
+def tool_search_wferp_schema(args: dict[str, Any]) -> dict[str, Any]:
+    step = "search_wferp_schema"
+    try:
+        context, _, metadata = _wferp_dataset_metadata(args)
+        top_k = int(args.get("top_k", wferp_sql.MAX_CONTEXT_TABLES))
+        schema_context = wferp_sql.build_context(str(args.get("prompt") or ""), WFERP_METADATA, top_k=top_k)
+        run_id = ARTIFACTS.create_run(context)
+        context_ref = ARTIFACTS.write_json(context, run_id, "schema-context", schema_context)
+    except (ArtifactAuthError, workflow_node.WorkflowContractError, RuntimeError, ValueError, TypeError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=True, instruction="Revise the ERP search terms or inspect the authorized WFERP dataset first.")
+    return success_response(
+        step=step,
+        run_id=run_id,
+        refs={"schema_context_ref": context_ref},
+        instruction="Author one legacy-compatible MSSQL SELECT using only this bounded schema context, then submit it to plan_wferp_query. Do not execute it directly.",
+        evidence={"datasource_query_executed": False, "candidate_table_count": len(schema_context["tables"])},
+        dataset_id=metadata["dataset_id"],
+        schema_context=schema_context,
+    )
+
+
+def tool_plan_wferp_query(args: dict[str, Any]) -> dict[str, Any]:
+    step = "plan_wferp_query"
+    prompt, sql, output_fields = args.get("prompt"), args.get("sql"), args.get("output_fields")
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > wferp_sql.MAX_PROMPT_BYTES:
+        return error_response(step=step, error="prompt is required and must be bounded", recoverable=True, instruction="Resubmit the original bounded user request.")
+    if not isinstance(sql, str):
+        return error_response(step=step, error="sql is required", recoverable=True, instruction="Author one SELECT from the bounded WFERP schema context.")
+    if not isinstance(output_fields, list) or not output_fields or len(output_fields) > MAX_PLAN_FIELDS or any(not isinstance(field, str) or not field for field in output_fields) or len(set(output_fields)) != len(output_fields):
+        return error_response(step=step, error=f"output_fields must contain 1-{MAX_PLAN_FIELDS} unique result column names", recoverable=True, instruction="List the exact aliases/names returned by the SELECT projection.")
+    try:
+        minimum_rows = int(args.get("minimum_rows", 0))
+        maximum_rows = int(args.get("maximum_rows", MAX_PLAN_ROWS))
+    except (TypeError, ValueError):
+        minimum_rows, maximum_rows = -1, -1
+    if minimum_rows < 0 or maximum_rows < max(1, minimum_rows) or maximum_rows > MAX_PLAN_ROWS:
+        return error_response(step=step, error=f"row bounds must satisfy 0 <= minimum_rows <= maximum_rows <= {MAX_PLAN_ROWS}", recoverable=True, instruction="Provide bounded result validation requirements.")
+    try:
+        context, _, metadata = _wferp_dataset_metadata(args)
+        validation = wferp_sql.validate_llm_sql(prompt, sql, WFERP_METADATA)
+        if not validation["ok"]:
+            return error_response(step=step, error=validation["code"], recoverable=True, instruction=validation["repair_hint"], evidence={"datasource_query_executed": False})
+        ref_id = str(args.get("refId") or "A")
+        if not ref_id or len(ref_id) > 8:
+            raise workflow_node.WorkflowContractError("refId is invalid")
+        query = {
+            "refId": ref_id,
+            "datasource": {"uid": metadata["datasource_uid"], "type": metadata["datasource_type"]},
+            "rawSql": sql.strip().rstrip(";"),
+            "format": "table",
+        }
+        plan = {
+            "dataset_id": "wferp",
+            "datasource_uid": metadata["datasource_uid"],
+            "datasource_type": metadata["datasource_type"],
+            "query_language": "mssql",
+            "selected_fields": list(output_fields),
+            "grafana_query": query,
+            "time_range": {"from": "2000-01-01T00:00:00Z", "to": "2000-12-31T23:59:59Z"},
+            "analysis_input_contract": {"required_fields": list(output_fields), "optional_fields": [], "validity_rules": [], "minimum_rows": minimum_rows, "maximum_rows": maximum_rows, "maximum_fields": MAX_PLAN_FIELDS, "maximum_response_bytes": MAX_PLAN_RESPONSE_BYTES},
+            "provenance": {
+                "dataset_metadata_ref": args["dataset_metadata_ref"],
+                "dataset_id": "wferp",
+                "datasource_uid": metadata["datasource_uid"],
+                "sql_author": "ask-o11y-llm",
+                "sql_sha256": hashlib.sha256(query["rawSql"].encode()).hexdigest(),
+                "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                "validated_tables": validation["tables"],
+            },
+            "validation_input": {"prompt": prompt},
+        }
+        run_id = ARTIFACTS.create_run(context)
+        plan_ref = ARTIFACTS.write_json(context, run_id, "query-plan", plan)
+    except (ArtifactAuthError, workflow_node.WorkflowContractError, RuntimeError, ValueError, TypeError, OSError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; WFERP query plan could not be authorized or persisted.")
+    return success_response(
+        step=step,
+        run_id=run_id,
+        refs={"dataset_metadata_ref": args["dataset_metadata_ref"], "plan_ref": plan_ref},
+        instruction="Show the accepted SQL and validated tables in the Analysis Preview. Execute this opaque plan_ref through Grafana Query only after explicit user confirmation.",
+        evidence={"datasource_query_executed": False, "validation": "OK", "validated_tables": validation["tables"]},
+        plan_ref=plan_ref,
+        dataset_id="wferp",
+        datasource_uid=metadata["datasource_uid"],
+        selected_fields=list(output_fields),
+        accepted_sql=query["rawSql"],
+    )
+
+
 def tool_validate_query(args: dict[str, Any]) -> dict[str, Any]:
     problems = []
     plan_ref = args.get("plan_ref")
@@ -202,6 +308,12 @@ def tool_validate_query(args: dict[str, Any]) -> dict[str, Any]:
                     problems.append("query columns do not match selected_fields")
                 if not isinstance(q.get("url"), str) or not q["url"].startswith(("http://", "https://")):
                     problems.append("Infinity URL must be an authorized HTTP(S) URL")
+            elif plan.get("query_language") == "mssql" and plan.get("dataset_id") == "wferp":
+                validation = wferp_sql.validate_llm_sql(str((plan.get("validation_input") or {}).get("prompt") or ""), str(q.get("rawSql") or ""), WFERP_METADATA)
+                if not validation["ok"]:
+                    problems.append(validation["code"])
+                if q.get("datasource", {}).get("uid") != plan.get("datasource_uid") or q.get("datasource", {}).get("type") != "mssql":
+                    problems.append("WFERP query datasource does not match the authorized plan")
             else:
                 problems.append("unsupported planned query type")
         except (ArtifactAuthError, workflow_node.WorkflowContractError, OSError, TypeError, KeyError) as exc:
@@ -212,11 +324,13 @@ def tool_validate_query(args: dict[str, Any]) -> dict[str, Any]:
 
 
 TOOLS = [
-    {"name": "plan_query", "description": "Compile and validate a safe bounded Grafana query plan from an opaque inspected dataset_metadata_ref plus explicit selected fields and row bounds. The authorized metadata supplies the bounded time range. This deterministic tool does not interpret natural language, select an analysis method/domain, execute a query, or prescribe a next workflow step.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "selected_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50, "uniqueItems": True}, "minimum_rows": {"type": "integer", "minimum": 1, "maximum": 5000}, "maximum_rows": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 5000}, "refId": {"type": "string", "default": "A"}}, "required": ["dataset_metadata_ref", "selected_fields"]}},
+    {"name": "plan_query", "description": "Compile and validate a safe bounded Grafana query plan from an opaque inspected dataset_metadata_ref plus explicit selected fields and row bounds. Use for non-WFERP registered datasets.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "selected_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50, "uniqueItems": True}, "minimum_rows": {"type": "integer", "minimum": 1, "maximum": 5000}, "maximum_rows": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 5000}, "refId": {"type": "string", "default": "A"}}, "required": ["dataset_metadata_ref", "selected_fields"]}},
+    {"name": "search_wferp_schema", "description": "Build a bounded multilingual WFERP table/column/relationship context from an authorized WFERP dataset_metadata_ref and the user's exact request. Ask O11y uses this context to author SQL; this tool does not generate or execute SQL.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 8192}, "top_k": {"type": "integer", "minimum": 1, "maximum": 8, "default": 8}}, "required": ["dataset_metadata_ref", "prompt"]}},
+    {"name": "plan_wferp_query", "description": "Validate one Ask O11y LLM-authored legacy MSSQL SELECT against the authorized WFERP schema, SQL policy, and explicit prompt constraints. On recoverable failure, revise the SQL using the returned repair hint. On success, returns an opaque plan_ref for later Grafana-only execution.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 8192}, "sql": {"type": "string", "minLength": 1, "maxLength": 32768}, "output_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50, "uniqueItems": True}, "minimum_rows": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 0}, "maximum_rows": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 5000}, "refId": {"type": "string", "default": "A"}}, "required": ["dataset_metadata_ref", "prompt", "sql", "output_fields"]}},
     {"name": "validate_query", "description": "Revalidate an authorized opaque query plan without executing it.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"plan_ref": {"type": "string"}}, "required": ["plan_ref"]}},
 ]
 
-HANDLERS = {"plan_query": tool_plan_query, "validate_query": tool_validate_query}
+HANDLERS = {"plan_query": tool_plan_query, "search_wferp_schema": tool_search_wferp_schema, "plan_wferp_query": tool_plan_wferp_query, "validate_query": tool_validate_query}
 
 
 def rpc_result(rid, result):
@@ -316,7 +430,10 @@ def self_check() -> None:
     validation = tool_validate_query({"plan_ref": plan["plan_ref"], "_server_context": context})
     if not validation["ok"]:
         raise RuntimeError(str(validation))
-    print(json.dumps({"ok": True, "generic_plan_ref": plan["plan_ref"], "runtime_tools": [tool["name"] for tool in TOOLS], "negative_checks": ["invalid_field", "natural_language_routing", "legacy_wferp_route_absent"]}, ensure_ascii=False, indent=2))
+    wferp_context = wferp_sql.build_context("2026 年工程預算明細", WFERP_METADATA, top_k=3)
+    if "ACTMK" not in {table["id"] for table in wferp_context["tables"]}:
+        raise RuntimeError(str(wferp_context))
+    print(json.dumps({"ok": True, "generic_plan_ref": plan["plan_ref"], "runtime_tools": [tool["name"] for tool in TOOLS], "wferp_context_tables": [table["id"] for table in wferp_context["tables"]], "negative_checks": ["invalid_field", "natural_language_routing"]}, ensure_ascii=False, indent=2))
 
 
 def main() -> int:

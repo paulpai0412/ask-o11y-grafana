@@ -152,9 +152,14 @@ def resolve_target(context: dict[str, str], target: dict[str, Any]) -> dict[str,
         raise WorkflowContractError("opaque query target requires bounded fields")
     query = json_clone(plan["grafana_query"])
     columns = query.get("columns")
-    if not isinstance(columns, list):
-        raise WorkflowContractError("query plan has no trusted column mapping")
-    query["columns"] = selected_columns(columns, fields)
+    if isinstance(columns, list):
+        query["columns"] = selected_columns(columns, fields)
+    elif plan.get("query_language") == "mssql" and plan.get("dataset_id") == "wferp" and isinstance(query.get("rawSql"), str):
+        unknown = sorted(set(fields) - set(plan["selected_fields"]))
+        if unknown:
+            raise WorkflowContractError("dashboard target fields are not authorized by its source: " + ", ".join(unknown))
+    else:
+        raise WorkflowContractError("query plan has no trusted output mapping")
     query["refId"] = ref_id
     return query
 

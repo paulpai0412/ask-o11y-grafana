@@ -2,4 +2,6 @@
 
 The standalone WFERP MCP runtime was removed during the adaptive Ask O11y migration. It is not an endpoint, has no server entrypoint, and must not be registered or started.
 
-This repository retains the upstream `wferp/` reference material only. The adaptive platform has four external MCP endpoints: Data Query Planner, Grafana Query, isolated Sandbox Analysis, and the hidden Artifact Bridge; Ask O11y's built-in Grafana MCP is the sole Dashboard writer. Any future WFERP dataset support must enter through the same authorized Grafana metadata/query boundaries and requires a new reviewed goal; it must not restore direct SQL execution, an LLM SQL provider, or a standalone WFERP MCP.
+The adaptive platform still has only four external MCP endpoints: Data Query Planner, Grafana Query, isolated Sandbox Analysis, and the hidden Artifact Bridge; Ask O11y's built-in Grafana MCP is the sole Dashboard writer. WFERP is now an authorized dataset through those existing boundaries, not a restored standalone MCP.
+
+WFERP keeps the former `llm-first` behavior with one intentional boundary change: Ask O11y's existing runtime LLM authors one SQL Server SELECT from a bounded schema context returned by Data Query Planner. Data Query Planner validates policy, metadata references, prompt consistency, and database scope before creating an opaque immutable plan. Grafana Query is the only executor and sends that plan through Grafana `/api/ds/query`; no MCP directly connects to MSSQL and no embedded LLM provider was restored.

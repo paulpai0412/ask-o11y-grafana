@@ -1,6 +1,6 @@
 # Grafana Executes Datasource Queries
 
-Accepted. Data Query Planner MCP generates and validates datasource queries from metadata, but Grafana is the only component that executes those queries against datasources. Firepower analysis MCP receives already-queried Grafana DataFrame JSON and never direct database credentials, SQL execution responsibility, or an execution fallback; this keeps datasource auth, permissions, auditing, and connector behavior inside Grafana instead of duplicating them in MCP servers.
+Accepted. Data Query Planner MCP creates and validates datasource query plans from authorized metadata, but Grafana is the only component that executes those queries against datasources. For most registered datasets the query is deterministic metadata-derived. For the authorized WFERP dataset, Ask O11y's existing runtime LLM authors one SQL Server SELECT from a bounded planner-provided schema context; Data Query Planner applies read-only SQL policy, metadata whitelist, prompt-consistency, and database-scope validation before storing an opaque immutable plan. Grafana Query alone executes that plan through `/api/ds/query`. No MCP receives database credentials, directly connects to MSSQL, or has an execution fallback.
 
 ## Considered Options
 

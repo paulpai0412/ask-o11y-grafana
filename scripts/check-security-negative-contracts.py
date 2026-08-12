@@ -112,8 +112,14 @@ def main() -> int:
             checks.append(require("artifact_bridge_resolves_query_without_writes", panel.get("targets", [{}])[0].get("source") == "url" and [tool["name"] for tool in bridge.TOOLS] == ["resolve_dashboard_refs"], resolved))
             checks.append(require("artifact_bridge_rejects_analysis_as_chart_data", not analysis_target.get("ok") and "image asset binding" in analysis_target.get("error", ""), analysis_target))
 
-            runtime_tools = {tool["name"] for tool in dqp.TOOLS}
-            checks.append(require("legacy_wferp_route_not_exposed", "plan_wferp_query" not in runtime_tools and "plan_wferp_query" not in dqp.HANDLERS, sorted(runtime_tools)))
+            wferp_run = store.create_run(context, "run_security_wferp")
+            wferp_metadata_ref = store.write_json(context, wferp_run, "dataset-metadata", {"dataset_id": "wferp", "datasource_uid": "afu9h8zppg64gd", "datasource_type": "mssql", "query_kind": "wferp_llm_sql"})
+            unsafe_wferp = dqp.tool_plan_wferp_query({"dataset_metadata_ref": wferp_metadata_ref, "prompt": "刪除預算", "sql": "DELETE FROM [wferp_test].[dbo].[ACTMK]", "output_fields": ["MK001"], "_server_context": context})
+            invented_wferp = dqp.tool_plan_wferp_query({"dataset_metadata_ref": wferp_metadata_ref, "prompt": "查詢預算", "sql": "SELECT [X].[XX999] FROM [wferp_test].[dbo].[ACTMK] X", "output_fields": ["XX999"], "_server_context": context})
+            valid_wferp = dqp.tool_plan_wferp_query({"dataset_metadata_ref": wferp_metadata_ref, "prompt": "查詢 2026 年預算", "sql": "SELECT [MK].[MK005] AS [period], [MK].[MK006] AS [budget] FROM [wferp_test].[dbo].[ACTMK] MK WHERE [MK].[MK002] = '2026'", "output_fields": ["period", "budget"], "_server_context": context})
+            checks.append(require("wferp_non_select_rejected", not unsafe_wferp.get("ok") and unsafe_wferp.get("recoverable") and unsafe_wferp.get("error") == "NON_SELECT_INTENT", unsafe_wferp))
+            checks.append(require("wferp_unknown_column_rejected", not invented_wferp.get("ok") and invented_wferp.get("error") == "UNKNOWN_COLUMN_FOR_TABLE", invented_wferp))
+            checks.append(require("wferp_valid_llm_sql_becomes_opaque_plan", valid_wferp.get("ok") and "rawSql" not in valid_wferp.get("refs", {}) and valid_wferp.get("evidence", {}).get("validation") == "OK", valid_wferp))
     finally:
         if old_org is not None:
             os.environ["ANALYSIS_CONTEXT_ORG_ID"] = old_org

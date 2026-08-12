@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 # -- 轉換 iso-8859-1 to big5
 def Convert_iso8859_to_big5(string):
@@ -7,29 +8,31 @@ def Convert_iso8859_to_big5(string):
     return s
 
 # -- 讀入 TableStructure.json
-_TableStructure = ''
-with open('TableStructure.json', 'r', encoding="utf-8") as f:
-    try:
-        _TableStructure = json.load(f)
-    except Exception as e:
-        print(e)
-    f.close()
+_TableStructure: list[dict[str, Any]] = []
+try:
+    with open('TableStructure.json', 'r', encoding="utf-8") as f:
+        loaded = json.load(f)
+    if isinstance(loaded, list) and all(isinstance(item, dict) for item in loaded):
+        _TableStructure = loaded
+except (OSError, json.JSONDecodeError) as e:
+    print(e)
 
 # -- 讀入 language.json
-_LANG_JSON = ''
-with open('language.json', 'r', encoding="utf-8") as f:
-    try:
-        _LANG_JSON = json.load(f)
-    except Exception as e:
-        print(e)
-    f.close()
+_LANG_JSON: list[dict[str, Any]] = []
+try:
+    with open('language.json', 'r', encoding="utf-8") as f:
+        loaded = json.load(f)
+    if isinstance(loaded, list) and all(isinstance(item, dict) for item in loaded):
+        _LANG_JSON = loaded
+except (OSError, json.JSONDecodeError) as e:
+    print(e)
 # -- 依據  中文(FieldName)，查詢其 越南文 (language.json from TABLE LANGUAGE)
 def Get_NameVietnam(chinese_string):
     s = str(chinese_string).strip()
 
     for item in _LANG_JSON:
         if item.get('CHT') == s:
-            if (item.get('VIET') != None):
+            if item.get('VIET') is not None:
                 return item.get('VIET')
     return s
 
@@ -64,12 +67,10 @@ for item in _TableStructure:
     i = i + 1
 
 # -- 寫入 TableStructure.json
-_jsonData = ''
-with open('TableStructure.json', 'w', encoding="utf-8") as fs:
-    try:
-        _jsonData = json.dumps(_TableStructure, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(e)
-    fs.write(_jsonData)
-    fs.close()
+try:
+    _jsonData = json.dumps(_TableStructure, indent=2, ensure_ascii=False)
+    with open('TableStructure.json', 'w', encoding="utf-8") as fs:
+        fs.write(_jsonData)
+except (OSError, TypeError, ValueError) as e:
+    print(e)
 

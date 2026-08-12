@@ -5,7 +5,7 @@
       "name": "Data Query Planner Workflow Node",
       "url_env": "DATA_QUERY_PLANNER_MCP_URL",
       "local_url": "http://127.0.0.1:8768/mcp",
-      "enabled_tools": ["plan_query"],
+      "enabled_tools": ["plan_query", "search_wferp_schema", "plan_wferp_query"],
       "disabled_tools": ["validate_query"]
     },
     {

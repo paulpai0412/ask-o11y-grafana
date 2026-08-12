@@ -11,6 +11,15 @@
       "metadata_file": "data-query-planner-mcp/metadata/csv-poc.json",
       "query_profile_file": "data/poc/u1_operating_daily_profile.json",
       "query_kind": "infinity_csv"
+    },
+    {
+      "id": "wferp",
+      "title": "Workflow ERP",
+      "description": "Authorized read-only Workflow ERP schema exposed through the Grafana MSSQL datasource. Ask O11y authors SQL from a bounded schema context; Data Query Planner validates it before execution.",
+      "domain_hints": ["erp", "accounting", "procurement", "inventory", "sales"],
+      "datasource_uid": "afu9h8zppg64gd",
+      "datasource_type": "mssql",
+      "query_kind": "wferp_llm_sql"
     }
   ]
 }
