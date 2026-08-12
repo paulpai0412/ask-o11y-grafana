@@ -37,6 +37,7 @@ def load_module(name: str, path: Path):
 workflow_node = load_module("workflow_node", ROOT / "workflow_node.py")
 artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
+uploaded_datasets = load_module("uploaded_datasets", ROOT / "uploaded_datasets.py")
 ArtifactStore = artifact_store.ArtifactStore
 authenticate_headers = mcp_security.authenticate_headers
 require_runtime_token = mcp_security.require_runtime_token
@@ -55,19 +56,21 @@ GRAFANA_USER = os.environ.get("GRAFANA_USER", "admin")
 GRAFANA_PASSWORD = os.environ.get("GRAFANA_PASSWORD", "admin")
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
-SERVER_INFO = {"name": "grafana-query-mcp", "version": "0.2.0"}
+uploaded_datasets.cleanup_expired()
+SERVER_INFO = {"name": "grafana-query-mcp", "version": "0.3.0"}
 PROTOCOL = "2025-03-26"
 CATALOG_FILE = ROOT / "config" / "authorized-grafana-datasets.json"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_RESULT_ROWS = 5_000
 MAX_RESULT_FIELDS = 50
 MAX_TIME_RANGE_SECONDS = 367 * 24 * 60 * 60
+UPLOAD_PUBLIC_BASE = os.environ.get("UPLOAD_PUBLIC_BASE", "http://127.0.0.1:8772").rstrip("/")
 
 
 
 def context_from_headers(headers) -> dict[str, str] | None:
     org = headers.get("X-Grafana-Org-Id") or headers.get("X-Org-Id")
-    user = headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
+    user = headers.get("X-Grafana-Actor-User-Id") or headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
     if org and user:
         return {"org_id": str(org), "user_id": str(user)}
     return None
@@ -93,7 +96,11 @@ def inject_header_context(msg: dict[str, Any], headers) -> dict[str, Any]:
 def context_from_args(args: dict[str, Any]) -> dict[str, str]:
     raw_context = args.get("_server_context")
     if isinstance(raw_context, dict) and raw_context.get("org_id") and raw_context.get("user_id"):
-        return {"org_id": str(raw_context["org_id"]), "user_id": str(raw_context["user_id"])}
+        context = {"org_id": str(raw_context["org_id"]), "user_id": str(raw_context["user_id"])}
+        session_id = args.get("_server_session_id")
+        if isinstance(session_id, str) and session_id:
+            context["session_id"] = session_id
+        return context
     raise workflow_node.WorkflowContractError("verified artifact context is required")
 
 
@@ -165,6 +172,10 @@ def tool_discover_datasets(args: dict[str, Any]) -> dict[str, Any]:
             if not datasource or datasource.get("type") != configured.get("datasource_type"):
                 continue
             candidates.append({"dataset_id": configured.get("id"), "title": configured.get("title"), "description": configured.get("description"), "domain_hints": configured.get("domain_hints", []), "datasource_uid": uid, "datasource_type": datasource.get("type")})
+        infinity = live_by_uid.get("csv-poc")
+        if infinity and infinity.get("type") == "yesoreyeram-infinity-datasource":
+            for upload in uploaded_datasets.list_uploads(context):
+                candidates.append({"dataset_id": upload["id"], "title": upload["filename"], "description": "Session-owned uploaded dataset", "domain_hints": ["uploaded", "csv", "excel"], "datasource_uid": "csv-poc", "datasource_type": infinity.get("type"), "session_id": upload["session_id"], "rows": upload["rows"], "columns": upload["columns"]})
         run_id = ARTIFACTS.create_run(context)
         catalog_ref = ARTIFACTS.write_json(context, run_id, "datasource-catalog", {"datasets": candidates})
     except (RuntimeError, workflow_node.WorkflowContractError, OSError) as exc:
@@ -180,14 +191,26 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
     try:
         context = context_from_args(args)
         configured = next((item for item in configured_datasets() if item.get("id") == dataset_id), None)
-        if not configured:
-            raise workflow_node.WorkflowContractError("dataset_id is not authorized")
-        uid = str(configured.get("datasource_uid") or "")
+        if dataset_id.startswith("upload_"):
+            upload = uploaded_datasets.inspect_upload(context, dataset_id, context.get("session_id"))
+            uid, expected_type, query_kind = "csv-poc", "yesoreyeram-infinity-datasource", "uploaded_csv"
+        else:
+            if configured is None:
+                raise workflow_node.WorkflowContractError("dataset_id is not authorized")
+            upload = None
+            uid = str(configured.get("datasource_uid") or "")
+            expected_type = configured.get("datasource_type")
+            query_kind = str(configured.get("query_kind") or "")
         live = get_grafana("/api/datasources/uid/" + urllib.parse.quote(uid, safe=""))
-        if not isinstance(live, dict) or live.get("type") != configured.get("datasource_type"):
+        if not isinstance(live, dict) or live.get("type") != expected_type:
             raise workflow_node.WorkflowContractError("configured dataset does not match the live Grafana datasource")
-        query_kind = str(configured.get("query_kind") or "")
-        if query_kind == "wferp_llm_sql":
+        if upload is not None:
+            signed_url = uploaded_datasets.sign_csv_url(public_base=UPLOAD_PUBLIC_BASE, secret=os.environ.get("MCP_SHARED_TOKEN", ""), metadata=upload)
+            fields = [{"name": field["name"], "type": field["type"], "display_name": field["name"]} for field in upload["fields"]]
+            query_columns = [{"selector": field["name"], "text": field["name"], "type": "timestamp" if field["type"] == "date" else field["type"]} for field in upload["fields"]]
+            query_template = {"refId": "A", "datasource": {"uid": uid, "type": live.get("type")}, "type": "csv", "source": "url", "url": signed_url, "parser": "backend", "format": "table", "url_options": {"method": "GET", "data": ""}, "csv_options": {"delimiter": ",", "skip_empty_lines": True}, "columns": query_columns}
+            metadata_artifact = {"dataset_id": dataset_id, "title": upload["filename"], "description": "Session-owned uploaded dataset", "domain_hints": ["uploaded", "csv", "excel"], "datasource_uid": uid, "datasource_type": live.get("type"), "query_kind": query_kind, "session_id": upload["session_id"], "fields": fields, "minimum_rows": 1, "row_count_hint": upload["rows"], "date_range": {"all_from": "2000-01-01", "all_to": "2000-12-31"}, "query_template": query_template}
+        elif query_kind == "wferp_llm_sql" and configured is not None:
             schema_bundle = load_json(ROOT / "data-query-planner-mcp" / "metadata" / "wferp" / "schema_bundle.json")
             metadata_artifact = {
                 "dataset_id": dataset_id,
@@ -204,7 +227,7 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
                     "sql_author": "Ask O11y LLM",
                 },
             }
-        elif query_kind == "infinity_csv":
+        elif query_kind == "infinity_csv" and configured is not None:
             metadata = load_json(ROOT / str(configured.get("metadata_file")))
             profile = load_json(ROOT / str(configured.get("query_profile_file")))
             fields = [{key: field.get(key) for key in ["name", "type", "display_name", "unit", "description", "aliases", "validity_for", "accepted_values"]} for field in metadata.get("fields", []) if isinstance(field, dict)]
@@ -268,7 +291,7 @@ def validate_frame(response: dict[str, Any], contract: dict[str, Any], ref_id: s
 
 
 def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
-    unexpected = sorted(set(args) - {"plan_ref", "context", "_server_context"})
+    unexpected = sorted(set(args) - {"plan_ref", "context", "_server_context", "_server_session_id"})
     if unexpected:
         return error_response(step="execute_planned_query", error="forbidden Grafana Query arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; Grafana Query executes only an authorized opaque plan_ref.")
     plan_ref = args.get("plan_ref")
@@ -283,6 +306,9 @@ def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
         plan = ARTIFACTS.read_json(context, plan_ref)
     except Exception as exc:
         return error_response(step="execute_planned_query", error=str(exc), recoverable=False, instruction="Stop; plan_ref could not be read or authorized.")
+    expected_session = plan.get("upload_session_id")
+    if expected_session is not None and context.get("session_id") != expected_session:
+        return error_response(step="execute_planned_query", error="uploaded dataset session mismatch", recoverable=False, instruction="Stop; the upload belongs to another chat session.")
     query = plan.get("grafana_query")
     contract = plan.get("analysis_input_contract")
     if not isinstance(query, dict) or not isinstance(contract, dict):
@@ -362,7 +388,7 @@ def handle_rpc(msg: dict[str, Any]):
         if not isinstance(args, dict):
             return rpc_error(rid, -32602, "tool arguments must be an object")
         tool = next(tool for tool in TOOLS if tool["name"] == name)
-        allowed = set(tool["inputSchema"]["properties"]) | {"context", "_server_context"}
+        allowed = set(tool["inputSchema"]["properties"]) | {"context", "_server_context", "_server_session_id"}
         unexpected = sorted(set(args) - allowed)
         if unexpected:
             out = error_response(step=name, error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; pass only arguments declared by this tool schema.")
@@ -391,10 +417,59 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_GET(self):
+        if self.path.startswith("/uploaded-csv/"):
+            token = self.path.removeprefix("/uploaded-csv/").split("?", 1)[0]
+            try:
+                path = uploaded_datasets.read_signed_csv(token, os.environ.get("MCP_SHARED_TOKEN", ""))
+                size = path.stat().st_size
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "private, max-age=300")
+                self.end_headers()
+                with path.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        self.wfile.write(chunk)
+            except (PermissionError, OSError):
+                self._send(403, {"error": "uploaded dataset URL is invalid or expired"})
+            return
         self._send(405 if self.path.rstrip("/") == "/mcp" else 404, {"error": "POST JSON-RPC to /mcp"})
 
+    def do_PUT(self):
+        if self.path.rstrip("/") != "/uploads":
+            return self._send(404, {"error": "not found"})
+        context = authenticate_headers(self.headers)
+        if context is None:
+            return self._send(401, {"error": "authenticated upload identity is required"})
+        try:
+            filename = urllib.parse.unquote(self.headers.get("X-Upload-Filename", ""))
+            sheet = urllib.parse.unquote(self.headers.get("X-Upload-Sheet", "")) or None
+        except UnicodeError:
+            return self._send(400, {"error": "upload filename or sheet is invalid"})
+        session_id = self.headers.get("X-Upload-Session-Id", "")
+        if not filename or not session_id:
+            return self._send(400, {"error": "upload filename and session id are required"})
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            raw = uploaded_datasets.read_limited(self.rfile, content_length)
+            metadata = uploaded_datasets.store_upload(context=context, session_id=session_id, filename=filename, raw=raw, sheet=sheet)
+            self._send(201, {"ok": True, "dataset_id": metadata["id"], "filename": metadata["filename"], "sheet": metadata["sheet"], "rows": metadata["rows"], "columns": metadata["columns"], "fields": metadata["fields"], "expires_at": metadata["expires_at"]})
+        except ValueError as exc:
+            self._send(400, {"error": str(exc)})
+
     def do_DELETE(self):
-        self._send(200, {"ok": True})
+        if not self.path.startswith("/uploads/"):
+            return self._send(404, {"error": "not found"})
+        context = authenticate_headers(self.headers)
+        if context is None:
+            return self._send(401, {"error": "authenticated upload identity is required"})
+        upload_id = self.path.removeprefix("/uploads/").split("?", 1)[0]
+        session_id = self.headers.get("X-Upload-Session-Id", "")
+        try:
+            uploaded_datasets.delete_upload(context, upload_id, session_id)
+            self._send(200, {"ok": True})
+        except (PermissionError, OSError) as exc:
+            self._send(404, {"error": str(exc)})
 
     def do_POST(self):
         if self.path.rstrip("/") != "/mcp":

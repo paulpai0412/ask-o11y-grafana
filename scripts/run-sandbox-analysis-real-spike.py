@@ -66,7 +66,10 @@ def main() -> int:
             42,
         )
         stdout_text = "".join(str(item.get("text") or "") for item in network_execution.get("stdout", []))
-        network = json.loads(stdout_text.strip().splitlines()[-1])
+        try:
+            network = json.loads(stdout_text.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:
+            raise RuntimeError("sandbox network attestation returned invalid JSON") from exc
         if network != {"direct_ip_blocked": True, "dns_blocked": True, "input_bundle_unlinked": True}:
             raise RuntimeError(network_execution)
         evidence = {

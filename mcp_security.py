@@ -35,7 +35,12 @@ def authenticate_headers(headers: Any) -> dict[str, str] | None:
     if not hmac.compare_digest(supplied, f"Bearer {token}"):
         return None
     org = headers.get("X-Grafana-Org-Id") or headers.get("X-Org-Id")
-    user = headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
-    if not org or not user or not hmac.compare_digest(str(org), expected["org_id"]) or not hmac.compare_digest(str(user), expected["user_id"]):
+    service_user = headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
+    if not org or not service_user or not hmac.compare_digest(str(org), expected["org_id"]) or not hmac.compare_digest(str(service_user), expected["user_id"]):
         return None
-    return expected
+    actor_user = headers.get("X-Grafana-Actor-User-Id") or expected["user_id"]
+    context = {"org_id": str(org), "user_id": str(actor_user)}
+    session_id = headers.get("X-Grafana-Session-Id")
+    if session_id:
+        context["session_id"] = str(session_id)
+    return context

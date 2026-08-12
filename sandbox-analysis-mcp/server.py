@@ -111,7 +111,7 @@ TOOLS = [
 
 def context_from_headers(headers) -> dict[str, str] | None:
     org = headers.get("X-Grafana-Org-Id") or headers.get("X-Org-Id")
-    user = headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
+    user = headers.get("X-Grafana-Actor-User-Id") or headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
     if org and user:
         return {"org_id": str(org), "user_id": str(user)}
     return None
@@ -175,7 +175,7 @@ def runtime_settings() -> dict[str, str]:
     if configured_type != runtime_class:
         raise RuntimeError(f"SANDBOX_RUNTIME_CLASS {runtime_class!r} does not match control-plane secure_runtime {configured_type!r}")
     egress = server_config.get("egress") or {}
-    if egress.get("mode") != "dns+nft" or egress.get("disable_ipv6") is not True:
+    if egress.get("mode") != "dns+nft" or not bool(egress.get("disable_ipv6")):
         raise RuntimeError("OpenSandbox control-plane config must enforce dns+nft egress with IPv6 disabled")
     protocol = os.environ.get("SANDBOX_PROTOCOL", "http").strip().lower()
     if protocol not in {"http", "https"}:
@@ -709,7 +709,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "private, max-age=300")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", os.environ.get("GRAFANA_PUBLIC_ORIGIN", "http://localhost:3000"))
             self.end_headers()
             self.wfile.write(data)
             return
@@ -765,7 +765,10 @@ def self_check() -> None:
         observed = {}
 
         def fake_executor(frame_bundle_json: str, code: str, seed: int) -> dict[str, Any]:
-            bundle = json.loads(frame_bundle_json)
+            try:
+                bundle = json.loads(frame_bundle_json)
+            except json.JSONDecodeError as exc:
+                raise AssertionError("invalid test frame bundle") from exc
             observed.update({"bundle": bundle, "code": code, "seed": seed})
             return {
                 "execution_id": "fake",
@@ -801,7 +804,10 @@ def self_check() -> None:
         assert policy["network_default_action"] == "deny" and policy["env"] == {} and policy["volumes"] == [] and policy["resource"] == {"cpu": "1", "memory": "1Gi"}
         raw = handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "execute_python_analysis", "arguments": {**args, "frame": []}}})
         assert raw is not None
-        payload = json.loads(raw["result"]["content"][0]["text"])
+        try:
+            payload = json.loads(raw["result"]["content"][0]["text"])
+        except json.JSONDecodeError as exc:
+            raise AssertionError("invalid test tool response") from exc
         assert not payload["ok"] and "unsupported tool arguments" in payload["error"]
     ARTIFACTS = original
     print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))

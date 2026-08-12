@@ -63,7 +63,7 @@ ARTIFACTS.cleanup_expired()
 
 def context_from_headers(headers) -> dict[str, str] | None:
     org = headers.get("X-Grafana-Org-Id") or headers.get("X-Org-Id")
-    user = headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
+    user = headers.get("X-Grafana-Actor-User-Id") or headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
     if org and user:
         return {"org_id": str(org), "user_id": str(user)}
     return None
@@ -167,6 +167,7 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
             "datasource_uid": metadata.get("datasource_uid"),
             "datasource_type": metadata.get("datasource_type"),
             "query_language": "csv",
+            "upload_session_id": metadata.get("session_id") if str(metadata.get("dataset_id") or "").startswith("upload_") else None,
             "selected_fields": selected_fields,
             "grafana_query": query,
             "time_range": time_range,

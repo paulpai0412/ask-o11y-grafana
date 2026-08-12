@@ -1,0 +1,809 @@
+diff --git a/pkg/agent/dashboard_resolver.go b/pkg/agent/dashboard_resolver.go
+index 2469cf6..fcf7b61 100644
+--- a/pkg/agent/dashboard_resolver.go
++++ b/pkg/agent/dashboard_resolver.go
+@@ -22,7 +22,7 @@ func (a *AgentLoop) resolveDashboardBindings(dashboard map[string]interface{}, r
+ 	if err != nil || !hasRefs {
+ 		return dashboard, err
+ 	}
+-	result, err := a.mcpProxy.CallToolWithContext(artifactBridgeResolveTool, map[string]interface{}{"dashboard": dashboard}, req.OrgID, req.OrgName, req.ScopeOrgID)
++	result, err := a.mcpProxy.CallToolWithActorContext(artifactBridgeResolveTool, map[string]interface{}{"dashboard": dashboard}, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("artifact binding resolution failed: %w", err)
+ 	}
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+index b9349b4..bf5ad81 100644
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -67,6 +67,8 @@ type LoopRequest struct {
+ 	AuthToken  string
+ 
+ 	UserRole   string
++	UserID     string
++	SessionID  string
+ 	OrgID      string
+ 	OrgName    string
+ 	ScopeOrgID string
+@@ -655,6 +657,9 @@ func (a *AgentLoop) executeTool(ctx context.Context, tc ToolCall, req LoopReques
+ 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+ 		return fmt.Sprintf("Invalid tool arguments: %v", err), true, "tool"
+ 	}
++	if strings.HasPrefix(tc.Function.Name, "grafana-query_") && req.SessionID != "" {
++		args["_server_session_id"] = req.SessionID
++	}
+ 	if tc.Function.Name == "mcp-grafana_update_dashboard" {
+ 		resolved, err := a.prepareBuiltInDashboardArgs(args, req)
+ 		if err != nil {
+@@ -664,7 +669,7 @@ func (a *AgentLoop) executeTool(ctx context.Context, tc ToolCall, req LoopReques
+ 	}
+ 	mcp.EnsureScopedGraphitiArgs(tool, args, req.OrgID)
+ 
+-	result, err := a.mcpProxy.CallToolWithContext(tc.Function.Name, args, req.OrgID, req.OrgName, req.ScopeOrgID)
++	result, err := a.mcpProxy.CallToolWithActorContext(tc.Function.Name, args, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
+ 	if err != nil {
+ 		a.logger.Error("Tool call failed", "tool", tc.Function.Name, "error", err)
+ 		var te *mcp.TransportError
+diff --git a/pkg/mcp/client.go b/pkg/mcp/client.go
+index 026a0b8..dd6bca1 100644
+--- a/pkg/mcp/client.go
++++ b/pkg/mcp/client.go
+@@ -44,11 +44,12 @@ type Client struct {
+ 
+ // customRoundTripper wraps http.RoundTripper to add custom headers
+ type customRoundTripper struct {
+-	base       http.RoundTripper
+-	orgID      string
+-	orgName    string
+-	scopeOrgId string // Direct X-Scope-OrgId value (takes priority over orgName)
+-	config     ServerConfig
++	base        http.RoundTripper
++	orgID       string
++	orgName     string
++	scopeOrgId  string // Direct X-Scope-OrgId value (takes priority over orgName)
++	actorUserID string
++	config      ServerConfig
+ }
+ 
+ func (t *customRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+@@ -62,6 +63,9 @@ func (t *customRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
+ 	if t.orgID != "" {
+ 		req.Header.Set("X-Grafana-Org-Id", t.orgID)
+ 	}
++	if t.actorUserID != "" {
++		req.Header.Set("X-Grafana-Actor-User-Id", t.actorUserID)
++	}
+ 
+ 	// X-Scope-OrgID: Tenant identifier for multi-tenant systems (Mimir/Cortex/Loki)
+ 	// Priority: scopeOrgId (direct value) > orgName (Grafana org name as fallback)
+@@ -240,6 +244,10 @@ func (t *configHeaderRoundTripper) RoundTrip(req *http.Request) (*http.Response,
+ //   - X-Grafana-Org-Id: Grafana's numeric organization ID
+ //   - X-Scope-OrgID: Tenant identifier (scopeOrgId takes priority over orgName)
+ func (c *Client) connectMCPWithOrgContext(orgID string, orgName string, scopeOrgId string) error {
++	return c.connectMCPWithActorContext(orgID, orgName, scopeOrgId, "")
++}
++
++func (c *Client) connectMCPWithActorContext(orgID string, orgName string, scopeOrgId string, actorUserID string) error {
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
+ 
+@@ -258,11 +266,12 @@ func (c *Client) connectMCPWithOrgContext(orgID string, orgName string, scopeOrg
+ 	}, nil)
+ 
+ 	customHTTPClient := c.sdkHTTPClientWithTransport(&customRoundTripper{
+-		base:       c.baseTransport(),
+-		orgID:      orgID,
+-		orgName:    orgName,
+-		scopeOrgId: scopeOrgId,
+-		config:     c.config,
++		base:        c.baseTransport(),
++		orgID:       orgID,
++		orgName:     orgName,
++		scopeOrgId:  scopeOrgId,
++		actorUserID: actorUserID,
++		config:      c.config,
+ 	})
+ 
+ 	var transport mcpsdk.Transport
+@@ -450,6 +459,10 @@ func (c *Client) CallTool(toolName string, arguments map[string]interface{}) (*C
+ }
+ 
+ func (c *Client) CallToolWithContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
++	return c.CallToolWithActorContext(toolName, arguments, orgID, orgName, scopeOrgId, "")
++}
++
++func (c *Client) CallToolWithActorContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
+ 	// Remove server ID prefix from tool name
+ 	originalName := strings.TrimPrefix(toolName, c.config.ID+"_")
+ 
+@@ -457,7 +470,7 @@ func (c *Client) CallToolWithContext(toolName string, arguments map[string]inter
+ 	case "openapi":
+ 		return c.callOpenAPIToolWithContext(originalName, arguments, orgID, orgName, scopeOrgId)
+ 	case "sse", "streamable-http", "http+streamable":
+-		return c.callMCPToolWithContext(originalName, arguments, orgID, orgName, scopeOrgId)
++		return c.callMCPToolWithActorContext(originalName, arguments, orgID, orgName, scopeOrgId, actorUserID)
+ 	default:
+ 		// Fallback to standard MCP protocol
+ 		return c.callStandardTool(originalName, arguments)
+@@ -502,7 +515,13 @@ type callToolOncer func(toolName string, arguments map[string]interface{}, orgID
+ // is wrapped in *TransportError so callers can distinguish transport outages
+ // from tool-layer failures and avoid fabricating around missing data.
+ func (c *Client) callMCPToolWithContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
+-	return c.callMCPToolWithRetry(c.callMCPToolOnce, toolName, arguments, orgID, orgName, scopeOrgId)
++	return c.callMCPToolWithActorContext(toolName, arguments, orgID, orgName, scopeOrgId, "")
++}
++
++func (c *Client) callMCPToolWithActorContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
++	return c.callMCPToolWithRetry(func(name string, args map[string]interface{}, org, orgName, scope string) (*CallToolResult, error) {
++		return c.callMCPToolOnceWithActor(name, args, org, orgName, scope, actorUserID)
++	}, toolName, arguments, orgID, orgName, scopeOrgId)
+ }
+ 
+ func (c *Client) callMCPToolWithRetry(once callToolOncer, toolName string, arguments map[string]interface{}, orgID, orgName, scopeOrgId string) (*CallToolResult, error) {
+@@ -550,6 +569,10 @@ func (c *Client) callMCPToolWithRetry(once callToolOncer, toolName string, argum
+ // been proven safe in production. The outer retry wrapper adds attempts on
+ // top — these are two independent reliability layers.
+ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
++	return c.callMCPToolOnceWithActor(toolName, arguments, orgID, orgName, scopeOrgId, "")
++}
++
++func (c *Client) callMCPToolOnceWithActor(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
+ 	// Track whether we're using org context for potential reconnection
+ 	// Forward org headers to all MCP servers (not just specific ones)
+ 	useOrgContext := orgID != "" || orgName != "" || scopeOrgId != ""
+@@ -559,7 +582,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
+ 	if useOrgContext {
+ 		c.logger.Debug("Calling tool with org context", "server", c.config.ID, "tool", toolName, "orgID", orgID, "orgName", orgName, "scopeOrgId", scopeOrgId)
+ 
+-		if err := c.connectMCPWithOrgContext(orgID, orgName, scopeOrgId); err != nil {
++		if err := c.connectMCPWithActorContext(orgID, orgName, scopeOrgId, actorUserID); err != nil {
+ 			c.logger.Error("Failed to connect to server with org context", "server", c.config.ID, "error", sanitizeError(err))
+ 			return nil, err
+ 		}
+@@ -597,7 +620,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
+ 			var reconnectErr error
+ 			if useOrgContext {
+ 				// connectMCPWithOrgContext handles session cleanup atomically
+-				reconnectErr = c.connectMCPWithOrgContext(orgID, orgName, scopeOrgId)
++				reconnectErr = c.connectMCPWithActorContext(orgID, orgName, scopeOrgId, actorUserID)
+ 			} else {
+ 				// Clear the session to force reconnection
+ 				c.mu.Lock()
+diff --git a/pkg/mcp/proxy.go b/pkg/mcp/proxy.go
+index be1416f..42a1656 100644
+--- a/pkg/mcp/proxy.go
++++ b/pkg/mcp/proxy.go
+@@ -147,6 +147,10 @@ func (p *Proxy) CallTool(toolName string, arguments map[string]interface{}) (*Ca
+ 
+ // CallToolWithContext routes a tool call to the appropriate MCP server with additional context (e.g., Org ID, Org Name, Scope Org ID)
+ func (p *Proxy) CallToolWithContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
++	return p.CallToolWithActorContext(toolName, arguments, orgID, orgName, scopeOrgId, "")
++}
++
++func (p *Proxy) CallToolWithActorContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
+ 	// Extract server ID from tool name prefix
+ 	parts := strings.SplitN(toolName, "_", 2)
+ 	if len(parts) < 2 {
+@@ -173,7 +177,7 @@ func (p *Proxy) CallToolWithContext(toolName string, arguments map[string]interf
+ 
+ 	p.logger.Debug("Calling tool on MCP server", "tool", toolName, "server", serverID, "orgID", orgID, "orgName", orgName, "scopeOrgId", scopeOrgId)
+ 
+-	return client.CallToolWithContext(toolName, arguments, orgID, orgName, scopeOrgId)
++	return client.CallToolWithActorContext(toolName, arguments, orgID, orgName, scopeOrgId, actorUserID)
+ }
+ 
+ // HandleMCPRequest handles an MCP JSON-RPC request
+diff --git a/pkg/plugin/plugin.go b/pkg/plugin/plugin.go
+index 97edb1c..4aa827a 100644
+--- a/pkg/plugin/plugin.go
++++ b/pkg/plugin/plugin.go
+@@ -452,6 +452,7 @@ func (p *Plugin) registerRoutes(mux *http.ServeMux) {
+ 	mux.HandleFunc("/api/graphiti/discover", p.handleGraphitiDiscover)
+ 	mux.HandleFunc("/api/graphiti/status", p.handleGraphitiStatus)
+ 	mux.HandleFunc("/api/graphiti/ingest-session", p.handleGraphitiIngestSession)
++	mux.HandleFunc("/api/uploads", p.handleUpload)
+ 
+ 	// Session CRUD (new) — registered before share routes for specificity
+ 	mux.HandleFunc("/api/sessions/current", p.handleSessionCurrent)
+@@ -1000,6 +1001,8 @@ func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
+ 		GrafanaURL:           grafanaURL,
+ 		AuthToken:            saToken,
+ 		UserRole:             userRole,
++		UserID:               strconv.FormatInt(userID, 10),
++		SessionID:            sessionID,
+ 		OrgID:                orgID,
+ 		OrgName:              req.OrgName,
+ 		ScopeOrgID:           req.ScopeOrgID,
+@@ -1782,6 +1785,7 @@ func (p *Plugin) handleGraphitiDiscover(w http.ResponseWriter, r *http.Request)
+ 		GrafanaURL:         grafanaURL,
+ 		AuthToken:          saToken,
+ 		UserRole:           userRole,
++		UserID:             strconv.FormatInt(userID, 10),
+ 		OrgID:              strconv.FormatInt(orgID, 10),
+ 		OrgName:            "Org" + strconv.FormatInt(orgID, 10),
+ 		ExcludeToolNames:   graphitiWriteToolNames,
+diff --git a/pkg/plugin/uploads.go b/pkg/plugin/uploads.go
+new file mode 100644
+index 0000000..bc4202d
+--- /dev/null
++++ b/pkg/plugin/uploads.go
+@@ -0,0 +1,152 @@
++package plugin
++
++import (
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"strconv"
++	"strings"
++	"time"
++)
++
++const (
++	maxUploadBytes        int64 = 50 * 1024 * 1024
++	maxUploadRequestBytes       = maxUploadBytes + 1024*1024
++)
++
++func (p *Plugin) grafanaQueryServer() (string, map[string]string, bool) {
++	for _, server := range p.settings.MCPServers {
++		if server.ID != "grafana-query" || !server.Enabled {
++			continue
++		}
++		parsed, err := url.Parse(server.URL)
++		if err != nil || parsed.Scheme != "http" || (parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost") {
++			return "", nil, false
++		}
++		return strings.TrimSuffix(server.URL, "/mcp"), server.Headers, true
++	}
++	return "", nil, false
++}
++
++func (p *Plugin) handleUpload(w http.ResponseWriter, r *http.Request) {
++	if r.Method == http.MethodDelete {
++		p.handleDeleteUpload(w, r)
++		return
++	}
++	if r.Method != http.MethodPost {
++		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
++		return
++	}
++	if r.ContentLength < 1 || r.ContentLength > maxUploadRequestBytes {
++		http.Error(w, "File must be between 1 byte and 50 MB", http.StatusRequestEntityTooLarge)
++		return
++	}
++	r.Body = http.MaxBytesReader(w, r.Body, maxUploadRequestBytes)
++	if err := r.ParseMultipartForm(1024 * 1024); err != nil {
++		http.Error(w, "Upload must be valid multipart form data", http.StatusBadRequest)
++		return
++	}
++	if r.MultipartForm != nil {
++		defer r.MultipartForm.RemoveAll()
++	}
++	file, fileHeader, err := r.FormFile("file")
++	if err != nil {
++		http.Error(w, "One upload file is required", http.StatusBadRequest)
++		return
++	}
++	defer file.Close()
++	filename := fileHeader.Filename
++	sessionID := r.FormValue("session_id")
++	if filename == "" || fileHeader.Size < 1 || fileHeader.Size > maxUploadBytes || sessionID == "" || !isValidSecureID(sessionID) {
++		http.Error(w, "Upload filename and valid session id are required", http.StatusBadRequest)
++		return
++	}
++	userID, orgID := getUserID(r), getOrgID(r)
++	if _, err := p.sessionStore.GetSession(sessionID, userID, orgID); err != nil {
++		http.Error(w, "Session not found", http.StatusNotFound)
++		return
++	}
++	baseURL, headers, ok := p.grafanaQueryServer()
++	if !ok {
++		http.Error(w, "Grafana Query upload service is unavailable", http.StatusServiceUnavailable)
++		return
++	}
++	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPut, baseURL+"/uploads", io.LimitReader(file, maxUploadBytes+1))
++	if err != nil {
++		http.Error(w, "Could not create upload request", http.StatusInternalServerError)
++		return
++	}
++	upstream.ContentLength = fileHeader.Size
++	for key, value := range headers {
++		upstream.Header.Set(key, value)
++	}
++	upstream.Header.Set("Content-Type", "application/octet-stream")
++	upstream.Header.Set("Content-Length", strconv.FormatInt(fileHeader.Size, 10))
++	upstream.Header.Set("X-Grafana-Actor-User-Id", strconv.FormatInt(userID, 10))
++	upstream.Header.Set("X-Upload-Filename", url.QueryEscape(filename))
++	upstream.Header.Set("X-Upload-Session-Id", sessionID)
++	if sheet := r.FormValue("sheet"); sheet != "" {
++		upstream.Header.Set("X-Upload-Sheet", url.QueryEscape(sheet))
++	}
++	client := &http.Client{Timeout: 5 * time.Minute}
++	response, err := client.Do(upstream)
++	if err != nil {
++		p.logger.Error("Upload proxy failed", "error", err)
++		http.Error(w, "Upload service request failed", http.StatusBadGateway)
++		return
++	}
++	defer response.Body.Close()
++	body, err := io.ReadAll(io.LimitReader(response.Body, 2*1024*1024))
++	if err != nil {
++		http.Error(w, "Upload service response failed", http.StatusBadGateway)
++		return
++	}
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(response.StatusCode)
++	if len(body) == 0 {
++		_ = json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("upload service returned %d", response.StatusCode)})
++		return
++	}
++	_, _ = w.Write(body)
++}
++
++func (p *Plugin) handleDeleteUpload(w http.ResponseWriter, r *http.Request) {
++	datasetID := r.URL.Query().Get("dataset_id")
++	sessionID := r.URL.Query().Get("session_id")
++	if !strings.HasPrefix(datasetID, "upload_") || !isValidSecureID(sessionID) {
++		http.Error(w, "Valid dataset and session ids are required", http.StatusBadRequest)
++		return
++	}
++	userID, orgID := getUserID(r), getOrgID(r)
++	if _, err := p.sessionStore.GetSession(sessionID, userID, orgID); err != nil {
++		http.Error(w, "Session not found", http.StatusNotFound)
++		return
++	}
++	baseURL, headers, ok := p.grafanaQueryServer()
++	if !ok {
++		http.Error(w, "Grafana Query upload service is unavailable", http.StatusServiceUnavailable)
++		return
++	}
++	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, baseURL+"/uploads/"+url.PathEscape(datasetID), nil)
++	if err != nil {
++		http.Error(w, "Could not create remove request", http.StatusInternalServerError)
++		return
++	}
++	for key, value := range headers {
++		upstream.Header.Set(key, value)
++	}
++	upstream.Header.Set("X-Grafana-Actor-User-Id", strconv.FormatInt(userID, 10))
++	upstream.Header.Set("X-Upload-Session-Id", sessionID)
++	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(upstream)
++	if err != nil {
++		http.Error(w, "Upload remove request failed", http.StatusBadGateway)
++		return
++	}
++	defer response.Body.Close()
++	body, _ := io.ReadAll(io.LimitReader(response.Body, 1024*1024))
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(response.StatusCode)
++	_, _ = w.Write(body)
++}
+diff --git a/pkg/plugin/uploads_test.go b/pkg/plugin/uploads_test.go
+new file mode 100644
+index 0000000..d4bffde
+--- /dev/null
++++ b/pkg/plugin/uploads_test.go
+@@ -0,0 +1,115 @@
++package plugin
++
++import (
++	"bytes"
++	"io"
++	"mime/multipart"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"consensys-asko11y-app/pkg/mcp"
++	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
++)
++
++func TestHandleUploadProxiesOwnedSession(t *testing.T) {
++	var observedBody string
++	var observedDelete bool
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method == http.MethodDelete {
++			observedDelete = r.URL.Path == "/uploads/upload_abc" && r.Header.Get("X-Grafana-Actor-User-Id") == "7" && r.Header.Get("X-Upload-Session-Id") != ""
++			_, _ = w.Write([]byte(`{"ok":true}`))
++			return
++		}
++		if r.Method != http.MethodPut || r.URL.Path != "/uploads" {
++			t.Fatalf("unexpected upload request: %s %s", r.Method, r.URL.Path)
++		}
++		if r.Header.Get("Authorization") != "Bearer secret" || r.Header.Get("X-Grafana-Actor-User-Id") != "7" || r.Header.Get("X-Upload-Session-Id") == "" {
++			t.Fatalf("missing trusted upstream headers: %v", r.Header)
++		}
++		body, err := io.ReadAll(r.Body)
++		if err != nil {
++			t.Fatal(err)
++		}
++		observedBody = string(body)
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(http.StatusCreated)
++		_, _ = w.Write([]byte(`{"ok":true,"dataset_id":"upload_abc"}`))
++	}))
++	defer upstream.Close()
++
++	store := NewSessionStore(log.DefaultLogger)
++	session, err := store.CreateSession(7, 1, "upload", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	plugin := &Plugin{
++		sessionStore: store,
++		settings: PluginSettings{MCPServers: []mcp.ServerConfig{{
++			ID: "grafana-query", URL: upstream.URL + "/mcp", Enabled: true,
++			Headers: map[string]string{"Authorization": "Bearer secret"},
++		}}},
++	}
++	var form bytes.Buffer
++	writer := multipart.NewWriter(&form)
++	_ = writer.WriteField("session_id", session.ID)
++	part, err := writer.CreateFormFile("file", "測試.csv")
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = part.Write([]byte("a,b\n1,2\n"))
++	_ = writer.Close()
++	req := httptest.NewRequest(http.MethodPost, "/api/uploads", &form)
++	req.Header.Set("Content-Type", writer.FormDataContentType())
++	req.Header.Set("X-Grafana-User-Id", "7")
++	req.Header.Set("X-Grafana-Org-Id", "1")
++	response := httptest.NewRecorder()
++	plugin.handleUpload(response, req)
++	if response.Code != http.StatusCreated || observedBody != "a,b\n1,2\n" {
++		t.Fatalf("upload failed: status=%d body=%s observed=%q", response.Code, response.Body.String(), observedBody)
++	}
++	remove := httptest.NewRequest(http.MethodDelete, "/api/uploads?dataset_id=upload_abc&session_id="+session.ID, nil)
++	remove.Header.Set("X-Grafana-User-Id", "7")
++	remove.Header.Set("X-Grafana-Org-Id", "1")
++	removeResponse := httptest.NewRecorder()
++	plugin.handleUpload(removeResponse, remove)
++	if removeResponse.Code != http.StatusOK || !observedDelete {
++		t.Fatalf("remove failed: status=%d observed=%v", removeResponse.Code, observedDelete)
++	}
++}
++
++func TestHandleUploadRejectsUnownedAndOversized(t *testing.T) {
++	store := NewSessionStore(log.DefaultLogger)
++	session, err := store.CreateSession(8, 1, "foreign", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	plugin := &Plugin{sessionStore: store}
++	var form bytes.Buffer
++	writer := multipart.NewWriter(&form)
++	_ = writer.WriteField("session_id", session.ID)
++	part, err := writer.CreateFormFile("file", "x.csv")
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = part.Write([]byte("x"))
++	_ = writer.Close()
++	foreign := httptest.NewRequest(http.MethodPost, "/api/uploads", &form)
++	foreign.Header.Set("Content-Type", writer.FormDataContentType())
++	foreign.Header.Set("X-Grafana-User-Id", "7")
++	foreign.Header.Set("X-Grafana-Org-Id", "1")
++	foreignResponse := httptest.NewRecorder()
++	plugin.handleUpload(foreignResponse, foreign)
++	if foreignResponse.Code != http.StatusNotFound {
++		t.Fatalf("foreign upload status=%d", foreignResponse.Code)
++	}
++
++	oversized := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader("x"))
++	oversized.ContentLength = maxUploadRequestBytes + 1
++	oversizedResponse := httptest.NewRecorder()
++	plugin.handleUpload(oversizedResponse, oversized)
++	if oversizedResponse.Code != http.StatusRequestEntityTooLarge {
++		t.Fatalf("oversized upload status=%d", oversizedResponse.Code)
++	}
++}
+diff --git a/src/components/Chat/Chat.tsx b/src/components/Chat/Chat.tsx
+index 61e48fe..4b8beff 100644
+--- a/src/components/Chat/Chat.tsx
++++ b/src/components/Chat/Chat.tsx
+@@ -128,6 +128,13 @@ function ChatComponent({
+     }, 100);
+   }, [setCurrentInput]);
+ 
++  const handleUploaded = useCallback((message: string, sessionId: string) => {
++    void sessionManager.loadSession(sessionId).then(() => {
++      setCurrentInput(message);
++      setTimeout(() => chatInputRef.current?.focus(), 100);
++    });
++  }, [sessionManager, setCurrentInput]);
++
+   const currentSession = sessionManager.sessions.find((s: SessionMetadata) => s.id === sessionManager.currentSessionId);
+   const currentSessionTitle = currentSession?.title;
+   const sessionModel = currentSession?.model;
+@@ -167,12 +174,12 @@ function ChatComponent({
+       chatContainerRef,
+       chatInputRef,
+       bottomSpacerRef,
+-      leftSlot: hasMessages ? (
++      leftSlot: (
+         <div className="flex items-center gap-2">
+           <NewChatButton onConfirm={clearChat} isGenerating={isGenerating} />
+           {modelSelector}
+         </div>
+-      ) : modelSelector,
++      ),
+       rightSlot: (
+         <div className="flex items-center gap-1">
+           {graphitiEnabled && hasMessages && <SaveToMemoryButton messages={chatHistory} />}
+@@ -203,6 +210,7 @@ function ChatComponent({
+       modelSelector,
+       graphitiEnabled,
+       clearChat,
++      handleUploaded,
+       openHistory,
+       readOnly,
+       handleSuggestionClick,
+@@ -242,6 +250,7 @@ function ChatComponent({
+         isOpen={isHistoryOpen}
+         onClose={() => setIsHistoryOpen(false)}
+         docked={!readOnly}
++        onUploaded={handleUploaded}
+       />
+ 
+       {chatScene && (
+diff --git a/src/components/Chat/components/SessionSidebar/SessionSidebar.tsx b/src/components/Chat/components/SessionSidebar/SessionSidebar.tsx
+index fa5d177..d4ca921 100644
+--- a/src/components/Chat/components/SessionSidebar/SessionSidebar.tsx
++++ b/src/components/Chat/components/SessionSidebar/SessionSidebar.tsx
+@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
+ import { UseSessionManagerReturn, SessionMetadata } from '../../hooks/useSessionManager';
+ import { LoadingButton, InlineLoading } from '../../../LoadingOverlay';
+ import { ShareDialog } from '../ShareDialog/ShareDialog';
++import { UploadButton } from '../UploadButton';
+ import { sessionShareService, CreateShareResponse } from '../../../../services/sessionShare';
+ import { getSession } from '../../../../services/backendSessionClient';
++import { removeUploadedDataset, type UploadedDataset } from '../../../../services/uploadClient';
+ import { Icon, useTheme2 } from '@grafana/ui';
+ 
+ interface SessionSidebarProps {
+@@ -13,13 +15,15 @@ interface SessionSidebarProps {
+   onClose: () => void;
+   /** When true, render as a persistent panel docked beside the chat instead of a modal overlay. */
+   docked?: boolean;
++  onUploaded: (message: string, sessionId: string) => void;
+ }
+ 
+-export function SessionSidebar({ sessionManager, currentSessionId, isOpen, onClose, docked = false }: SessionSidebarProps) {
++export function SessionSidebar({ sessionManager, currentSessionId, isOpen, onClose, docked = false, onUploaded }: SessionSidebarProps) {
+   const theme = useTheme2();
+   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
+   const [loadingAction, setLoadingAction] = useState<string | null>(null);
+   const [creatingSession, setCreatingSession] = useState(false);
++  const [uploaded, setUploaded] = useState<{ dataset: UploadedDataset; sessionId: string } | null>(null);
+   const [shareDialogSessionId, setShareDialogSessionId] = useState<string | null>(null);
+   const [sessionShares, setSessionShares] = useState<Map<string, CreateShareResponse[]>>(new Map());
+   const previousSessionIdsRef = useRef<string>('');
+@@ -173,7 +177,33 @@ export function SessionSidebar({ sessionManager, currentSessionId, isOpen, onClo
+             >
+               + New Chat
+             </LoadingButton>
++            <UploadButton
++              disabled={creatingSession}
++              onUploaded={(message, sessionId, dataset) => {
++                setUploaded({ dataset, sessionId });
++                onUploaded(message, sessionId);
++              }}
++            />
+           </div>
++          {uploaded && uploaded.sessionId === currentSessionId && (
++            <div className="mt-2 flex items-center justify-between gap-2 text-xs text-secondary">
++              <span className="truncate" title={uploaded.dataset.filename}>
++                {uploaded.dataset.filename} · {uploaded.dataset.rows} rows · {uploaded.dataset.columns} columns
++                {uploaded.dataset.sheet ? ` · ${uploaded.dataset.sheet}` : ''}
++              </span>
++              <button
++                type="button"
++                className="text-error"
++                onClick={() => {
++                  void removeUploadedDataset(uploaded.dataset.dataset_id, uploaded.sessionId)
++                    .then(() => setUploaded(null))
++                    .catch((error) => window.alert(error instanceof Error ? error.message : 'Remove failed'));
++                }}
++              >
++                Remove
++              </button>
++            </div>
++          )}
+ 
+           <div className="mt-2 text-xs text-secondary">
+             <span>{sessionManager.sessions.length} sessions</span>
+diff --git a/src/components/Chat/components/UploadButton/UploadButton.tsx b/src/components/Chat/components/UploadButton/UploadButton.tsx
+new file mode 100644
+index 0000000..5d6db19
+--- /dev/null
++++ b/src/components/Chat/components/UploadButton/UploadButton.tsx
+@@ -0,0 +1,91 @@
++import React, { useRef, useState } from 'react';
++import { Button } from '@grafana/ui';
++
++import { createSession, deleteSession } from '../../../../services/backendSessionClient';
++import { uploadDataset, type UploadRequest, type UploadedDataset } from '../../../../services/uploadClient';
++
++interface UploadButtonProps {
++  disabled?: boolean;
++  onUploaded: (message: string, sessionId: string, uploaded: UploadedDataset) => void;
++}
++
++export function UploadButton({ disabled, onUploaded }: UploadButtonProps): React.ReactElement {
++  const inputRef = useRef<HTMLInputElement>(null);
++  const requestRef = useRef<UploadRequest | undefined>(undefined);
++  const [uploading, setUploading] = useState(false);
++  const [progress, setProgress] = useState(0);
++
++  async function submit(file: File, sheet?: string): Promise<void> {
++    setUploading(true);
++    let createdSessionId: string | undefined;
++    try {
++      const session = await createSession(`Upload: ${file.name}`, []);
++      createdSessionId = session.id;
++      let uploaded;
++      try {
++        requestRef.current = uploadDataset(file, session.id, sheet, setProgress);
++        uploaded = await requestRef.current.promise;
++      } catch (error) {
++        const message = error instanceof Error ? error.message : 'Upload failed';
++        if (message.startsWith('SHEET_SELECTION_REQUIRED:')) {
++          const sheets = JSON.parse(message.slice('SHEET_SELECTION_REQUIRED:'.length)) as string[];
++          const selected = window.prompt(`Choose a sheet:\n${sheets.join('\n')}`, sheets[0]);
++          if (!selected || !sheets.includes(selected)) {
++            throw new Error('Upload cancelled: no valid sheet selected');
++          }
++          requestRef.current = uploadDataset(file, session.id, selected, setProgress);
++          uploaded = await requestRef.current.promise;
++        } else {
++          throw error;
++        }
++      }
++      const sheetLabel = uploaded.sheet ? `, sheet: ${uploaded.sheet}` : '';
++      onUploaded(
++        `Use uploaded dataset \`${uploaded.dataset_id}\` (${uploaded.filename}${sheetLabel}, ${uploaded.rows} rows, ${uploaded.columns} columns). `,
++        session.id,
++        uploaded
++      );
++      createdSessionId = undefined;
++    } catch (error) {
++      if (createdSessionId) {
++        await deleteSession(createdSessionId).catch(() => undefined);
++      }
++      window.alert(error instanceof Error ? error.message : 'Upload failed');
++    } finally {
++      requestRef.current = undefined;
++      setUploading(false);
++      setProgress(0);
++      if (inputRef.current) {
++        inputRef.current.value = '';
++      }
++    }
++  }
++
++  return (
++    <>
++      <Button
++        type="button"
++        size="sm"
++        variant="secondary"
++        icon={uploading ? 'times' : 'import'}
++        disabled={disabled}
++        onClick={() => uploading ? requestRef.current?.cancel() : inputRef.current?.click()}
++        aria-label={uploading ? `Cancel upload (${progress}%)` : 'Upload CSV or Excel'}
++        title={uploading ? `取消上傳 (${progress}%)` : '上傳 CSV / Excel'}
++      />
++      {uploading && <span className="self-center text-xs text-secondary">{progress}%</span>}
++      <input
++        ref={inputRef}
++        type="file"
++        accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
++        hidden
++        onChange={(event) => {
++          const file = event.currentTarget.files?.[0];
++          if (file) {
++            void submit(file);
++          }
++        }}
++      />
++    </>
++  );
++}
+diff --git a/src/components/Chat/components/UploadButton/index.ts b/src/components/Chat/components/UploadButton/index.ts
+new file mode 100644
+index 0000000..e8abea9
+--- /dev/null
++++ b/src/components/Chat/components/UploadButton/index.ts
+@@ -0,0 +1 @@
++export { UploadButton } from './UploadButton';
+diff --git a/src/components/Chat/components/index.ts b/src/components/Chat/components/index.ts
+index 966f696..45571b3 100644
+--- a/src/components/Chat/components/index.ts
++++ b/src/components/Chat/components/index.ts
+@@ -14,4 +14,5 @@ export { SidePanel } from './SidePanel/SidePanel';
+ export { ToolCallDisplay } from './ToolCallsSection/ToolCallDisplay';
+ export { ToolCallsSection } from './ToolCallsSection/ToolCallsSection';
+ export { TracesRenderer } from './TracesRenderer/TracesRenderer';
++export { UploadButton } from './UploadButton/UploadButton';
+ export { WelcomeMessage } from './WelcomeMessage/WelcomeMessage';
+diff --git a/src/services/uploadClient.ts b/src/services/uploadClient.ts
+new file mode 100644
+index 0000000..e569da4
+--- /dev/null
++++ b/src/services/uploadClient.ts
+@@ -0,0 +1,72 @@
++import { config } from '@grafana/runtime';
++
++const UPLOAD_URL = '/api/plugins/consensys-asko11y-app/resources/api/uploads';
++const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
++
++function orgHeaders(): Record<string, string> {
++  return { 'X-Grafana-Org-Id': String(config.bootData.user.orgId || '1') };
++}
++
++export interface UploadedDataset {
++  dataset_id: string;
++  filename: string;
++  sheet?: string;
++  rows: number;
++  columns: number;
++  fields: Array<{ name: string; type: string }>;
++  expires_at: number;
++}
++
++export interface UploadRequest {
++  promise: Promise<UploadedDataset>;
++  cancel: () => void;
++}
++
++export function uploadDataset(file: File, sessionId: string, sheet?: string, onProgress?: (percent: number) => void): UploadRequest {
++  if (file.size < 1 || file.size > MAX_UPLOAD_BYTES) {
++    return { promise: Promise.reject(new Error('File must be between 1 byte and 50 MB')), cancel: () => undefined };
++  }
++  const form = new FormData();
++  form.append('session_id', sessionId);
++  if (sheet) {
++    form.append('sheet', sheet);
++  }
++  form.append('file', file, file.name);
++  const request = new XMLHttpRequest();
++  const promise = new Promise<UploadedDataset>((resolve, reject) => {
++    request.open('POST', UPLOAD_URL);
++    for (const [key, value] of Object.entries(orgHeaders())) {
++      request.setRequestHeader(key, value);
++    }
++    request.upload.onprogress = (event) => {
++      if (event.lengthComputable) {
++        onProgress?.(Math.round((event.loaded / event.total) * 100));
++      }
++    };
++    request.onerror = () => reject(new Error('Upload request failed'));
++    request.onabort = () => reject(new Error('Upload cancelled'));
++    request.onload = () => {
++      let payload: Partial<UploadedDataset> & { error?: string } = {};
++      try {
++        payload = JSON.parse(request.responseText);
++      } catch {
++        // The status-based fallback below is enough.
++      }
++      if (request.status < 200 || request.status >= 300) {
++        reject(new Error(String(payload.error || `Upload failed (${request.status})`)));
++        return;
++      }
++      resolve(payload as UploadedDataset);
++    };
++    request.send(form);
++  });
++  return { promise, cancel: () => request.abort() };
++}
++
++export async function removeUploadedDataset(datasetId: string, sessionId: string): Promise<void> {
++  const query = new URLSearchParams({ dataset_id: datasetId, session_id: sessionId });
++  const response = await fetch(`${UPLOAD_URL}?${query}`, { method: 'DELETE', headers: orgHeaders() });
++  if (!response.ok) {
++    throw new Error(`Remove failed (${response.status})`);
++  }
++}

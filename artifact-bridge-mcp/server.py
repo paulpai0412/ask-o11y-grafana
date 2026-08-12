@@ -66,7 +66,7 @@ QUERY_PLACEHOLDER_KEYS = {"$plan_ref", "fields", "refId", "datasource"}
 
 def context_from_headers(headers) -> dict[str, str] | None:
     org = headers.get("X-Grafana-Org-Id") or headers.get("X-Org-Id")
-    user = headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
+    user = headers.get("X-Grafana-Actor-User-Id") or headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
     return {"org_id": str(org), "user_id": str(user)} if org and user else None
 
 

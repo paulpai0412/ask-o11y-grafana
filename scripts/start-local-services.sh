@@ -70,4 +70,6 @@ for endpoint in 3000 8080 8768 8772 8773 8777 4000 14334; do
 	}
 done
 
+uv run python scripts/configure-upload-datasource.py
+
 echo 'Grafana and local services are running.'
