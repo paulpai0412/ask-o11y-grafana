@@ -9,7 +9,7 @@ Executes Ask O11y-generated Python against one authorized Grafana columnar frame
 - `inspect_python_analysis(provenance_ref)`
 - `revise_python_analysis(provenance_ref, python_code, seed?)`
 
-The query frame and validity rules are transferred as bounded JSON. Trusted `capture.py`, baked into the image, creates filtered `df` and captures named tables, bounded CSV outputs, Matplotlib PNG, Plotly JSON, HTML, text, errors, and validity audit. Display names never control physical paths. No CSV or SQLite input intermediate is created.
+The query frame and validity rules are transferred as bounded JSON. Trusted `capture.py`, baked into the image, creates filtered `df` and captures named tables, bounded CSV outputs, JSON results, Matplotlib PNG, Plotly JSON, HTML, text, errors, and validity audit. Explicit text/JSON results are returned inline up to 32 KiB total; CSV outputs receive retention-bound signed download URLs. Display names never control physical paths. No CSV or SQLite input intermediate is created.
 
 The image pins NumPy, SciPy, pandas, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna. PyTorch and TensorFlow are intentionally omitted because their image and runtime cost is disproportionate for this bounded tabular-analysis service.
 
@@ -44,7 +44,7 @@ MCP_SHARED_TOKEN='<same-token>' uv run python scripts/run-sandbox-analysis-http-
 
 ## Serving authorized image assets
 
-`GET /assets/<signed-token>` validates the token and artifact retention before streaming stored bytes with their trusted MIME type. It does not generate charts, HTML, or panel JSON. Tokens are created only by the hidden Artifact Bridge from an authorized execution ref and output index.
+`GET /assets/<signed-token>` validates the token and artifact retention before streaming stored bytes with their trusted MIME type; CSV responses use attachment disposition. It does not generate charts, HTML, or panel JSON. Tokens are created from authorized execution refs: the hidden Artifact Bridge creates PNG bindings, while Sandbox Analysis returns CSV download URLs.
 
 For local Grafana use, the bridge defaults `ARTIFACT_PUBLIC_BASE` to `http://127.0.0.1:8777`. A non-local deployment must set it to the authenticated/TLS asset-gateway URL reachable by the Grafana user's browser.
 

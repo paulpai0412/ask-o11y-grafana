@@ -1,0 +1,83 @@
+registry_version: 0.1.0
+snapshot_id: observability-http-server-v0.1.0
+namespace: observability.http
+status: approved
+provenance:
+  registry_path: semantic/registry/observability-http-server.yaml
+  source_refs:
+    - https://opentelemetry.io/docs/specs/semconv/http/http-metrics/
+    - https://opentelemetry.io/docs/specs/semconv/http/http-spans/
+  owner: ask-o11y-poc-design
+  effective_from: "2026-08-13"
+datasets:
+  - canonical_id: dataset.observability.http-server-request
+    physical_id: http-server-request
+    asset_kind: event_topic
+    status: observed
+    grain: one row per completed HTTP server request event
+    entity_key: [trace_id, span_id]
+    time_identity: event_time
+    fields:
+      - {
+          canonical_id: field.observability.http.event-time,
+          physical_name: event_time,
+          type: datetime,
+          unit: null,
+          semantic_kind: temporal,
+          status: observed,
+          reason: Event occurrence timestamp.,
+        }
+      - {
+          canonical_id: field.observability.http.trace-id,
+          physical_name: trace_id,
+          type: string,
+          unit: null,
+          semantic_kind: identifier,
+          status: observed,
+          reason: Trace identity for correlation.,
+        }
+      - {
+          canonical_id: field.observability.http.span-id,
+          physical_name: span_id,
+          type: string,
+          unit: null,
+          semantic_kind: identifier,
+          status: observed,
+          reason: Span identity for correlation.,
+        }
+      - {
+          canonical_id: field.observability.http.request-method,
+          physical_name: http.request.method,
+          type: string,
+          unit: null,
+          semantic_kind: event_attribute,
+          status: observed,
+          reason: OpenTelemetry HTTP request method attribute.,
+        }
+      - {
+          canonical_id: field.observability.http.response-status-code,
+          physical_name: http.response.status_code,
+          type: integer,
+          unit: null,
+          semantic_kind: event_attribute,
+          status: observed,
+          reason: OpenTelemetry HTTP response status code attribute.,
+        }
+      - {
+          canonical_id: field.observability.http.route,
+          physical_name: http.route,
+          type: string,
+          unit: null,
+          semantic_kind: dimension,
+          status: observed,
+          reason: Low-cardinality HTTP route attribute when available.,
+        }
+      - {
+          canonical_id: field.observability.http.server-duration,
+          physical_name: http.server.request.duration,
+          type: number,
+          unit: s,
+          semantic_kind: metric,
+          status: observed,
+          reason: OpenTelemetry HTTP server request duration metric in seconds.,
+        }

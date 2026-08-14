@@ -9,7 +9,7 @@ import json
 import time
 from typing import Any
 
-MAX_ASSET_BYTES = 3 * 1024 * 1024
+MAX_ASSET_BYTES = 4 * 1024 * 1024
 SUPPORTED_MIME = {"image/png", "text/csv", "text/html", "text/plain", "application/json"}
 
 

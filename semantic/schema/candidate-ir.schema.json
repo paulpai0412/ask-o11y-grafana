@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ask-o11y.local/schema/ontology-candidate-ir-v1.json",
+  "title": "Ask O11y ontology candidate IR",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "namespace", "source_snapshot", "datasets", "relations", "limitations"],
+  "properties": {
+    "format": {"const": "ask-o11y-ontology-candidate-ir-v1"},
+    "namespace": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
+    "source_snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "refs", "sha256"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "refs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "datasets": {
+      "type": "array", "minItems": 1, "maxItems": 5000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["canonical_id", "physical_id", "asset_kind", "status", "grain", "entity_key", "fields", "source"],
+        "properties": {
+          "canonical_id": {"type": "string", "pattern": "^dataset\\.[a-z0-9._-]+$"},
+          "physical_id": {"type": "string", "minLength": 1},
+          "asset_kind": {"enum": ["tabular_file", "sql_table", "timeseries", "log_stream", "event_topic", "api_resource"]},
+          "status": {"enum": ["observed", "proposed"]},
+          "grain": {"type": "string", "minLength": 1},
+          "entity_key": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "fields": {
+            "type": "array", "maxItems": 2000,
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["canonical_id", "physical_name", "type", "semantic_kind", "status", "reason", "source"],
+              "properties": {
+                "canonical_id": {"type": "string", "pattern": "^field\\.[a-z0-9._-]+$"},
+                "physical_name": {"type": "string", "minLength": 1},
+                "type": {"enum": ["date", "datetime", "string", "number", "integer", "boolean", "object"]},
+                "unit": {"type": ["string", "null"]},
+                "semantic_kind": {"enum": ["temporal", "identifier", "measurement", "dimension", "metric", "event_attribute", "state", "unknown"]},
+                "status": {"enum": ["observed", "proposed"]},
+                "reason": {"type": "string", "minLength": 1},
+                "source": {"type": "object"}
+              }
+            }
+          },
+          "source": {"type": "object"}
+        }
+      }
+    },
+    "relations": {
+      "type": "array", "maxItems": 10000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["canonical_id", "from_dataset", "to_dataset", "from_fields", "to_fields", "cardinality", "status", "executable", "reason", "source"],
+        "properties": {
+          "canonical_id": {"type": "string", "pattern": "^relation\\.[a-z0-9._-]+$"},
+          "from_dataset": {"type": "string", "minLength": 1},
+          "to_dataset": {"type": "string", "minLength": 1},
+          "from_fields": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "to_fields": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "cardinality": {"enum": ["1:1", "1:N", "N:1", "N:N", "unknown"]},
+          "status": {"const": "proposed"},
+          "executable": {"const": false},
+          "reason": {"type": "string", "minLength": 1},
+          "source": {"type": "object"}
+        }
+      }
+    },
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+  }
+}

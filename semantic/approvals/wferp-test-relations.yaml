@@ -1,0 +1,42 @@
+format: ask-o11y-relation-approval-v1
+registry_version: 0.1.0
+status: approved
+owner: ask-o11y-poc-design
+effective_from: "2026-08-13"
+scope: isolated-wferp-test-database
+source_ref: scripts/export-sqlserver-fk-catalog.sql
+relations:
+  - canonical_id: relation.dbo.actmj-actmi-fk_actmj_actmi
+    from_dataset: ACTMI
+    to_dataset: ACTMJ
+    from_fields: [MI001]
+    to_fields: [MJ001]
+    cardinality: "1:N"
+    status: approved
+    executable: true
+    reason: Checked and trusted SQL Server FK reviewed for the isolated verification scope.
+    evidence:
+      {
+        kind: sqlserver_foreign_key,
+        schema: dbo,
+        constraint: FK_ACTMJ_ACTMI,
+        is_disabled: false,
+        is_not_trusted: false,
+      }
+  - canonical_id: relation.dbo.actmk-actmj-fk_actmk_actmj
+    from_dataset: ACTMJ
+    to_dataset: ACTMK
+    from_fields: [MJ001, MJ002, MJ003, MJ005]
+    to_fields: [MK001, MK002, MK003, MK004]
+    cardinality: "1:N"
+    status: approved
+    executable: true
+    reason: Checked and trusted SQL Server FK reviewed for the isolated verification scope.
+    evidence:
+      {
+        kind: sqlserver_foreign_key,
+        schema: dbo,
+        constraint: FK_ACTMK_ACTMJ,
+        is_disabled: false,
+        is_not_trusted: false,
+      }

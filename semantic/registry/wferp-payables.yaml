@@ -1,0 +1,129 @@
+registry_version: 0.1.0
+snapshot_id: wferp-payables-v0.1.0
+namespace: erp.payables
+status: approved
+provenance:
+  registry_path: semantic/registry/wferp-payables.yaml
+  source_refs:
+    - data-query-planner-mcp/metadata/wferp/schema_bundle.json
+    - data-query-planner-mcp/metadata/wferp/primary_key_map.json
+    - data-query-planner-mcp/metadata/wferp/relationship_edges.json
+  owner: ask-o11y-poc-design
+  effective_from: "2026-08-13"
+datasets:
+  - canonical_id: dataset.wferp.acpta
+    physical_id: ACPTA
+    asset_kind: sql_table
+    status: observed
+    grain: one row per accounts-payable voucher header
+    entity_key: [TA001, TA002]
+    time_identity: TA003
+    fields:
+      - {
+          canonical_id: field.wferp.acpta.ta001,
+          physical_name: TA001,
+          type: string,
+          unit: null,
+          semantic_kind: identifier,
+          status: observed,
+          reason: Physical voucher-type key observed in WFERP metadata.,
+        }
+      - {
+          canonical_id: field.wferp.acpta.ta002,
+          physical_name: TA002,
+          type: string,
+          unit: null,
+          semantic_kind: identifier,
+          status: observed,
+          reason: Physical voucher-number key observed in WFERP metadata.,
+        }
+      - {
+          canonical_id: field.wferp.acpta.ta003,
+          physical_name: TA003,
+          type: date,
+          unit: null,
+          semantic_kind: temporal,
+          status: observed,
+          reason: Metadata describes voucher date in YMD format.,
+        }
+      - {
+          canonical_id: field.wferp.acpta.ta004,
+          physical_name: TA004,
+          type: string,
+          unit: null,
+          semantic_kind: dimension,
+          status: observed,
+          reason: Metadata describes supplier code.,
+        }
+      - {
+          canonical_id: field.wferp.acpta.ta009,
+          physical_name: TA009,
+          type: number,
+          unit: null,
+          semantic_kind: measurement,
+          status: observed,
+          reason: Metadata describes exchange rate; unit semantics are not approved.,
+        }
+    relations:
+      - canonical_id: relation.wferp.acpta-acptb
+        from_dataset: ACPTA
+        to_dataset: ACPTB
+        from_fields: [TA001, TA002]
+        to_fields: [TB001, TB002]
+        cardinality: "1:N"
+        status: proposed
+        executable: false
+        reason: Medium-confidence prefix/key-position heuristic is discovery evidence only and cannot authorize a JOIN.
+  - canonical_id: dataset.wferp.acptb
+    physical_id: ACPTB
+    asset_kind: sql_table
+    status: observed
+    grain: one row per accounts-payable voucher line
+    entity_key: [TB001, TB002, TB003]
+    time_identity: TB008
+    fields:
+      - {
+          canonical_id: field.wferp.acptb.tb001,
+          physical_name: TB001,
+          type: string,
+          unit: null,
+          semantic_kind: identifier,
+          status: observed,
+          reason: Physical voucher-type key observed in WFERP metadata.,
+        }
+      - {
+          canonical_id: field.wferp.acptb.tb002,
+          physical_name: TB002,
+          type: string,
+          unit: null,
+          semantic_kind: identifier,
+          status: observed,
+          reason: Physical voucher-number key observed in WFERP metadata.,
+        }
+      - {
+          canonical_id: field.wferp.acptb.tb003,
+          physical_name: TB003,
+          type: string,
+          unit: null,
+          semantic_kind: identifier,
+          status: observed,
+          reason: Physical voucher-line key observed in WFERP metadata.,
+        }
+      - {
+          canonical_id: field.wferp.acptb.tb008,
+          physical_name: TB008,
+          type: date,
+          unit: null,
+          semantic_kind: temporal,
+          status: observed,
+          reason: Metadata describes document date in YMD format.,
+        }
+      - {
+          canonical_id: field.wferp.acptb.tb009,
+          physical_name: TB009,
+          type: number,
+          unit: null,
+          semantic_kind: measurement,
+          status: observed,
+          reason: Metadata describes payable amount; currency semantics are not approved.,
+        }

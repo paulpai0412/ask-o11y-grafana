@@ -12,7 +12,8 @@ Ask O11y is the only runtime LLM planner. It dynamically selects live tools and 
 
 ```text
 Ask O11y LLM
-  ├─ Data Query Planner MCP (plan only)
+  ├─ Ontology MCP (bounded read-only semantic declarations)
+  ├─ Data Query Planner MCP (plan only; deterministic semantic gate)
   ├─ Grafana Query MCP (datasource read → opaque frame_ref)
   ├─ Sandbox Analysis MCP
   │    └─ fresh OpenSandbox Code Interpreter
@@ -25,7 +26,7 @@ Ask O11y LLM
   └─ built-in mcp-grafana_update_dashboard (sole Dashboard writer)
 ```
 
-The external endpoints bind loopback, require the shared service bearer, and use server-configured org/user identity. Model-visible tools exclude Artifact Bridge. Built-in Grafana mutation still passes Ask O11y's host approval gate.
+The external endpoints bind loopback, require the shared service bearer, and use server-configured org/user identity. Model-visible tools exclude Artifact Bridge. Ontology is read-only and has no datasource credentials; Planner remains the final trusted semantic enforcement point. Built-in Grafana mutation still passes Ask O11y's host approval gate.
 
 ## Sandbox contract
 
@@ -52,10 +53,10 @@ Rules:
 - The trusted input bundle carries native Grafana columnar JSON and query-plan validity rules.
 - Trusted bootstrap constructs and filters `df` before generated code runs, then unlinks the input bundle.
 - Source is UTF-8 and limited to 32 KiB. The MCP hashes and transfers it but never executes it locally.
-- The sandbox receives `df`, `pd`, `np`, `display(value)`, and `emit(value, name=None)`.
+- The sandbox receives `df`, `pd`, `np`, `display(value)`, and `emit(value, name=None)`. A `.json` name captures JSON; a `.csv` name captures a downloadable CSV.
 - An analysis dashboard is a static report: generated Python emits a Matplotlib PNG plus optional textual summary; no Sandbox output becomes a native Grafana chart target.
 - Output names are sanitized metadata and never filesystem paths.
-- Raw frames, query bodies, physical paths, credentials, full MIME payloads, stdout values, and exception values are not returned to the model.
+- Raw frames, query bodies, physical paths, credentials, full MIME payloads, stdout logs, and exception values are not returned to the model. Only explicitly emitted text/JSON is returned inline, bounded to 32 KiB total.
 
 Success returns opaque refs, validity evidence, provenance, and compact output metadata:
 
@@ -68,12 +69,21 @@ Success returns opaque refs, validity evidence, provenance, and compact output m
   },
   "output_summary": {
     "result_count": 1,
-    "assets": [
+    "inline_results": [
       {
         "output_index": 0,
-        "display_name": "shap.png",
-        "mime_type": "image/png",
-        "$execution_ref": "artifact://run_…/sandbox-execution"
+        "display_name": "result.json",
+        "mime_type": "application/json",
+        "value": {"rmse": 12.3}
+      }
+    ],
+    "downloads": [
+      {
+        "output_index": 1,
+        "display_name": "result.csv",
+        "mime_type": "text/csv",
+        "url": "https://…/assets/<signed-token>",
+        "expires_at": 1780000000
       }
     ]
   }
@@ -96,6 +106,9 @@ Every call creates and destroys one sandbox. No kernel persists across turns.
 | source | 32 KiB |
 | input bundle | 16 MiB |
 | captured execution | 5 MiB |
+| inline text/JSON | 32 KiB total |
+| signed CSV download | 4 MiB each, artifact-retention expiry |
+| output field summary | 200 fields |
 | egress | deny all |
 | credentials | none |
 | host volumes | none |
@@ -143,7 +156,7 @@ For an image, the LLM authors its chosen panel and an opaque URL placeholder:
 }
 ```
 
-The bridge validates the output and replaces the placeholder with a signed URL. It does not generate the `<img>`, select the text panel, transform PNG into HTML, or write Grafana. The Sandbox asset endpoint validates the signature, retention deadline, and artifact authorization, then streams the stored bytes with their trusted MIME type.
+The bridge validates the output and replaces the placeholder with a signed URL. It does not generate the `<img>`, select the text panel, transform PNG into HTML, or write Grafana. The Sandbox asset endpoint validates the signature, retention deadline, and artifact authorization, then streams the stored bytes with their trusted MIME type. Sandbox returns signed URLs only for captured CSV downloads; PNG Dashboard URLs remain hidden Artifact Bridge outputs.
 
 The bridge rejects every nonempty target without an opaque binding, including mixed dashboards that combine authorized and raw datasource targets. It also rejects model-authored datasource/query/URL bodies, physical artifact URLs, unsupported fields, foreign refs, unresolved placeholders, excessive total nested panels/targets/assets, and oversized dashboards.
 
@@ -163,17 +176,18 @@ The reproducible Ask O11y v0.3.2 integration patch is `patches/ask-o11y-dynamic-
 
 ## Acceptance criteria
 
-1. Runtime config contains exactly Planner, Grafana Query, Sandbox Analysis, and hidden Artifact Bridge endpoints.
-2. Engineering/Finance Analysis, `analysis_core`, external Renderer tools, and method-specific runtime paths are absent.
-3. Grafana remains the only datasource executor; Sandbox has no datasource credentials.
-4. Missing identity, foreign refs, raw frames, unsupported arguments, and oversized inputs fail closed.
-5. Trusted validity filtering runs before generated code and is verified against the source row count.
-6. Sandbox execution has deny-all egress, bounded resources/output, no credentials, no volumes, and unconditional cleanup.
-7. Analysis PNG outputs remain behind authorized refs; signed URLs are host-resolved and never authored by the model.
-8. Artifact Bridge preserves model-authored panels/options, resolves only authorized bindings, and exposes no Grafana write tool.
-9. Preview is a real tagged Dashboard; publication removes the tag on the same UID without rerunning query or Python.
-10. E2E proves SHAP PNG visibility without an analysis data target, query-only dynamic XY authoring, built-in-only publication, and absence of model-visible bridge calls.
-11. Production deployment adds OpenSandbox authentication and gVisor, Kata, or Firecracker; local `runc` evidence is not production attestation.
+1. Runtime config contains Ontology, Planner, Grafana Query, Sandbox Analysis, and hidden Artifact Bridge endpoints.
+2. Ontology exposes bounded read-only declarations only; Planner independently enforces the pinned snapshot and analysis contract before query execution.
+3. Engineering/Finance Analysis, `analysis_core`, external Renderer tools, and method-specific runtime paths are absent.
+4. Grafana remains the only datasource executor; Ontology, Planner, and Sandbox have no datasource credentials.
+5. Missing identity, foreign refs, raw frames, unsupported arguments, and oversized inputs fail closed.
+6. Trusted validity filtering runs before generated code and is verified against the source row count.
+7. Sandbox execution has deny-all egress, bounded resources/output, no credentials, no volumes, and unconditional cleanup.
+8. Analysis PNG outputs remain behind authorized refs; signed URLs are host-resolved and never authored by the model.
+9. Artifact Bridge preserves model-authored panels/options, resolves only authorized bindings, and exposes no Grafana write tool.
+10. Preview is a real tagged Dashboard; publication removes the tag on the same UID without rerunning query or Python.
+11. E2E proves SHAP PNG visibility without an analysis data target, query-only dynamic XY authoring, built-in-only publication, and absence of model-visible bridge calls.
+12. Production deployment adds OpenSandbox authentication and gVisor, Kata, or Firecracker; local `runc` evidence is not production attestation.
 
 ## Deferred
 

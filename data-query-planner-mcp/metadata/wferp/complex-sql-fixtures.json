@@ -1,0 +1,34 @@
+{
+  "fixtures": [
+    {
+      "id": "two-table-join",
+      "prompt": "ACTMI ACTMJ MI001 MI002 MJ002",
+      "sql": "SELECT I.[MI001] AS [budget_id], I.[MI002] AS [budget_name], J.[MJ002] AS [fiscal_year] FROM [wferp_test].[dbo].[ACTMI] I JOIN [wferp_test].[dbo].[ACTMJ] J ON I.[MI001] = J.[MJ001]",
+      "output_fields": ["budget_id", "budget_name", "fiscal_year"],
+      "expected_rows": 1,
+      "expected_first_row": ["BGT001", "工程預算", "2026"]
+    },
+    {
+      "id": "multi-join-correlated-subquery-aggregate",
+      "prompt": "ACTMI ACTMJ ACTMK MI001 MI002 MJ002 MK006 MK007 MK012",
+      "sql": "SELECT I.[MI001] AS [budget_id], I.[MI002] AS [budget_name], J.[MJ002] AS [fiscal_year], CASE WHEN SUM(K.[MK007]) > SUM(K.[MK006]) * 0.2 THEN 'HIGH' ELSE 'NORMAL' END AS [usage_band], SUM(K.[MK006]) AS [budget_total], SUM(K.[MK007]) AS [used_total], SUM(K.[MK012]) AS [available_total] FROM [wferp_test].[dbo].[ACTMI] I JOIN [wferp_test].[dbo].[ACTMJ] J ON I.[MI001] = J.[MJ001] JOIN [wferp_test].[dbo].[ACTMK] K ON J.[MJ001] = K.[MK001] AND J.[MJ002] = K.[MK002] AND J.[MJ003] = K.[MK003] AND J.[MJ005] = K.[MK004] WHERE K.[MK007] > (SELECT AVG(K2.[MK007]) FROM [wferp_test].[dbo].[ACTMK] K2 WHERE K2.[MK001] = I.[MI001]) GROUP BY I.[MI001], I.[MI002], J.[MJ002] HAVING SUM(K.[MK006]) > 0",
+      "output_fields": ["budget_id", "budget_name", "fiscal_year", "usage_band", "budget_total", "used_total", "available_total"],
+      "expected_rows": 1,
+      "expected_first_row": ["BGT001", "工程預算", "2026", "HIGH", 700000, 187000, 513000]
+    },
+    {
+      "id": "wrong-join-predicate",
+      "prompt": "ACTMI ACTMJ MI001 MJ002",
+      "sql": "SELECT I.[MI001], J.[MJ002] FROM [wferp_test].[dbo].[ACTMI] I JOIN [wferp_test].[dbo].[ACTMJ] J ON I.[MI001] = J.[MJ002]",
+      "output_fields": ["MI001", "MJ002"],
+      "expected_rejection": "JOIN_PREDICATE_MISMATCH"
+    },
+    {
+      "id": "unapproved-relation",
+      "prompt": "ACPTA ACPTB TA001 TB009",
+      "sql": "SELECT A.[TA001], B.[TB009] FROM [wferp_test].[dbo].[ACPTA] A JOIN [wferp_test].[dbo].[ACPTB] B ON A.[TA001] = B.[TB001] AND A.[TA002] = B.[TB002]",
+      "output_fields": ["TA001", "TB009"],
+      "expected_rejection": "JOIN_RELATION_NOT_APPROVED"
+    }
+  ]
+}

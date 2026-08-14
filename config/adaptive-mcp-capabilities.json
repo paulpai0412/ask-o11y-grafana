@@ -1,6 +1,14 @@
 {
   "servers": [
     {
+      "id": "ontology",
+      "name": "Read-only Ontology Context",
+      "url_env": "ONTOLOGY_MCP_URL",
+      "local_url": "http://127.0.0.1:8771/mcp",
+      "enabled_tools": ["list_snapshots", "get_relation_paths", "resolve_concepts", "get_semantic_context", "classify_fields", "validate_analysis_contract"],
+      "disabled_tools": []
+    },
+    {
       "id": "data-query-planner",
       "name": "Data Query Planner Workflow Node",
       "url_env": "DATA_QUERY_PLANNER_MCP_URL",

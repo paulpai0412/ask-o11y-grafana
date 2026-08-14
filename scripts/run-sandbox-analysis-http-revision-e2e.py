@@ -27,9 +27,12 @@ def rpc(name: str, arguments: dict[str, Any], timeout: int = 240) -> dict[str, A
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {TOKEN}", "X-Grafana-Org-Id": ORG, "X-Grafana-User": USER},
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        envelope = json.load(response)
-    return json.loads(envelope["result"]["content"][0]["text"])
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            envelope = json.load(response)
+        return json.loads(envelope["result"]["content"][0]["text"])
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("Sandbox Analysis RPC returned an invalid response") from exc
 
 
 def require(condition: bool, message: str) -> None:
@@ -49,11 +52,20 @@ def main() -> int:
     }])
     store.write_json(context, run_id, "query-plan", {"analysis_input_contract": {"validity_rules": []}})
 
-    initial_code = "import matplotlib.pyplot as plt\nfig, ax = plt.subplots()\nax.plot(df['x'], df['y'])\nax.set_title('熱耗率相關性')\nemit(fig, name='熱耗率趨勢.png')\nemit(df[['x', 'y']], name='分析結果.csv')"
+    initial_code = "import matplotlib.pyplot as plt\nfig, ax = plt.subplots()\nax.plot(df['x'], df['y'])\nax.set_title('熱耗率相關性')\nemit(fig, name='熱耗率趨勢.png')\nemit(df[['x', 'y']], name='分析結果.csv')\nemit({'rows': len(df), 'slope': 2}, name='result.json')\nemit('斜率為 2', name='summary.txt')"
     executed = rpc("execute_python_analysis", {"frame_ref": frame_ref, "python_code": initial_code, "seed": 41})
     require(bool(executed.get("ok")), f"execute failed: {executed}")
-    require(executed.get("output_summary", {}).get("mime_types") == ["image/png", "text/csv"], "named PNG/CSV MIME capture failed")
-    require(executed.get("output_summary", {}).get("output_names") == ["熱耗率趨勢.png", "分析結果.csv"], "output display names were not preserved")
+    require(executed.get("output_summary", {}).get("mime_types") == ["application/json", "image/png", "text/csv", "text/plain"], "named result MIME capture failed")
+    require(executed.get("output_summary", {}).get("output_names") == ["熱耗率趨勢.png", "分析結果.csv", "result.json", "summary.txt"], "output display names were not preserved")
+    require(executed.get("output_summary", {}).get("inline_results") == [
+        {"output_index": 2, "display_name": "result.json", "mime_type": "application/json", "value": {"rows": 3, "slope": 2}},
+        {"output_index": 3, "display_name": "summary.txt", "mime_type": "text/plain", "value": "斜率為 2"},
+    ], "bounded inline results were not returned")
+    downloads = executed.get("output_summary", {}).get("downloads", [])
+    require(len(downloads) == 1 and downloads[0].get("display_name") == "分析結果.csv", "signed CSV download was not returned")
+    with urllib.request.urlopen(downloads[0]["url"], timeout=30) as response:
+        require(response.read() == b"x,y\n1,2\n2,4\n3,6\n", "signed CSV download content mismatch")
+        require(response.headers.get("Content-Disposition", "").startswith("attachment;"), "CSV response is not a download")
     require(executed.get("output_summary", {}).get("stderr_lines") == 0, "CJK plot emitted font warnings")
     provenance_ref = executed["refs"]["provenance_ref"]
     listed = rpc("list_python_analyses", {})
@@ -84,6 +96,8 @@ def main() -> int:
         "ok": True,
         "execute_mime_types": executed["output_summary"]["mime_types"],
         "named_outputs": executed["output_summary"]["output_names"],
+        "inline_results": executed["output_summary"]["inline_results"],
+        "csv_download": True,
         "cjk_font_warnings": executed["output_summary"]["stderr_lines"],
         "listed": True,
         "inspect_code_sha256": inspected["code_sha256"],

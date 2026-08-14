@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_FIELDS = 200
 MAX_XLSX_EXPANDED_BYTES = 500 * 1024 * 1024
 UPLOAD_RETENTION_SECONDS = 7 * 24 * 60 * 60
 UPLOAD_ID_RE = re.compile(r"upload_[a-f0-9]{32}")
@@ -46,6 +47,8 @@ def _decode_csv(raw: bytes) -> str:
 
 
 def _normalize_headers(values: list[Any]) -> list[str]:
+    if len(values) > MAX_UPLOAD_FIELDS:
+        raise ValueError(f"uploaded dataset exceeds {MAX_UPLOAD_FIELDS} columns")
     seen: dict[str, int] = {}
     headers: list[str] = []
     for index, value in enumerate(values, 1):

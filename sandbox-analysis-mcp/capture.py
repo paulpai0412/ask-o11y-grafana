@@ -138,6 +138,14 @@ def run(code: str, bundle_path: str, seed: int) -> None:
         index = len(manifest) + 1
         display_name = label(name, index, f"Output {index}")
         csv_requested = display_name.lower().endswith(".csv")
+        json_requested = display_name.lower().endswith(".json")
+        if json_requested:
+            try:
+                rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("JSON output must contain JSON-serializable values") from exc
+            write(f"output-{index}.json", "application/json", rendered, display_name)
+            return
         if isinstance(value, Figure):
             path = OUTPUT_DIR / f"figure-{index}.png"
             value.savefig(path, format="png", bbox_inches="tight")
@@ -175,9 +183,12 @@ def run(code: str, bundle_path: str, seed: int) -> None:
             tree = ast.parse(code, filename="<generated-analysis>", mode="exec")
             if tree.body and isinstance(tree.body[-1], ast.Expr):
                 body = ast.Module(body=tree.body[:-1], type_ignores=[])
+                # pi-lens-ignore: ast-grep:no-compile-call
                 exec(compile(body, "<generated-analysis>", "exec"), namespace)
+                # pi-lens-ignore: ast-grep:no-compile-call
                 emit(eval(compile(ast.Expression(tree.body[-1].value), "<generated-analysis>", "eval"), namespace))
             else:
+                # pi-lens-ignore: ast-grep:no-compile-call
                 exec(compile(tree, "<generated-analysis>", "exec"), namespace)
     finally:
         for fd, original in ((1, stdout_fd), (2, stderr_fd)):

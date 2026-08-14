@@ -1,0 +1,261 @@
+registry_version: 0.1.0
+snapshot_id: u1-operating-daily-v0.1.0
+status: approved
+approval_scope: u1-shap-poc-retrospective
+provenance:
+  registry_path: semantic/registry/u1-operating-daily.yaml
+  source_refs:
+    - data/2026年機組數據-20260729.xlsx#工作表-U1
+    - data-query-planner-mcp/metadata/csv-poc.json
+  owner: ask-o11y-poc-design
+  effective_from: '2026-08-13'
+datasets:
+  - canonical_id: dataset.u1-operating-daily
+    physical_id: u1-operating-daily
+    status: approved
+    grain: one row per generating unit per operating day
+    entity_key: [unit_id]
+    time_identity: date
+    target: heat_rate
+    approved_features:
+      - avg_generation_mw
+      - main_steam_temp_c
+      - reheat_steam_temp_c
+      - scr_temp_c
+      - condenser_outlet_water_temp
+      - coal_avg_heat_value_kcal_kg
+    quality_policy:
+      field: heat_rate_valid
+      accepted_values: [true]
+      minimum_valid_rows: 100
+    split_policy:
+      kind: chronological_holdout
+      time_field: date
+      test_fraction: 0.25
+      preprocessing_fit_scope: training_only
+      seed: 42
+    evidence:
+      - &workbook
+        kind: source_workbook
+        ref: data/2026年機組數據-20260729.xlsx#工作表-U1
+        note: Physical headers and daily row layout observed in the source workbook.
+      - &metadata
+        kind: generated_metadata
+        ref: data-query-planner-mcp/metadata/csv-poc.json
+        note: Reproducible CSV profile records types, units, validity rule, row counts, and date range.
+      - &policy
+        kind: policy_decision
+        ref: docs/design/ontology-assisted-analysis.md
+        note: This approval is limited to the retrospective U1 SHAP PoC and is not causal or enterprise domain approval.
+    fields:
+      - canonical_id: field.u1.date
+        physical_name: date
+        type: date
+        unit: null
+        semantic_kind: temporal
+        analysis_role: time_identity
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Daily ISO date is the chronological ordering field and never a model feature.
+      - canonical_id: field.u1.unit_id
+        physical_name: unit_id
+        type: string
+        unit: null
+        semantic_kind: identifier
+        analysis_role: identifier
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*metadata, *policy]
+        reason: Generated fixed U1 identity; excluded from model features.
+      - canonical_id: field.u1.heat_rate
+        physical_name: heat_rate
+        type: number
+        unit: kcal/kWh
+        semantic_kind: label_target
+        analysis_role: target
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Source header and PoC metadata define heat rate as the sole target.
+      - canonical_id: field.u1.raw_coal_consumption_g
+        physical_name: raw_coal_consumption_g
+        type: number
+        unit: g/kWh
+        semantic_kind: target_proxy
+        analysis_role: forbidden
+        status: proposed
+        availability: {visibility: unknown, source_time_field: date, eligible_at_as_of: null}
+        lineage: {status: unknown, inputs: []}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Potential shared formula lineage with heat_rate is unresolved; fail closed pending steward evidence.
+      - canonical_id: field.u1.avg_generation_mw
+        physical_name: avg_generation_mw
+        type: number
+        unit: MW
+        semantic_kind: measurement
+        analysis_role: feature
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Retrospective daily operating-load measurement approved only for this PoC.
+      - canonical_id: field.u1.main_steam_temp_c
+        physical_name: main_steam_temp_c
+        type: number
+        unit: °C
+        semantic_kind: measurement
+        analysis_role: feature
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Retrospective daily process-temperature measurement approved only for this PoC.
+      - canonical_id: field.u1.reheat_steam_temp_c
+        physical_name: reheat_steam_temp_c
+        type: number
+        unit: °C
+        semantic_kind: measurement
+        analysis_role: feature
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Retrospective daily process-temperature measurement approved only for this PoC.
+      - canonical_id: field.u1.scr_temp_c
+        physical_name: scr_temp_c
+        type: number
+        unit: °C
+        semantic_kind: measurement
+        analysis_role: feature
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Retrospective daily SCR temperature measurement approved only for this PoC.
+      - canonical_id: field.u1.condenser_vacuum
+        physical_name: condenser_vacuum
+        type: number
+        unit: null
+        semantic_kind: measurement
+        analysis_role: forbidden
+        status: proposed
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Physical unit and interpretation are missing, so it is not an approved feature.
+      - canonical_id: field.u1.scr_inlet_nox
+        physical_name: scr_inlet_nox
+        type: number
+        unit: null
+        semantic_kind: unknown
+        analysis_role: forbidden
+        status: proposed
+        availability: {visibility: unknown, source_time_field: date, eligible_at_as_of: null}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Unit and prediction-time semantics are unknown.
+      - canonical_id: field.u1.scr_inlet_co
+        physical_name: scr_inlet_co
+        type: number
+        unit: null
+        semantic_kind: unknown
+        analysis_role: forbidden
+        status: proposed
+        availability: {visibility: unknown, source_time_field: date, eligible_at_as_of: null}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Unit and prediction-time semantics are unknown.
+      - canonical_id: field.u1.condenser_outlet_water_temp
+        physical_name: condenser_outlet_water_temp
+        type: number
+        unit: °C
+        semantic_kind: measurement
+        analysis_role: feature
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Retrospective daily water-temperature measurement approved only for this PoC.
+      - canonical_id: field.u1.burner_angle
+        physical_name: burner_angle
+        type: number
+        unit: degree
+        semantic_kind: treatment_candidate
+        analysis_role: treatment_candidate
+        status: proposed
+        availability: {visibility: unknown, source_time_field: date, eligible_at_as_of: null}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Control setting requires steward confirmation and action timing before analytical use.
+      - canonical_id: field.u1.overfire_air_fcp
+        physical_name: overfire_air_fcp
+        type: number
+        unit: null
+        semantic_kind: treatment_candidate
+        analysis_role: treatment_candidate
+        status: proposed
+        availability: {visibility: unknown, source_time_field: date, eligible_at_as_of: null}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Control setting unit and action timing are unapproved.
+      - canonical_id: field.u1.overfire_air_fcs
+        physical_name: overfire_air_fcs
+        type: number
+        unit: null
+        semantic_kind: treatment_candidate
+        analysis_role: treatment_candidate
+        status: proposed
+        availability: {visibility: unknown, source_time_field: date, eligible_at_as_of: null}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Control setting unit and action timing are unapproved.
+      - canonical_id: field.u1.overfire_air_fct
+        physical_name: overfire_air_fct
+        type: number
+        unit: null
+        semantic_kind: treatment_candidate
+        analysis_role: treatment_candidate
+        status: proposed
+        availability: {visibility: unknown, source_time_field: date, eligible_at_as_of: null}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Control setting unit and action timing are unapproved.
+      - canonical_id: field.u1.overfire_air_fcf
+        physical_name: overfire_air_fcf
+        type: number
+        unit: null
+        semantic_kind: treatment_candidate
+        analysis_role: treatment_candidate
+        status: proposed
+        availability: {visibility: unknown, source_time_field: date, eligible_at_as_of: null}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Control setting unit and action timing are unapproved.
+      - canonical_id: field.u1.coal_avg_heat_value_kcal_kg
+        physical_name: coal_avg_heat_value_kcal_kg
+        type: number
+        unit: kcal/kg
+        semantic_kind: measurement
+        analysis_role: feature
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Retrospective daily fuel-quality measurement approved only for this PoC.
+      - canonical_id: field.u1.unburned_carbon_pct
+        physical_name: unburned_carbon_pct
+        type: number
+        unit: '%'
+        semantic_kind: post_outcome
+        analysis_role: forbidden
+        status: proposed
+        availability: {visibility: post_outcome, source_time_field: date, eligible_at_as_of: false}
+        evidence: [*workbook, *metadata, *policy]
+        reason: Combustion result is conservatively treated as post-outcome pending steward timing evidence.
+      - canonical_id: field.u1.heat_rate_valid
+        physical_name: heat_rate_valid
+        type: boolean
+        unit: null
+        semantic_kind: quality
+        analysis_role: quality
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*metadata, *policy]
+        reason: Deterministic target-validity companion; filter only and never a feature.
+      - canonical_id: field.u1.data_quality_note
+        physical_name: data_quality_note
+        type: string
+        unit: null
+        semantic_kind: quality
+        analysis_role: quality
+        status: approved
+        availability: {visibility: known_at_record, source_time_field: date, eligible_at_as_of: true}
+        evidence: [*metadata, *policy]
+        reason: Human-readable quality reason; provenance only and never a feature.

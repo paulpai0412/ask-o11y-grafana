@@ -19,7 +19,7 @@ stop_pidfile() {
 	rm -f "$pid_file"
 }
 
-for name in artifact-bridge sandbox grafana-query data-query-planner opensandbox; do
+for name in artifact-bridge sandbox grafana-query data-query-planner ontology opensandbox; do
 	stop_pidfile "$RUNTIME_DIR/$name.pid"
 done
 stop_pidfile "$HOME/.pi/agent/gateway.pid"

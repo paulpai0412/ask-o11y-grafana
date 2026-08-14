@@ -72,7 +72,7 @@
       "type": "container",
       "name": "ask-o11y-sandbox-analysis",
       "version": "sandbox-poc-v1",
-      "purl": "pkg:docker/ask-o11y-sandbox-analysis@sha256:182c0fb5a13773d9036e302d6212e2553a6ed422fd759ab9470a06df7f1370f3",
+      "purl": "pkg:docker/ask-o11y-sandbox-analysis@sha256:eefd0c1d05b365249c41245ae7f55163ebe322f46b3ff1b752e76e4c00b92c21",
       "properties": [{"name": "definition", "value": "sandbox-analysis-mcp/Dockerfile"}, {"name": "base.digest", "value": "sha256:133a3c1720dd52291a019740c2987e7164ea6de79e23d8198798e58950ae2e6e"}]
     },
     {"type": "library", "name": "fonts-noto-cjk", "version": "1:20230817+repack1-3", "licenses": [{"license": {"id": "OFL-1.1"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},

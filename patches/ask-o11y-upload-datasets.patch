@@ -1,3 +1,34 @@
+diff --git a/package-lock.json b/package-lock.json
+index 4d58e35..75b4ceb 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "Ask O11y",
+-  "version": "0.3.4",
++  "version": "0.3.5",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "Ask O11y",
+-      "version": "0.3.4",
++      "version": "0.3.5",
+       "hasInstallScript": true,
+       "license": "MIT",
+       "dependencies": {
+diff --git a/package.json b/package.json
+index bfc065f..1ffb56f 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "Ask O11y",
+-  "version": "0.3.4",
++  "version": "0.3.5",
+   "scripts": {
+     "postinstall": "node -e \"const fs=require('fs');const p=require('path');const d=p.join('node_modules','flatted','golang');try{fs.rmSync(d,{recursive:true,force:true});}catch(e){if(e.code!=='ENOENT')throw e;}\"",
+     "build": "npm run build:frontend:prod && npm run build:backend:all",
 diff --git a/pkg/agent/dashboard_resolver.go b/pkg/agent/dashboard_resolver.go
 index 2469cf6..fcf7b61 100644
 --- a/pkg/agent/dashboard_resolver.go
@@ -501,14 +532,38 @@ index 0000000..d4bffde
 +	}
 +}
 diff --git a/src/components/Chat/Chat.tsx b/src/components/Chat/Chat.tsx
-index 61e48fe..4b8beff 100644
+index 61e48fe..a447e18 100644
 --- a/src/components/Chat/Chat.tsx
 +++ b/src/components/Chat/Chat.tsx
-@@ -128,6 +128,13 @@ function ChatComponent({
+@@ -8,12 +8,13 @@ import { useChatScene } from './hooks/useChatScene';
+ import { useSidePanelState } from './hooks/useSidePanelState';
+ import { ChatInterfaceState } from './scenes/ChatInterfaceScene';
+ import { GrafanaPageState } from './scenes/GrafanaPageScene';
+-import { SessionSidebar, NewChatButton, HistoryButton, SaveToMemoryButton, ModelSelector } from './components';
++import { SessionSidebar, NewChatButton, UploadButton, HistoryButton, SaveToMemoryButton, ModelSelector } from './components';
+ import { ChatInputRef } from './components/ChatInput/ChatInput';
+ import { ChatErrorBoundary } from '../ErrorBoundary';
+ import type { SessionMetadata } from './hooks/useSessionManager';
+ import type { ChatMessage } from './types';
+ import type { AppPluginSettings } from '../../types/plugin';
++import { removeUploadedDataset, type UploadedDataset } from '../../services/uploadClient';
+ import {
+   formatModelLabel,
+   formatModelSelectionLabel,
+@@ -45,6 +46,7 @@ function ChatComponent({
+   const allowEmbedding = useEmbeddingAllowed();
+   const [modelOptions, setModelOptions] = useState<LLMModelOption[]>([]);
+   const [selectedModel, setSelectedModel] = useState<LLMModelSelection>('auto');
++  const [uploaded, setUploaded] = useState<{ dataset: UploadedDataset; sessionId: string } | null>(null);
+ 
+   const kioskModeEnabled = pluginSettings?.kioskModeEnabled ?? true;
+   const chatPanelPosition = pluginSettings?.chatPanelPosition || 'right';
+@@ -128,6 +130,14 @@ function ChatComponent({
      }, 100);
    }, [setCurrentInput]);
  
-+  const handleUploaded = useCallback((message: string, sessionId: string) => {
++  const handleUploaded = useCallback((message: string, sessionId: string, dataset: UploadedDataset) => {
++    setUploaded({ dataset, sessionId });
 +    void sessionManager.loadSession(sessionId).then(() => {
 +      setCurrentInput(message);
 +      setTimeout(() => chatInputRef.current?.focus(), 100);
@@ -518,83 +573,23 @@ index 61e48fe..4b8beff 100644
    const currentSession = sessionManager.sessions.find((s: SessionMetadata) => s.id === sessionManager.currentSessionId);
    const currentSessionTitle = currentSession?.title;
    const sessionModel = currentSession?.model;
-@@ -167,12 +174,12 @@ function ChatComponent({
+@@ -167,12 +177,34 @@ function ChatComponent({
        chatContainerRef,
        chatInputRef,
        bottomSpacerRef,
 -      leftSlot: hasMessages ? (
+-        <div className="flex items-center gap-2">
+-          <NewChatButton onConfirm={clearChat} isGenerating={isGenerating} />
+-          {modelSelector}
 +      leftSlot: (
-         <div className="flex items-center gap-2">
-           <NewChatButton onConfirm={clearChat} isGenerating={isGenerating} />
-           {modelSelector}
-         </div>
--      ) : modelSelector,
-+      ),
-       rightSlot: (
-         <div className="flex items-center gap-1">
-           {graphitiEnabled && hasMessages && <SaveToMemoryButton messages={chatHistory} />}
-@@ -203,6 +210,7 @@ function ChatComponent({
-       modelSelector,
-       graphitiEnabled,
-       clearChat,
-+      handleUploaded,
-       openHistory,
-       readOnly,
-       handleSuggestionClick,
-@@ -242,6 +250,7 @@ function ChatComponent({
-         isOpen={isHistoryOpen}
-         onClose={() => setIsHistoryOpen(false)}
-         docked={!readOnly}
-+        onUploaded={handleUploaded}
-       />
- 
-       {chatScene && (
-diff --git a/src/components/Chat/components/SessionSidebar/SessionSidebar.tsx b/src/components/Chat/components/SessionSidebar/SessionSidebar.tsx
-index fa5d177..d4ca921 100644
---- a/src/components/Chat/components/SessionSidebar/SessionSidebar.tsx
-+++ b/src/components/Chat/components/SessionSidebar/SessionSidebar.tsx
-@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
- import { UseSessionManagerReturn, SessionMetadata } from '../../hooks/useSessionManager';
- import { LoadingButton, InlineLoading } from '../../../LoadingOverlay';
- import { ShareDialog } from '../ShareDialog/ShareDialog';
-+import { UploadButton } from '../UploadButton';
- import { sessionShareService, CreateShareResponse } from '../../../../services/sessionShare';
- import { getSession } from '../../../../services/backendSessionClient';
-+import { removeUploadedDataset, type UploadedDataset } from '../../../../services/uploadClient';
- import { Icon, useTheme2 } from '@grafana/ui';
- 
- interface SessionSidebarProps {
-@@ -13,13 +15,15 @@ interface SessionSidebarProps {
-   onClose: () => void;
-   /** When true, render as a persistent panel docked beside the chat instead of a modal overlay. */
-   docked?: boolean;
-+  onUploaded: (message: string, sessionId: string) => void;
- }
- 
--export function SessionSidebar({ sessionManager, currentSessionId, isOpen, onClose, docked = false }: SessionSidebarProps) {
-+export function SessionSidebar({ sessionManager, currentSessionId, isOpen, onClose, docked = false, onUploaded }: SessionSidebarProps) {
-   const theme = useTheme2();
-   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
-   const [loadingAction, setLoadingAction] = useState<string | null>(null);
-   const [creatingSession, setCreatingSession] = useState(false);
-+  const [uploaded, setUploaded] = useState<{ dataset: UploadedDataset; sessionId: string } | null>(null);
-   const [shareDialogSessionId, setShareDialogSessionId] = useState<string | null>(null);
-   const [sessionShares, setSessionShares] = useState<Map<string, CreateShareResponse[]>>(new Map());
-   const previousSessionIdsRef = useRef<string>('');
-@@ -173,7 +177,33 @@ export function SessionSidebar({ sessionManager, currentSessionId, isOpen, onClo
-             >
-               + New Chat
-             </LoadingButton>
-+            <UploadButton
-+              disabled={creatingSession}
-+              onUploaded={(message, sessionId, dataset) => {
-+                setUploaded({ dataset, sessionId });
-+                onUploaded(message, sessionId);
-+              }}
-+            />
-           </div>
-+          {uploaded && uploaded.sessionId === currentSessionId && (
-+            <div className="mt-2 flex items-center justify-between gap-2 text-xs text-secondary">
++        <div className="flex flex-col gap-1">
++          <div className="flex items-center gap-2">
++            <NewChatButton onConfirm={clearChat} isGenerating={isGenerating} />
++            <UploadButton disabled={isGenerating} onUploaded={handleUploaded} />
++            {modelSelector}
++          </div>
++          {uploaded && uploaded.sessionId === sessionManager.currentSessionId && (
++            <div className="flex items-center gap-2 text-xs text-secondary">
 +              <span className="truncate" title={uploaded.dataset.filename}>
 +                {uploaded.dataset.filename} · {uploaded.dataset.rows} rows · {uploaded.dataset.columns} columns
 +                {uploaded.dataset.sheet ? ` · ${uploaded.dataset.sheet}` : ''}
@@ -612,12 +607,41 @@ index fa5d177..d4ca921 100644
 +              </button>
 +            </div>
 +          )}
+         </div>
+-      ) : modelSelector,
++      ),
+       rightSlot: (
+         <div className="flex items-center gap-1">
+           {graphitiEnabled && hasMessages && <SaveToMemoryButton messages={chatHistory} />}
+@@ -203,6 +235,7 @@ function ChatComponent({
+       modelSelector,
+       graphitiEnabled,
+       clearChat,
++      handleUploaded,
+       openHistory,
+       readOnly,
+       handleSuggestionClick,
+diff --git a/src/components/Chat/components/NewChatButton/NewChatButton.tsx b/src/components/Chat/components/NewChatButton/NewChatButton.tsx
+index e78a096..a777871 100644
+--- a/src/components/Chat/components/NewChatButton/NewChatButton.tsx
++++ b/src/components/Chat/components/NewChatButton/NewChatButton.tsx
+@@ -44,12 +44,11 @@ export function NewChatButton({ onConfirm, isGenerating }: NewChatButtonProps):
+         type="button"
+         size="sm"
+         variant="secondary"
+-        icon="plus"
+         onClick={() => setIsOpen(!isOpen)}
+         aria-label="New chat"
+         data-testid={testIds.chat.newChatButton}
+       >
+-        New chat
++        + New Chat
+       </Button>
  
-           <div className="mt-2 text-xs text-secondary">
-             <span>{sessionManager.sessions.length} sessions</span>
+       {isOpen && (
 diff --git a/src/components/Chat/components/UploadButton/UploadButton.tsx b/src/components/Chat/components/UploadButton/UploadButton.tsx
 new file mode 100644
-index 0000000..5d6db19
+index 0000000..cf04e61
 --- /dev/null
 +++ b/src/components/Chat/components/UploadButton/UploadButton.tsx
 @@ -0,0 +1,91 @@
@@ -690,7 +714,7 @@ index 0000000..5d6db19
 +        type="button"
 +        size="sm"
 +        variant="secondary"
-+        icon={uploading ? 'times' : 'import'}
++        icon={uploading ? 'times' : 'upload'}
 +        disabled={disabled}
 +        onClick={() => uploading ? requestRef.current?.cancel() : inputRef.current?.click()}
 +        aria-label={uploading ? `Cancel upload (${progress}%)` : 'Upload CSV or Excel'}

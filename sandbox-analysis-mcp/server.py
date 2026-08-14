@@ -13,7 +13,9 @@ import json
 import os
 import sys
 import tempfile
+import time
 import tomllib
+import urllib.parse
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,6 +38,7 @@ workflow_node = load_module("workflow_node", ROOT / "workflow_node.py")
 artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 artifact_assets = load_module("artifact_assets", ROOT / "artifact_assets.py")
+ontology_contract = load_module("ontology_contract", ROOT / "ontology_contract.py")
 ArtifactStore = artifact_store.ArtifactStore
 WorkflowContractError = workflow_node.WorkflowContractError
 authenticate_headers = mcp_security.authenticate_headers
@@ -51,21 +54,24 @@ try:
 except ValueError:
     PORT = 8777
 
-SERVER_INFO = {"name": "sandbox-analysis-mcp", "version": "0.3.0"}
+SERVER_INFO = {"name": "sandbox-analysis-mcp", "version": "0.4.0"}
 PROTOCOL = "2025-03-26"
 MAX_CODE_BYTES = 32 * 1024
 MAX_RPC_BODY_BYTES = 128 * 1024
 MAX_INPUT_BUNDLE_BYTES = 16 * 1024 * 1024
 MAX_OUTPUT_BYTES = 5 * 1024 * 1024
 MAX_LOG_BYTES = 256 * 1024
+MAX_INLINE_RESULT_BYTES = 32 * 1024
+MAX_OUTPUT_FIELDS = 200
 DEFAULT_SEED = 42
+ARTIFACT_PUBLIC_BASE = os.environ.get("ARTIFACT_PUBLIC_BASE", "http://127.0.0.1:8777").rstrip("/")
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
 
 TOOLS = [
     {
         "name": "execute_python_analysis",
-        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. The sandbox receives df, pd, np, display(value), and emit(value, name=None). The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna; use Matplotlib PNG when a plot may become a Grafana panel.",
+        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. The sandbox receives df, pd, np, display(value), and emit(value, name=None). Name JSON results *.json for bounded inline return and DataFrame/string downloads *.csv for a signed URL. The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna; use Matplotlib PNG when a plot may become a Grafana panel.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -215,11 +221,17 @@ def validate_frame(frame: dict[str, Any]) -> tuple[list[str], int]:
     return [str(name) for name in names], next(iter(lengths))
 
 
-def read_validity_rules(context: dict[str, str], source_run_id: str, field_names: list[str]) -> list[dict[str, Any]]:
+def read_plan_contract(context: dict[str, str], source_run_id: str, field_names: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         plan = ARTIFACTS.read_json(context, f"artifact://{source_run_id}/query-plan")
     except WorkflowContractError:
         plan = {}
+    if not isinstance(plan, dict):
+        raise WorkflowContractError("query plan must be an object")
+    try:
+        ontology_contract.verify_plan(plan)
+    except ValueError as exc:
+        raise WorkflowContractError(str(exc)) from exc
     contract = plan.get("analysis_input_contract") if isinstance(plan, dict) else {}
     rules = contract.get("validity_rules", []) if isinstance(contract, dict) else []
     if not isinstance(rules, list):
@@ -231,7 +243,10 @@ def read_validity_rules(context: dict[str, str], source_run_id: str, field_names
         accepted = rule.get("accepted_values")
         if not isinstance(field, str) or field not in field_names or not isinstance(accepted, list) or not accepted:
             raise WorkflowContractError("query plan validity rule is incomplete")
-    return rules
+    semantic = {key: plan.get(key) for key in ("ontology", "analysis_contract", "plan_sha256") if plan.get(key) is not None}
+    if semantic and set(semantic) != {"ontology", "analysis_contract", "plan_sha256"}:
+        raise WorkflowContractError("ontology analysis plan contract is incomplete")
+    return rules, semantic
 
 
 def wrapped_code(python_code: str, seed: int) -> str:
@@ -280,7 +295,7 @@ def read_captured_outputs(filesystem: Any) -> list[dict[str, Any]]:
         raise WorkflowContractError("sandbox output manifest is invalid") from exc
     if not isinstance(manifest, list) or len(manifest) > 20:
         raise WorkflowContractError("sandbox output manifest must contain at most 20 items")
-    allowed_mime = {"text/plain", "text/csv", "text/html", "image/png", "application/vnd.plotly.v1+json"}
+    allowed_mime = {"text/plain", "text/csv", "text/html", "image/png", "application/json", "application/vnd.plotly.v1+json"}
     outputs = []
     total = len(manifest_bytes)
     output_root = Path("/tmp/sandbox-output")
@@ -404,6 +419,57 @@ def output_asset_summary(execution: dict[str, Any], execution_ref: str) -> list[
     return assets
 
 
+def inline_result_summary(execution: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    inline_results = []
+    total = 0
+    omitted = False
+    for index, result in enumerate(execution.get("results", [])):
+        if not isinstance(result, dict):
+            continue
+        mime = result.get("mime")
+        text = result.get("text")
+        if isinstance(text, str):
+            mime_type, raw = "text/plain", text
+        else:
+            json_data = mime.get("application/json") if isinstance(mime, dict) else None
+            if not isinstance(json_data, str):
+                continue
+            mime_type, raw = "application/json", json_data
+        size = len(raw.encode("utf-8"))
+        if size > MAX_INLINE_RESULT_BYTES - total:
+            omitted = True
+            continue
+        try:
+            value = raw if mime_type == "text/plain" else json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            omitted = True
+            continue
+        inline_results.append({"output_index": index, "display_name": result.get("display_name") or f"Output {index + 1}", "mime_type": mime_type, "value": value})
+        total += size
+    return inline_results, omitted
+
+
+def output_download_summary(execution: dict[str, Any], execution_ref: str, context: dict[str, str]) -> list[dict[str, Any]]:
+    try:
+        expires_at = int(time.time()) + int(ARTIFACTS.retention_seconds)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise WorkflowContractError("artifact retention is invalid") from exc
+    downloads = []
+    for index, result in enumerate(execution.get("results", [])):
+        mime = result.get("mime") if isinstance(result, dict) else None
+        csv_data = mime.get("text/csv") if isinstance(mime, dict) else None
+        if not isinstance(csv_data, str) or len(csv_data.encode("utf-8")) > artifact_assets.MAX_ASSET_BYTES:
+            continue
+        downloads.append({
+            "output_index": index,
+            "display_name": result.get("display_name") or f"Output {index + 1}",
+            "mime_type": "text/csv",
+            "url": artifact_assets.sign_output_url(public_base=ARTIFACT_PUBLIC_BASE, secret=os.environ.get("MCP_SHARED_TOKEN", ""), context=context, execution_ref=execution_ref, output_index=index, expires_at=expires_at),
+            "expires_at": expires_at,
+        })
+    return downloads
+
+
 def output_summary(execution: dict[str, Any]) -> dict[str, Any]:
     mime_types = set()
     output_names = []
@@ -421,7 +487,7 @@ def output_summary(execution: dict[str, Any]) -> dict[str, Any]:
             reader = csv.DictReader(io.StringIO(csv_data))
             rows = list(reader)
             fields = []
-            for name in (reader.fieldnames or [])[:100]:
+            for name in (reader.fieldnames or [])[:MAX_OUTPUT_FIELDS]:
                 values = [row.get(name, "") for row in rows[:100] if row.get(name, "") != ""]
                 logical_type = "string"
                 if values:
@@ -440,8 +506,11 @@ def output_summary(execution: dict[str, Any]) -> dict[str, Any]:
             tabular_outputs.append({"output_index": index, "display_name": result.get("display_name") or f"Output {index + 1}", "row_count": len(rows), "fields": fields})
     for item in execution["stdout"]:
         stdout_lines += len(str(item.get("text", "")).splitlines())
+    inline_results, inline_results_truncated = inline_result_summary(execution)
     return {
         "result_count": len(execution["results"]),
+        "inline_results": inline_results,
+        "inline_results_truncated": inline_results_truncated,
         "mime_types": sorted(mime_types),
         "output_names": output_names,
         "tabular_outputs": tabular_outputs,
@@ -476,8 +545,8 @@ def execute_python_analysis(
         context = context_from_args(args)
         source_run_id, frame = read_authorized_frame(context, frame_ref)
         field_names, row_count = validate_frame(frame)
-        validity_rules = read_validity_rules(context, source_run_id, field_names)
-        frame_bundle_json = json.dumps({"frame": frame, "validity_rules": validity_rules}, ensure_ascii=False, separators=(",", ":"))
+        validity_rules, semantic_contract = read_plan_contract(context, source_run_id, field_names)
+        frame_bundle_json = json.dumps({"frame": frame, "validity_rules": validity_rules, "semantic_contract": semantic_contract}, ensure_ascii=False, separators=(",", ":"))
     except (PermissionError, WorkflowContractError, ValueError, TypeError) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; the input frame is invalid or not authorized.")
     if len(frame_bundle_json.encode("utf-8")) > MAX_INPUT_BUNDLE_BYTES:
@@ -523,13 +592,20 @@ def execute_python_analysis(
             "input_bundle_bytes": MAX_INPUT_BUNDLE_BYTES,
             "captured_execution_bytes": MAX_OUTPUT_BYTES,
             "stdout_stderr_bytes_each": MAX_LOG_BYTES,
+            "inline_result_bytes": MAX_INLINE_RESULT_BYTES,
+            "output_fields": MAX_OUTPUT_FIELDS,
+            "signed_download_bytes": artifact_assets.MAX_ASSET_BYTES,
         },
         "validity": validity,
+        "ontology": semantic_contract.get("ontology"),
+        "analysis_contract": semantic_contract.get("analysis_contract"),
+        "plan_sha256": semantic_contract.get("plan_sha256"),
         "output_summary": summary,
         "parent_provenance_ref": parent_provenance_ref,
     }
     execution_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-execution", execution)
     summary["assets"] = output_asset_summary(execution, execution_ref)
+    summary["downloads"] = output_download_summary(execution, execution_ref, context)
     provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
     refs = {"execution_ref": execution_ref, "provenance_ref": provenance_ref}
     execution_error = execution.get("error")
@@ -706,6 +782,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, {"error": "artifact URL is invalid or expired"})
             self.send_response(200)
             self.send_header("Content-Type", mime_type)
+            if mime_type == "text/csv":
+                self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(_display_name, safe=""))
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "private, max-age=300")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -774,7 +852,12 @@ def self_check() -> None:
                 "execution_id": "fake",
                 "execution_count": 1,
                 "exit_code": 0,
-                "results": [{"text": "table", "timestamp": 1, "mime": {"text/html": "<table></table>", "image/png": "aW1hZ2U="}}],
+                "results": [
+                    {"text": "mean=2", "timestamp": 1, "mime": {}, "display_name": "summary.txt"},
+                    {"text": None, "timestamp": 1, "mime": {"application/json": "{\"mean\":2}"}, "display_name": "result.json"},
+                    {"text": None, "timestamp": 1, "mime": {"text/csv": "x\n1\n2\n"}, "display_name": "result.csv"},
+                    {"text": None, "timestamp": 1, "mime": {"text/html": "<table></table>", "image/png": "aW1hZ2U="}, "display_name": "plot.png"},
+                ],
                 "stdout": [{"text": "done\n", "timestamp": 1}],
                 "stderr": [],
                 "error": None,
@@ -784,12 +867,26 @@ def self_check() -> None:
 
         args = {"frame_ref": frame_ref, "python_code": "display(df)", "seed": 7, "_server_context": context}
         result = execute_python_analysis(args, executor=fake_executor)
-        assert result["ok"] and result["output_summary"]["mime_types"] == ["image/png", "text/html", "text/plain"]
-        assert result["provenance"]["limits"] == {"timeout_seconds": 600, "source_bytes": MAX_CODE_BYTES, "rpc_body_bytes": MAX_RPC_BODY_BYTES, "input_bundle_bytes": MAX_INPUT_BUNDLE_BYTES, "captured_execution_bytes": MAX_OUTPUT_BYTES, "stdout_stderr_bytes_each": MAX_LOG_BYTES}
+        assert result["ok"] and result["output_summary"]["mime_types"] == ["application/json", "image/png", "text/csv", "text/html", "text/plain"]
+        assert result["output_summary"]["inline_results"] == [
+            {"output_index": 0, "display_name": "summary.txt", "mime_type": "text/plain", "value": "mean=2"},
+            {"output_index": 1, "display_name": "result.json", "mime_type": "application/json", "value": {"mean": 2}},
+        ]
+        assert len(result["output_summary"]["downloads"]) == 1 and result["output_summary"]["downloads"][0]["display_name"] == "result.csv"
+        download_token = result["output_summary"]["downloads"][0]["url"].rsplit("/", 1)[1]
+        download, download_mime, download_name = artifact_assets.read_signed_output(download_token, secret=os.environ.get("MCP_SHARED_TOKEN", ""), artifacts=ARTIFACTS)
+        assert download == b"x\n1\n2\n" and download_mime == "text/csv" and download_name == "result.csv"
+        wide_names = [f"field_{index}" for index in range(MAX_OUTPUT_FIELDS + 1)]
+        wide_csv = ",".join(wide_names) + "\n" + ",".join("1" for _ in wide_names) + "\n"
+        wide_summary = output_summary({"results": [{"text": None, "mime": {"text/csv": wide_csv}, "display_name": "wide.csv"}], "stdout": [], "stderr": []})
+        assert len(wide_summary["tabular_outputs"][0]["fields"]) == MAX_OUTPUT_FIELDS
+        oversized_inline = output_summary({"results": [{"text": "x" * (MAX_INLINE_RESULT_BYTES + 1), "mime": {}, "display_name": "summary.txt"}], "stdout": [], "stderr": []})
+        assert oversized_inline["inline_results"] == [] and oversized_inline["inline_results_truncated"]
+        assert result["provenance"]["limits"] == {"timeout_seconds": 600, "source_bytes": MAX_CODE_BYTES, "rpc_body_bytes": MAX_RPC_BODY_BYTES, "input_bundle_bytes": MAX_INPUT_BUNDLE_BYTES, "captured_execution_bytes": MAX_OUTPUT_BYTES, "stdout_stderr_bytes_each": MAX_LOG_BYTES, "inline_result_bytes": MAX_INLINE_RESULT_BYTES, "output_fields": MAX_OUTPUT_FIELDS, "signed_download_bytes": artifact_assets.MAX_ASSET_BYTES}
         assert observed["seed"] == 7 and observed["bundle"]["frame"]["data"]["values"][0] == [1, 2, 3]
         assert observed["bundle"]["validity_rules"][0]["field"] == "heat_rate_valid"
         assert "display(df)" not in json.dumps(result) and '"values"' not in json.dumps(result)
-        assert ARTIFACTS.read_json(context, result["refs"]["execution_ref"])["results"][0]["mime"]["image/png"] == "aW1hZ2U="
+        assert ARTIFACTS.read_json(context, result["refs"]["execution_ref"])["results"][3]["mime"]["image/png"] == "aW1hZ2U="
         listed = list_python_analyses({"_server_context": context})
         assert listed["ok"] and listed["analyses"][0]["provenance_ref"] == result["refs"]["provenance_ref"], listed
         inspected = inspect_python_analysis({"provenance_ref": result["refs"]["provenance_ref"], "_server_context": context})
@@ -810,7 +907,7 @@ def self_check() -> None:
             raise AssertionError("invalid test tool response") from exc
         assert not payload["ok"] and "unsupported tool arguments" in payload["error"]
     ARTIFACTS = original
-    print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))
+    print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "bounded_inline_results", "signed_csv_download", "200_field_output_summary", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))
 
 
 def main() -> int:

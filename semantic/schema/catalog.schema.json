@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ask-o11y.local/schema/ontology-catalog-v1.json",
+  "title": "Ask O11y ontology snapshot catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "default_snapshot_id", "snapshots"],
+  "properties": {
+    "format": {"const": "ask-o11y-ontology-catalog-v1"},
+    "default_snapshot_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "snapshots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["snapshot_id", "namespace", "dataset_ids", "path", "sha256", "status"],
+        "properties": {
+          "snapshot_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
+          "namespace": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
+          "dataset_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "path": {"type": "string", "pattern": "^semantic/snapshots/[a-zA-Z0-9._/-]+\\.json$"},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "status": {"const": "approved"}
+        }
+      }
+    }
+  }
+}

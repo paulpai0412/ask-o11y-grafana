@@ -38,6 +38,7 @@ workflow_node = load_module("workflow_node", ROOT / "workflow_node.py")
 artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 uploaded_datasets = load_module("uploaded_datasets", ROOT / "uploaded_datasets.py")
+ontology_contract = load_module("ontology_contract", ROOT / "ontology_contract.py")
 ArtifactStore = artifact_store.ArtifactStore
 authenticate_headers = mcp_security.authenticate_headers
 require_runtime_token = mcp_security.require_runtime_token
@@ -62,7 +63,7 @@ PROTOCOL = "2025-03-26"
 CATALOG_FILE = ROOT / "config" / "authorized-grafana-datasets.json"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_RESULT_ROWS = 5_000
-MAX_RESULT_FIELDS = 50
+MAX_RESULT_FIELDS = 200
 MAX_TIME_RANGE_SECONDS = 367 * 24 * 60 * 60
 UPLOAD_PUBLIC_BASE = os.environ.get("UPLOAD_PUBLIC_BASE", "http://127.0.0.1:8772").rstrip("/")
 
@@ -306,6 +307,10 @@ def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
         plan = ARTIFACTS.read_json(context, plan_ref)
     except Exception as exc:
         return error_response(step="execute_planned_query", error=str(exc), recoverable=False, instruction="Stop; plan_ref could not be read or authorized.")
+    try:
+        ontology_contract.verify_plan(plan)
+    except ValueError as exc:
+        return error_response(step="execute_planned_query", error=str(exc), recoverable=False, instruction="Stop before datasource execution; the ontology/plan contract hash is invalid.", evidence={"rejection_codes": [str(exc)]})
     expected_session = plan.get("upload_session_id")
     if expected_session is not None and context.get("session_id") != expected_session:
         return error_response(step="execute_planned_query", error="uploaded dataset session mismatch", recoverable=False, instruction="Stop; the upload belongs to another chat session.")
@@ -493,6 +498,11 @@ class Handler(BaseHTTPRequestHandler):
 def self_check() -> None:
     dqp = load_module("data_query_planner_self_check", ROOT / "data-query-planner-mcp" / "server.py")
     context = {"org_id": "1", "user_id": "self-check-grafana-query"}
+    wide_names = [f"field_{index}" for index in range(MAX_RESULT_FIELDS)]
+    wide_frame = {"schema": {"fields": [{"name": name} for name in wide_names]}, "data": {"values": [[index] for index in range(MAX_RESULT_FIELDS)]}}
+    wide_validation = validate_frame({"results": {"A": {"status": 200, "frames": [wide_frame]}}}, {"required_fields": wide_names, "minimum_rows": 1, "maximum_fields": MAX_RESULT_FIELDS})
+    if not wide_validation["ok"]:
+        raise RuntimeError(str(wide_validation))
     discovery = tool_discover_datasets({"_server_context": context})
     inspected = tool_inspect_dataset({"dataset_id": "u1-operating-daily", "_server_context": context})
     fields = ["date", "heat_rate", "raw_coal_consumption_g"]

@@ -35,6 +35,7 @@ workflow_node = load_module("workflow_node", ROOT / "workflow_node.py")
 artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 wferp_sql = load_module("wferp_sql", HERE / "wferp_sql.py")
+ontology_contract = load_module("ontology_contract", ROOT / "ontology_contract.py")
 WFERP_METADATA = wferp_sql.load_metadata()
 authenticate_headers = mcp_security.authenticate_headers
 require_runtime_token = mcp_security.require_runtime_token
@@ -54,7 +55,7 @@ except ValueError:
 SERVER_INFO = {"name": "data-query-planner-mcp", "version": "0.2.0"}
 PROTOCOL = "2025-03-26"
 MAX_PLAN_ROWS = 5_000
-MAX_PLAN_FIELDS = 50
+MAX_PLAN_FIELDS = 200
 MAX_PLAN_RESPONSE_BYTES = 4 * 1024 * 1024
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
@@ -111,7 +112,7 @@ def bounded_metadata_time_range(metadata: dict[str, Any]) -> dict[str, str]:
 
 def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
     step = "plan_query"
-    unexpected = sorted(set(args) - {"dataset_metadata_ref", "selected_fields", "minimum_rows", "maximum_rows", "refId", "context", "_server_context"})
+    unexpected = sorted(set(args) - {"dataset_metadata_ref", "selected_fields", "minimum_rows", "maximum_rows", "refId", "analysis_contract", "context", "_server_context"})
     if unexpected:
         return error_response(step=step, error="unsupported planner arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; Planner accepts only opaque metadata refs and explicit projection options.")
     metadata_ref = args.get("dataset_metadata_ref")
@@ -145,6 +146,43 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
         if unknown:
             raise workflow_node.WorkflowContractError("selected fields are not in authorized metadata: " + ", ".join(unknown))
         requested_fields = list(selected_fields)
+        semantic_validation = None
+        analysis_contract = args.get("analysis_contract")
+        if analysis_contract is not None:
+            if not isinstance(analysis_contract, dict):
+                raise workflow_node.WorkflowContractError("analysis_contract must be an object")
+            snapshot = ontology_contract.load_snapshot(dataset_id=str(analysis_contract.get("dataset_id")))
+            semantic_validation = ontology_contract.validate_analysis_contract(snapshot, analysis_contract)
+            if not semantic_validation["conforms"]:
+                return error_response(
+                    step=step,
+                    error="ontology semantic gate rejected the analysis contract",
+                    recoverable=False,
+                    instruction="Stop before Grafana Query; resolve every semantic rejection and create a new preview/plan hash.",
+                    evidence={"rejection_codes": semantic_validation["rejection_codes"], "failed_rules": semantic_validation["failed_rules"], "downstream_call_counts": {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}},
+                )
+            dataset = ontology_contract.find_dataset(snapshot, str(metadata.get("dataset_id")))
+            if dataset is None:
+                raise workflow_node.WorkflowContractError("ontology dataset does not match authorized metadata")
+            required_projection = {dataset["time_identity"], dataset["target"], *semantic_validation["included_fields"]}
+            quality_fields = {field["physical_name"] for field in dataset["fields"] if field["status"] == "approved" and field["analysis_role"] == "quality"}
+            requested_projection = set(requested_fields) - quality_fields
+            if requested_projection != required_projection:
+                return error_response(
+                    step=step,
+                    error="selected_fields do not match the approved ontology analysis projection",
+                    recoverable=False,
+                    instruction="Stop before Grafana Query; use exactly the time, target, and approved feature fields returned by the semantic gate.",
+                    evidence={"rejection_codes": ["ANALYSIS_PROJECTION_MISMATCH"], "approved_projection": sorted(required_projection), "downstream_call_counts": {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}},
+                )
+            if minimum_rows < int(dataset["quality_policy"]["minimum_valid_rows"]):
+                return error_response(
+                    step=step,
+                    error="minimum_rows is below the approved ontology quality policy",
+                    recoverable=False,
+                    instruction="Stop before Grafana Query; use the approved minimum valid row requirement.",
+                    evidence={"rejection_codes": ["QUALITY_POLICY_VIOLATION"], "downstream_call_counts": {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}},
+                )
         validity_rules = []
         for field_name, field in available.items():
             applies_to = field.get("validity_for")
@@ -174,12 +212,24 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
             "analysis_input_contract": {"required_fields": selected_fields, "optional_fields": [], "validity_rules": validity_rules, "minimum_rows": minimum_rows, "maximum_rows": maximum_rows, "maximum_fields": MAX_PLAN_FIELDS, "maximum_response_bytes": MAX_PLAN_RESPONSE_BYTES},
             "provenance": {"dataset_metadata_ref": metadata_ref, "dataset_id": metadata.get("dataset_id"), "datasource_uid": metadata.get("datasource_uid"), "requested_fields": requested_fields, "selected_fields": selected_fields, "time_range": time_range},
         }
+        if semantic_validation is not None and isinstance(analysis_contract, dict):
+            plan["ontology"] = semantic_validation["snapshot"]
+            plan["analysis_contract"] = {
+                **analysis_contract,
+                "included_fields": semantic_validation["included_fields"],
+                "excluded_fields": semantic_validation["excluded_fields"],
+                "interpretation": "predictive_association_not_causation",
+            }
+            plan["analysis_input_contract"]["ontology_snapshot_sha256"] = semantic_validation["snapshot"]["sha256"]
+            plan["analysis_input_contract"]["analysis_kind"] = analysis_contract["kind"]
+            plan["provenance"].update({"ontology_snapshot_id": semantic_validation["snapshot"]["snapshot_id"], "ontology_snapshot_sha256": semantic_validation["snapshot"]["sha256"]})
+            plan["plan_sha256"] = hashlib.sha256(json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         plan_ref = ARTIFACTS.write_json(context, run_id, "query-plan", plan)
     except ArtifactAuthError as exc:
         return error_response(step=step, error=f"unauthorized artifact access: {exc}", recoverable=False, instruction="Stop; dataset metadata context mismatch.")
     except (workflow_node.WorkflowContractError, OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; query plan validation failed.")
-    return success_response(step=step, run_id=run_id, refs={"dataset_metadata_ref": metadata_ref, "plan_ref": plan_ref}, instruction="The safe bounded query plan is ready. Execute it through Grafana Query only after the user confirms the analysis preview; there is no domain-analysis next step in this plan.", evidence={"datasource_query_executed": False, "selected_fields": selected_fields}, plan_ref=plan_ref, dataset_id=plan["dataset_id"], datasource_uid=plan["datasource_uid"], selected_fields=selected_fields, validation={"ok": True, "minimum_rows": minimum_rows, "maximum_rows": maximum_rows, "time_range": time_range})
+    return success_response(step=step, run_id=run_id, refs={"dataset_metadata_ref": metadata_ref, "plan_ref": plan_ref}, instruction="The safe bounded query plan is ready. Execute it through Grafana Query only after the user confirms the analysis preview; there is no domain-analysis next step in this plan.", evidence={"datasource_query_executed": False, "selected_fields": selected_fields, "ontology": plan.get("ontology"), "plan_sha256": plan.get("plan_sha256")}, plan_ref=plan_ref, dataset_id=plan["dataset_id"], datasource_uid=plan["datasource_uid"], selected_fields=selected_fields, validation={"ok": True, "minimum_rows": minimum_rows, "maximum_rows": maximum_rows, "time_range": time_range})
 
 
 def _wferp_dataset_metadata(args: dict[str, Any]) -> tuple[dict[str, str], str, dict[str, Any]]:
@@ -201,7 +251,8 @@ def tool_search_wferp_schema(args: dict[str, Any]) -> dict[str, Any]:
     try:
         context, _, metadata = _wferp_dataset_metadata(args)
         top_k = int(args.get("top_k", wferp_sql.MAX_CONTEXT_TABLES))
-        schema_context = wferp_sql.build_context(str(args.get("prompt") or ""), WFERP_METADATA, top_k=top_k)
+        ontology_snapshot = ontology_contract.load_snapshot(dataset_id="wferp")
+        schema_context = wferp_sql.build_context(str(args.get("prompt") or ""), WFERP_METADATA, top_k=top_k, ontology_snapshot=ontology_snapshot)
         run_id = ARTIFACTS.create_run(context)
         context_ref = ARTIFACTS.write_json(context, run_id, "schema-context", schema_context)
     except (ArtifactAuthError, workflow_node.WorkflowContractError, RuntimeError, ValueError, TypeError) as exc:
@@ -211,7 +262,7 @@ def tool_search_wferp_schema(args: dict[str, Any]) -> dict[str, Any]:
         run_id=run_id,
         refs={"schema_context_ref": context_ref},
         instruction="Author one legacy-compatible MSSQL SELECT using only this bounded schema context, then submit it to plan_wferp_query. Do not execute it directly.",
-        evidence={"datasource_query_executed": False, "candidate_table_count": len(schema_context["tables"])},
+        evidence={"datasource_query_executed": False, "candidate_table_count": len(schema_context["tables"]), "lexical_seed_tables": schema_context["lexical_seed_tables"], "approved_relation_count": len(schema_context["relationships"])},
         dataset_id=metadata["dataset_id"],
         schema_context=schema_context,
     )
@@ -235,7 +286,8 @@ def tool_plan_wferp_query(args: dict[str, Any]) -> dict[str, Any]:
         return error_response(step=step, error=f"row bounds must satisfy 0 <= minimum_rows <= maximum_rows <= {MAX_PLAN_ROWS}", recoverable=True, instruction="Provide bounded result validation requirements.")
     try:
         context, _, metadata = _wferp_dataset_metadata(args)
-        validation = wferp_sql.validate_llm_sql(prompt, sql, WFERP_METADATA)
+        wferp_ontology = ontology_contract.load_snapshot(dataset_id="wferp")
+        validation = wferp_sql.validate_llm_sql(prompt, sql, WFERP_METADATA, wferp_ontology)
         if not validation["ok"]:
             return error_response(step=step, error=validation["code"], recoverable=True, instruction=validation["repair_hint"], evidence={"datasource_query_executed": False})
         ref_id = str(args.get("refId") or "A")
@@ -256,6 +308,7 @@ def tool_plan_wferp_query(args: dict[str, Any]) -> dict[str, Any]:
             "grafana_query": query,
             "time_range": {"from": "2000-01-01T00:00:00Z", "to": "2000-12-31T23:59:59Z"},
             "analysis_input_contract": {"required_fields": list(output_fields), "optional_fields": [], "validity_rules": [], "minimum_rows": minimum_rows, "maximum_rows": maximum_rows, "maximum_fields": MAX_PLAN_FIELDS, "maximum_response_bytes": MAX_PLAN_RESPONSE_BYTES},
+            "ontology": ontology_contract.snapshot_identity(wferp_ontology),
             "provenance": {
                 "dataset_metadata_ref": args["dataset_metadata_ref"],
                 "dataset_id": "wferp",
@@ -267,6 +320,7 @@ def tool_plan_wferp_query(args: dict[str, Any]) -> dict[str, Any]:
             },
             "validation_input": {"prompt": prompt},
         }
+        plan["plan_sha256"] = hashlib.sha256(json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         run_id = ARTIFACTS.create_run(context)
         plan_ref = ARTIFACTS.write_json(context, run_id, "query-plan", plan)
     except (ArtifactAuthError, workflow_node.WorkflowContractError, RuntimeError, ValueError, TypeError, OSError) as exc:
@@ -310,7 +364,8 @@ def tool_validate_query(args: dict[str, Any]) -> dict[str, Any]:
                 if not isinstance(q.get("url"), str) or not q["url"].startswith(("http://", "https://")):
                     problems.append("Infinity URL must be an authorized HTTP(S) URL")
             elif plan.get("query_language") == "mssql" and plan.get("dataset_id") == "wferp":
-                validation = wferp_sql.validate_llm_sql(str((plan.get("validation_input") or {}).get("prompt") or ""), str(q.get("rawSql") or ""), WFERP_METADATA)
+                wferp_ontology = ontology_contract.load_snapshot(dataset_id="wferp")
+                validation = wferp_sql.validate_llm_sql(str((plan.get("validation_input") or {}).get("prompt") or ""), str(q.get("rawSql") or ""), WFERP_METADATA, wferp_ontology)
                 if not validation["ok"]:
                     problems.append(validation["code"])
                 if q.get("datasource", {}).get("uid") != plan.get("datasource_uid") or q.get("datasource", {}).get("type") != "mssql":
@@ -325,9 +380,9 @@ def tool_validate_query(args: dict[str, Any]) -> dict[str, Any]:
 
 
 TOOLS = [
-    {"name": "plan_query", "description": "Compile and validate a safe bounded Grafana query plan from an opaque inspected dataset_metadata_ref plus explicit selected fields and row bounds. Use for non-WFERP registered datasets.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "selected_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50, "uniqueItems": True}, "minimum_rows": {"type": "integer", "minimum": 1, "maximum": 5000}, "maximum_rows": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 5000}, "refId": {"type": "string", "default": "A"}}, "required": ["dataset_metadata_ref", "selected_fields"]}},
+    {"name": "plan_query", "description": "Compile and validate a safe bounded Grafana query plan from an opaque inspected dataset_metadata_ref plus explicit fields and bounds. For ontology-assisted analysis, the deterministic gate validates the complete analysis_contract and pins its approved snapshot/hash before returning an executable plan.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "selected_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200, "uniqueItems": True}, "minimum_rows": {"type": "integer", "minimum": 1, "maximum": 5000}, "maximum_rows": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 5000}, "refId": {"type": "string", "default": "A"}, "analysis_contract": {"type": "object", "additionalProperties": False, "properties": {"kind": {"const": "random_forest_shap"}, "dataset_id": {"type": "string"}, "target": {"type": "string"}, "features": {"type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": True, "items": {"type": "string"}}, "as_of": {"type": "string", "format": "date"}, "split": {"type": "object"}, "seed": {"type": "integer"}, "ontology_snapshot_sha256": {"type": "string"}, "quality_filter": {"type": "object"}}, "required": ["kind", "dataset_id", "target", "features", "as_of", "split", "seed", "ontology_snapshot_sha256"]}}, "required": ["dataset_metadata_ref", "selected_fields"]}},
     {"name": "search_wferp_schema", "description": "Build a bounded multilingual WFERP table/column/relationship context from an authorized WFERP dataset_metadata_ref and the user's exact request. Ask O11y uses this context to author SQL; this tool does not generate or execute SQL.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 8192}, "top_k": {"type": "integer", "minimum": 1, "maximum": 8, "default": 8}}, "required": ["dataset_metadata_ref", "prompt"]}},
-    {"name": "plan_wferp_query", "description": "Validate one Ask O11y LLM-authored legacy MSSQL SELECT against the authorized WFERP schema, SQL policy, and explicit prompt constraints. On recoverable failure, revise the SQL using the returned repair hint. On success, returns an opaque plan_ref for later Grafana-only execution.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 8192}, "sql": {"type": "string", "minLength": 1, "maxLength": 32768}, "output_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50, "uniqueItems": True}, "minimum_rows": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 0}, "maximum_rows": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 5000}, "refId": {"type": "string", "default": "A"}}, "required": ["dataset_metadata_ref", "prompt", "sql", "output_fields"]}},
+    {"name": "plan_wferp_query", "description": "Validate one Ask O11y LLM-authored legacy MSSQL SELECT against the authorized WFERP schema, SQL policy, and explicit prompt constraints. On recoverable failure, revise the SQL using the returned repair hint. On success, returns an opaque plan_ref for later Grafana-only execution.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 8192}, "sql": {"type": "string", "minLength": 1, "maxLength": 32768}, "output_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200, "uniqueItems": True}, "minimum_rows": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 0}, "maximum_rows": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 5000}, "refId": {"type": "string", "default": "A"}}, "required": ["dataset_metadata_ref", "prompt", "sql", "output_fields"]}},
     {"name": "validate_query", "description": "Revalidate an authorized opaque query plan without executing it.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"plan_ref": {"type": "string"}}, "required": ["plan_ref"]}},
 ]
 
@@ -420,7 +475,7 @@ def self_check() -> None:
     if not plan.get("ok") or plan.get("datasource_uid") != "self-check" or not plan.get("plan_ref", "").startswith("artifact://"):
         raise RuntimeError(str(plan))
     plan_artifact = ARTIFACTS.read_json(context, plan["plan_ref"])
-    if plan_artifact["analysis_input_contract"] != {"required_fields": ["timestamp", "metric", "feature"], "optional_fields": [], "validity_rules": [], "minimum_rows": 20, "maximum_rows": 5000, "maximum_fields": 50, "maximum_response_bytes": 4194304} or plan_artifact.get("time_range") != {"from": "2026-01-01T00:00:00Z", "to": "2026-12-31T23:59:59Z"}:
+    if plan_artifact["analysis_input_contract"] != {"required_fields": ["timestamp", "metric", "feature"], "optional_fields": [], "validity_rules": [], "minimum_rows": 20, "maximum_rows": 5000, "maximum_fields": 200, "maximum_response_bytes": 4194304} or plan_artifact.get("time_range") != {"from": "2026-01-01T00:00:00Z", "to": "2026-12-31T23:59:59Z"}:
         raise RuntimeError(str(plan_artifact))
     if "next_step" in plan or "request" in plan_artifact:
         raise RuntimeError("query plan must not contain a fixed workflow or natural-language routing")
@@ -431,10 +486,50 @@ def self_check() -> None:
     validation = tool_validate_query({"plan_ref": plan["plan_ref"], "_server_context": context})
     if not validation["ok"]:
         raise RuntimeError(str(validation))
-    wferp_context = wferp_sql.build_context("2026 年工程預算明細", WFERP_METADATA, top_k=3)
-    if "ACTMK" not in {table["id"] for table in wferp_context["tables"]}:
+    wide_names = [f"field_{index}" for index in range(MAX_PLAN_FIELDS)]
+    wide_run_id = ARTIFACTS.create_run(context)
+    wide_metadata_ref = ARTIFACTS.write_json(context, wide_run_id, "dataset-metadata", {"dataset_id": "upload_00000000000000000000000000000000", "datasource_uid": "self-check", "datasource_type": "yesoreyeram-infinity-datasource", "fields": [{"name": name, "type": "number"} for name in wide_names], "date_range": {"all_from": "2000-01-01", "all_to": "2000-12-31"}, "query_template": {"refId": "A", "datasource": {"uid": "self-check", "type": "yesoreyeram-infinity-datasource"}, "type": "csv", "source": "url", "url": "http://example.invalid/wide.csv", "parser": "backend", "columns": [{"selector": name, "text": name, "type": "number"} for name in wide_names]}})
+    wide_plan = tool_plan_query({"dataset_metadata_ref": wide_metadata_ref, "selected_fields": wide_names, "_server_context": context})
+    too_wide = tool_plan_query({"dataset_metadata_ref": wide_metadata_ref, "selected_fields": [*wide_names, "field_200"], "_server_context": context})
+    if not wide_plan.get("ok") or too_wide.get("ok"):
+        raise RuntimeError(f"200-field planner boundary failed: {wide_plan} {too_wide}")
+    snapshot = ontology_contract.load_snapshot()
+    identity = ontology_contract.snapshot_identity(snapshot)
+    u1_run_id = ARTIFACTS.create_run(context)
+    u1_names = ["date", "heat_rate", "avg_generation_mw", "main_steam_temp_c", "reheat_steam_temp_c", "scr_temp_c", "condenser_outlet_water_temp", "coal_avg_heat_value_kcal_kg", "raw_coal_consumption_g"]
+    u1_fields = [{"name": name, "type": "date" if name == "date" else "number"} for name in u1_names] + [{"name": "heat_rate_valid", "type": "boolean", "validity_for": ["heat_rate"], "accepted_values": [True]}]
+    u1_query_columns = [{"selector": item["name"], "text": item["name"], "type": "timestamp" if item["type"] == "date" else item["type"]} for item in u1_fields]
+    u1_metadata_ref = ARTIFACTS.write_json(context, u1_run_id, "dataset-metadata", {"dataset_id": "u1-operating-daily", "datasource_uid": "csv-poc", "datasource_type": "yesoreyeram-infinity-datasource", "fields": u1_fields, "date_range": {"all_from": "2026-01-01", "all_to": "2026-12-31"}, "query_template": {"refId": "A", "datasource": {"uid": "csv-poc", "type": "yesoreyeram-infinity-datasource"}, "type": "csv", "source": "url", "url": "http://example.invalid/u1.csv", "parser": "backend", "columns": u1_query_columns}})
+    safe_contract = {"kind": "random_forest_shap", "dataset_id": "u1-operating-daily", "target": "heat_rate", "features": ["avg_generation_mw", "main_steam_temp_c", "reheat_steam_temp_c", "scr_temp_c", "condenser_outlet_water_temp", "coal_avg_heat_value_kcal_kg"], "as_of": "2026-07-28", "split": {"kind": "chronological_holdout", "time_field": "date", "test_fraction": 0.25, "preprocessing_fit_scope": "training_only"}, "seed": 42, "ontology_snapshot_sha256": identity["sha256"]}
+    safe_projection = ["date", "heat_rate", *safe_contract["features"]]
+    safe_plan = tool_plan_query({"dataset_metadata_ref": u1_metadata_ref, "selected_fields": safe_projection, "minimum_rows": 100, "analysis_contract": safe_contract, "_server_context": context})
+    if not safe_plan.get("ok"):
+        raise RuntimeError(str(safe_plan))
+    safe_artifact = ARTIFACTS.read_json(context, safe_plan["plan_ref"])
+    if safe_artifact.get("ontology", {}).get("sha256") != identity["sha256"] or not safe_artifact.get("plan_sha256") or safe_artifact.get("analysis_contract", {}).get("split", {}).get("kind") != "chronological_holdout":
+        raise RuntimeError("safe ontology plan did not pin the semantic contract")
+    unsafe = {
+        "target_as_feature": {**safe_contract, "features": ["heat_rate"]},
+        "unknown_feature": {**safe_contract, "features": ["missing_feature"]},
+        "target_proxy": {**safe_contract, "features": ["raw_coal_consumption_g"]},
+        "random_split": {**safe_contract, "split": {**safe_contract["split"], "kind": "random"}},
+    }
+    expected_codes = {"target_as_feature": "TARGET_USED_AS_FEATURE", "unknown_feature": "UNKNOWN_FIELD", "target_proxy": "TARGET_PROXY_UNRESOLVED", "random_split": "SPLIT_POLICY_VIOLATION"}
+    negative_codes = {}
+    for name, bad_contract in unsafe.items():
+        result = tool_plan_query({"dataset_metadata_ref": u1_metadata_ref, "selected_fields": safe_projection, "minimum_rows": 100, "analysis_contract": bad_contract, "_server_context": context})
+        codes = result.get("evidence", {}).get("rejection_codes", [])
+        if result.get("ok") or expected_codes[name] not in codes or result.get("evidence", {}).get("downstream_call_counts") != {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}:
+            raise RuntimeError(f"unsafe semantic fixture escaped: {name} {result}")
+        negative_codes[name] = codes
+    wferp_context = wferp_sql.build_context("科目/部門預算單身檔的已耗與可用預算", WFERP_METADATA, top_k=8, ontology_snapshot=ontology_contract.load_snapshot(dataset_id="wferp"))
+    if not {"ACTMI", "ACTMJ", "ACTMK"}.issubset({table["id"] for table in wferp_context["tables"]}) or len(wferp_context["relationships"]) < 2:
         raise RuntimeError(str(wferp_context))
-    print(json.dumps({"ok": True, "generic_plan_ref": plan["plan_ref"], "runtime_tools": [tool["name"] for tool in TOOLS], "wferp_context_tables": [table["id"] for table in wferp_context["tables"]], "negative_checks": ["invalid_field", "natural_language_routing"]}, ensure_ascii=False, indent=2))
+    wferp_ontology = ontology_contract.load_snapshot(dataset_id="wferp")
+    approved_relations = [relation for dataset in wferp_ontology["registry"]["datasets"] for relation in dataset.get("relations", []) if relation.get("status") == "approved" and bool(relation.get("executable"))]
+    if not approved_relations:
+        raise RuntimeError("WFERP ontology has no reviewed executable relation fixture")
+    print(json.dumps({"ok": True, "generic_plan_ref": plan["plan_ref"], "ontology_plan_ref": safe_plan["plan_ref"], "ontology_snapshot_sha256": identity["sha256"], "runtime_tools": [tool["name"] for tool in TOOLS], "wferp_context_tables": [table["id"] for table in wferp_context["tables"]], "wferp_ontology": {"snapshot": ontology_contract.snapshot_identity(wferp_ontology), "datasets": len(wferp_ontology["registry"]["datasets"]), "approved_relations": len(approved_relations)}, "negative_checks": {"generic": ["invalid_field", "natural_language_routing"], "ontology": negative_codes}}, ensure_ascii=False, indent=2))
 
 
 def main() -> int:

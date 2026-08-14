@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ask-o11y.local/schema/ontology-registry-v1.json",
+  "title": "Ask O11y ontology registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registry_version", "snapshot_id", "status", "approval_scope", "provenance", "datasets"],
+  "properties": {
+    "registry_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "snapshot_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
+    "status": {"const": "approved"},
+    "approval_scope": {"type": "string", "minLength": 1},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "datasets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/dataset"}
+    }
+  },
+  "$defs": {
+    "status": {"enum": ["observed", "proposed", "approved", "rejected", "deprecated"]},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref", "note"],
+      "properties": {
+        "kind": {"enum": ["source_workbook", "generated_metadata", "policy_decision", "lineage", "steward_record"]},
+        "ref": {"type": "string", "minLength": 1},
+        "note": {"type": "string", "minLength": 1}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registry_path", "source_refs", "owner", "effective_from"],
+      "properties": {
+        "registry_path": {"type": "string", "minLength": 1},
+        "source_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "owner": {"type": "string", "minLength": 1},
+        "effective_from": {"type": "string", "format": "date"}
+      }
+    },
+    "availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visibility", "source_time_field", "eligible_at_as_of"],
+      "properties": {
+        "visibility": {"enum": ["known_at_record", "delayed", "post_outcome", "unknown"]},
+        "source_time_field": {"type": ["string", "null"]},
+        "eligible_at_as_of": {"type": ["boolean", "null"]}
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_id", "physical_name", "type", "unit", "semantic_kind", "analysis_role", "status", "availability", "evidence", "reason"],
+      "properties": {
+        "canonical_id": {"type": "string", "pattern": "^field\\.[a-z0-9._-]+$"},
+        "physical_name": {"type": "string", "minLength": 1},
+        "type": {"enum": ["date", "string", "number", "boolean"]},
+        "unit": {"type": ["string", "null"]},
+        "semantic_kind": {"enum": ["temporal", "identifier", "measurement", "label_target", "quality", "treatment_candidate", "target_proxy", "post_outcome", "unknown"]},
+        "analysis_role": {"enum": ["time_identity", "identifier", "feature", "target", "quality", "treatment_candidate", "forbidden", "unclassified"]},
+        "status": {"$ref": "#/$defs/status"},
+        "availability": {"$ref": "#/$defs/availability"},
+        "lineage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "inputs"],
+          "properties": {
+            "status": {"enum": ["known", "unknown"]},
+            "inputs": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_id", "physical_id", "status", "grain", "entity_key", "time_identity", "target", "approved_features", "quality_policy", "split_policy", "evidence", "fields"],
+      "properties": {
+        "canonical_id": {"type": "string", "pattern": "^dataset\\.[a-z0-9._-]+$"},
+        "physical_id": {"type": "string", "minLength": 1},
+        "status": {"$ref": "#/$defs/status"},
+        "grain": {"type": "string", "minLength": 1},
+        "entity_key": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "time_identity": {"type": "string", "minLength": 1},
+        "target": {"type": "string", "minLength": 1},
+        "approved_features": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "quality_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["field", "accepted_values", "minimum_valid_rows"],
+          "properties": {
+            "field": {"type": "string"},
+            "accepted_values": {"type": "array", "minItems": 1},
+            "minimum_valid_rows": {"type": "integer", "minimum": 30}
+          }
+        },
+        "split_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "time_field", "test_fraction", "preprocessing_fit_scope", "seed"],
+          "properties": {
+            "kind": {"const": "chronological_holdout"},
+            "time_field": {"type": "string"},
+            "test_fraction": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 0.5},
+            "preprocessing_fit_scope": {"const": "training_only"},
+            "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+          }
+        },
+        "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}},
+        "fields": {"type": "array", "minItems": 1, "maxItems": 1000, "items": {"$ref": "#/$defs/field"}}
+      }
+    }
+  }
+}

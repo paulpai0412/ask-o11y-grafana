@@ -1,14 +1,35 @@
 """Bounded WFERP schema context and validation for LLM-authored SELECT SQL."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 import re
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from sqlglot import exp, parse_one  # type: ignore[reportMissingModuleSource]
+from sqlglot.errors import ParseError  # type: ignore[reportMissingModuleSource]
+from sqlglot.optimizer.scope import build_scope  # type: ignore[reportMissingModuleSource]
+
+ROOT = Path(__file__).resolve().parent.parent
 METADATA_DIR = Path(__file__).resolve().parent / "metadata" / "wferp"
+
+
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+ontology_sql_validator = load_module("ontology_sql_validator", ROOT / "ontology_sql_validator.py")
+ontology_graph = load_module("ontology_graph", ROOT / "ontology_graph.py")
 MAX_PROMPT_BYTES = 8 * 1024
 MAX_SQL_BYTES = 32 * 1024
 MAX_CONTEXT_TABLES = 8
@@ -51,6 +72,9 @@ _REPAIR_HINTS = {
     "PROMPT_TABLE_MISMATCH": "Include every explicit WFERP table id named by the user.",
     "PROMPT_COLUMN_MISMATCH": "Include every explicit WFERP column id named by the user.",
     "DATABASE_SCOPE_INVALID": "Use only [wferp_test].[dbo] as the database and schema.",
+    "SQL_AST_INVALID": "Return one syntactically valid legacy-compatible T-SQL SELECT.",
+    "JOIN_RELATION_NOT_APPROVED": "This JOIN relation is only proposed in the ontology. Use one table or obtain steward approval for the exact keys/cardinality.",
+    "JOIN_PREDICATE_MISMATCH": "Use exactly the approved ontology relation key pairs for the JOIN.",
 }
 
 
@@ -101,7 +125,7 @@ def _matching_aliases(prompt: str, aliases: dict[str, list[str]]) -> tuple[dict[
     return table_scores, exact_columns
 
 
-def build_context(prompt: str, metadata: dict[str, Any], top_k: int = MAX_CONTEXT_TABLES) -> dict[str, Any]:
+def build_context(prompt: str, metadata: dict[str, Any], top_k: int = MAX_CONTEXT_TABLES, ontology_snapshot: dict[str, Any] | None = None, max_relation_hops: int = 2) -> dict[str, Any]:
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt is required")
     if len(prompt.encode()) > MAX_PROMPT_BYTES:
@@ -139,18 +163,26 @@ def build_context(prompt: str, metadata: dict[str, Any], top_k: int = MAX_CONTEX
                 points += 120 if index == 0 else 80 if index < 3 else 30
         for term in prompt_terms.intersection(terms_by_table[table_id]):
             points += 20.0 * math.log((len(tables) + 1) / (document_frequency[term] + 1))
-        # Preserve the old llm-first context builder's ERP budget routing boosts.
-        if "預算" in prompt and table_id in {"ACTMI", "ACTMJ", "ACTMK"}:
-            points += 80
-        if "明細" in prompt and table_id == "ACTMK":
-            points += 80
         return points, table_id
 
     ranked = sorted(tables, key=lambda table: (-score(table)[0], score(table)[1]))
-    selected = [table for table in ranked if score(table)[0] > 0][:top_k]
-    if not selected:
+    lexical = [table for table in ranked if score(table)[0] > 0]
+    if not lexical:
         raise ValueError("NO_SCHEMA_CONTEXT_MATCH")
-    selected_ids = {str(table.get("TableID", "")).upper() for table in selected}
+    seed_ids = [str(lexical[0]["TableID"]).upper()]
+    expansion = {"seeds": seed_ids, "datasets": seed_ids, "paths": [], "max_hops": 0, "include_proposed": False, "truncated": False}
+    if ontology_snapshot is not None:
+        expansion = ontology_graph.expand_datasets(ontology_snapshot, seed_ids, max_relation_hops, top_k, False)
+    selected_ids_order = [str(value).upper() for value in expansion["datasets"]]
+    for table in lexical:
+        table_id = str(table["TableID"]).upper()
+        if table_id not in selected_ids_order:
+            selected_ids_order.append(table_id)
+        if len(selected_ids_order) == top_k:
+            break
+    table_by_id = {str(table["TableID"]).upper(): table for table in tables}
+    selected = [table_by_id[table_id] for table_id in selected_ids_order if table_id in table_by_id]
+    selected_ids = set(selected_ids_order)
 
     columns: dict[str, list[dict[str, Any]]] = {table_id: [] for table_id in selected_ids}
     for field in fields:
@@ -171,10 +203,8 @@ def build_context(prompt: str, metadata: dict[str, Any], top_k: int = MAX_CONTEX
         values.sort(key=lambda value: (not value["requested"], value["id"]))
         columns[table_id] = values[:MAX_COLUMNS_PER_TABLE]
 
-    relationships = [
-        edge for edge in metadata["relationships"]
-        if str(edge.get("from_table", "")).upper() in selected_ids and str(edge.get("to_table", "")).upper() in selected_ids
-    ]
+    relationships = [path["relation"] for path in expansion["paths"]]
+    proposed_relationships = [edge for edge in metadata["relationships"] if str(edge.get("from_table", "")).upper() in selected_ids and str(edge.get("to_table", "")).upper() in selected_ids]
     return {
         "sql_author": "Ask O11y LLM",
         "dialect": "Microsoft SQL Server legacy-compatible SELECT",
@@ -196,7 +226,10 @@ def build_context(prompt: str, metadata: dict[str, Any], top_k: int = MAX_CONTEX
             "primary_key": metadata["primary_keys"].get(str(table.get("TableID", "")), []),
             "columns": columns[str(table.get("TableID", "")).upper()],
         } for table in selected],
+        "lexical_seed_tables": seed_ids,
+        "ontology_expansion": {key: value for key, value in expansion.items() if key != "paths"},
         "relationships": relationships,
+        "proposed_relationships": proposed_relationships,
         "repair_codes": _REPAIR_HINTS,
     }
 
@@ -224,33 +257,46 @@ def validate_metadata_references(sql: str, bundle: dict[str, Any]) -> tuple[bool
     columns_by_table: dict[str, set[str]] = {}
     for field in bundle.get("fields", []):
         columns_by_table.setdefault(str(field.get("TableID", "")).upper(), set()).add(str(field.get("ID", "")).upper())
-
-    matches = list(FROM_JOIN_PATTERN.finditer(sql))
-    if any(match.group(1).lower() != "wferp_test" or match.group(2).lower() != "dbo" for match in matches):
-        return False, "DATABASE_SCOPE_INVALID", []
-    tables = [match.group(3).upper() for match in matches]
-    aliases = {match.group(4).upper(): match.group(3).upper() for match in matches if match.group(4)}
-    aliases.update({table: table for table in tables})
+    try:
+        tree = parse_one(sql, read="tsql")
+    except ParseError:
+        return False, "SQL_AST_INVALID", []
+    if not isinstance(tree, exp.Select):
+        return False, "NON_SELECT_INTENT", []
+    table_nodes = list(tree.find_all(exp.Table))
     if FROM_JOIN_UNBRACKETED_PATTERN.search(sql):
         return False, "TABLE_REFERENCE_FORMAT_INVALID", []
-    if not tables:
+    if not table_nodes:
         return False, "NO_TABLE_REFERENCE", []
+    if any(table.catalog.lower() != "wferp_test" or table.db.lower() != "dbo" for table in table_nodes):
+        return False, "DATABASE_SCOPE_INVALID", []
+    tables = [table.name.upper() for table in table_nodes]
     if any(table not in known_tables for table in tables):
         return False, "UNKNOWN_TABLE", []
-
-    for pattern in (ALIASED_COLUMN_PATTERN, BRACKETED_QUALIFIED_COLUMN_PATTERN):
-        for match in pattern.finditer(sql):
-            alias, column = match.group(1).upper(), match.group(2).upper()
-            if alias not in aliases:
-                return False, "UNKNOWN_TABLE_ALIAS", []
-            if column not in columns_by_table.get(aliases[alias], set()):
-                return False, "UNKNOWN_COLUMN_FOR_TABLE", []
-
-    columns = {match.group(1).upper() for match in COLUMN_PATTERN.finditer(sql)}
-    columns.update(match.group(1).upper() for match in COLUMN_UNBRACKETED_PATTERN.finditer(sql))
-    known_columns = set().union(*(columns_by_table.get(table, set()) for table in tables))
-    if any(column not in known_columns for column in columns):
-        return False, "UNKNOWN_COLUMN", []
+    root_scope = build_scope(tree)
+    if root_scope is None:
+        return False, "SQL_AST_INVALID", []
+    for scope in root_scope.traverse():
+        aliases = {alias.upper(): source.name.upper() for alias, source in scope.sources.items() if isinstance(source, exp.Table)}
+        inherited_aliases: dict[str, str] = {}
+        parent = scope.parent
+        while parent is not None:
+            inherited_aliases.update({alias.upper(): source.name.upper() for alias, source in parent.sources.items() if isinstance(source, exp.Table)})
+            parent = parent.parent
+        scoped_tables = set(aliases.values())
+        known_columns = set().union(*(columns_by_table.get(table, set()) for table in scoped_tables))
+        external = set(scope.external_columns)
+        for column in scope.columns:
+            name = column.name.upper()
+            if column.table:
+                alias = column.table.upper()
+                resolved = aliases.get(alias) or (inherited_aliases.get(alias) if column in external else None)
+                if resolved is None:
+                    return False, "UNKNOWN_TABLE_ALIAS", []
+                if name not in columns_by_table.get(resolved, set()):
+                    return False, "UNKNOWN_COLUMN_FOR_TABLE", []
+            elif name not in known_columns:
+                return False, "UNKNOWN_COLUMN", []
     return True, "OK", tables
 
 
@@ -274,7 +320,11 @@ def validate_prompt_consistency(prompt: str, sql: str, bundle: dict[str, Any]) -
     return True, "OK"
 
 
-def validate_llm_sql(prompt: str, sql: str, metadata: dict[str, Any]) -> dict[str, Any]:
+def validate_join_ontology(sql: str, ontology_snapshot: dict[str, Any]) -> tuple[bool, str]:
+    return ontology_sql_validator.validate_ontology_joins(sql, ontology_snapshot, "tsql")
+
+
+def validate_llm_sql(prompt: str, sql: str, metadata: dict[str, Any], ontology_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     for validator in (
         lambda: validate_sql_policy(sql),
         lambda: validate_metadata_references(sql, metadata["bundle"]),
@@ -284,5 +334,9 @@ def validate_llm_sql(prompt: str, sql: str, metadata: dict[str, Any]) -> dict[st
         if not result[0]:
             code = result[1]
             return {"ok": False, "code": code, "repair_hint": _REPAIR_HINTS.get(code, "Revise the SQL to satisfy the declared schema and policy.")}
+    if ontology_snapshot is not None:
+        ontology_ok, ontology_code = validate_join_ontology(sql, ontology_snapshot)
+        if not ontology_ok:
+            return {"ok": False, "code": ontology_code, "repair_hint": _REPAIR_HINTS[ontology_code]}
     tables = validate_metadata_references(sql, metadata["bundle"])[2]
     return {"ok": True, "code": "OK", "tables": tables}

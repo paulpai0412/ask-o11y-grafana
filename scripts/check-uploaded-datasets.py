@@ -23,6 +23,15 @@ def main() -> int:
         csv_result = uploads.store_upload(context=context, session_id="session-one", filename="sales.csv", raw=b"code,amount\n001,10\n002,20\n")
         assert csv_result["rows"] == 2 and csv_result["columns"] == 2
         assert csv_result["fields"] == [{"name": "code", "type": "string"}, {"name": "amount", "type": "number"}]
+        wide_headers = [f"field_{index}" for index in range(uploads.MAX_UPLOAD_FIELDS)]
+        wide_csv = (",".join(wide_headers) + "\n" + ",".join("1" for _ in wide_headers) + "\n").encode()
+        assert uploads.store_upload(context=context, session_id="session-wide-csv", filename="wide.csv", raw=wide_csv)["columns"] == 200
+        try:
+            uploads.store_upload(context=context, session_id="session-too-wide", filename="too-wide.csv", raw=wide_csv.replace(b"\n", b",field_200\n", 1))
+        except ValueError as exc:
+            assert "exceeds 200 columns" in str(exc)
+        else:
+            raise AssertionError("201-column CSV upload was allowed")
         token = uploads.sign_csv_url(public_base="http://localhost:8772", secret="x" * 32, metadata=csv_result).rsplit("/", 1)[1]
         assert uploads.read_signed_csv(token, "x" * 32).read_text().startswith("code,amount")
         try:
@@ -48,6 +57,9 @@ def main() -> int:
         sheet.cell(row=1, column=2, value="value")
         sheet.cell(row=2, column=1, value="2026-01-01")
         sheet.cell(row=2, column=2, value=3)
+        for column in range(3, uploads.MAX_UPLOAD_FIELDS + 1):
+            sheet.cell(row=1, column=column, value=f"field_{column}")
+            sheet.cell(row=2, column=column, value=column)
         sheet.cell(row=3, column=1, value="formula")
         sheet.cell(row=3, column=2, value="=SUM(B2:B2)")
         workbook.create_sheet("Other")
@@ -60,7 +72,7 @@ def main() -> int:
         else:
             raise AssertionError("multi-sheet workbook did not require selection")
         xlsx_result = uploads.store_upload(context=context, session_id="session-two", filename="book.xlsx", raw=buffer.getvalue(), sheet="Data")
-        assert xlsx_result["rows"] == 2 and xlsx_result["sheet"] == "Data"
+        assert xlsx_result["rows"] == 2 and xlsx_result["columns"] == 200 and xlsx_result["sheet"] == "Data"
         normalized = (uploads.UPLOAD_ROOT / xlsx_result["id"] / "data.csv").read_text()
         assert "=SUM" not in normalized
 

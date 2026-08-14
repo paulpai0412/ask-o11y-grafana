@@ -90,6 +90,15 @@ def tool_errors(status: dict[str, Any]) -> list[dict[str, Any]]:
     return [event.get("data") or {} for event in status.get("events", []) if event.get("type") == "tool_call_result" and (event.get("data") or {}).get("isError")]
 
 
+def tool_result_text(status: dict[str, Any], name: str) -> list[str]:
+    output = []
+    for event in status.get("events", []):
+        data = event.get("data") or {}
+        if event.get("type") == "tool_call_result" and data.get("name") == name:
+            output.append(json.dumps(data, ensure_ascii=False))
+    return output
+
+
 def visible_text(status: dict[str, Any]) -> str:
     return json.dumps([event.get("data") or {} for event in status.get("events", []) if event.get("type") in {"content", "final_report"}], ensure_ascii=False)
 
@@ -146,15 +155,17 @@ def run_xy_skill_flow() -> dict[str, Any]:
 
 
 def main() -> int:
-    preview = start_run("請用 `u1-operating-daily` 做 Random Forest heat_rate 解釋與時間切分評估，產生 SHAP beeswarm PNG。Grafana Preview 只顯示這張分析 PNG 與文字摘要，不要建立任何原生 Grafana data chart。使用 dashboarding skill 與內建 Grafana MCP。先提供 Analysis Preview；未確認前不要執行查詢、Python 或 Grafana 寫入。")
+    preview = start_run("請用 `u1-operating-daily` 做 ontology-assisted Random Forest heat_rate 解釋，產生 SHAP beeswarm PNG。先使用獨立 Ontology MCP 的 approved snapshot/context/classification，且只使用 approved feature allowlist；由 Planner deterministic semantic gate 建立完整 analysis_contract（as_of=2026-07-28、依 date 的 chronological_holdout、test_fraction=0.25、training_only preprocessing、seed=42、quality_filter 必須精確為 `{\"field\":\"heat_rate_valid\",\"accepted_values\":[true],\"minimum_valid_rows\":100}`），且 Planner 的 minimum_rows 必須是 100。生成 Python 時 `date` 會是 UTC-aware Grafana timestamp，as_of 必須同樣使用 UTC-aware timestamp；禁止 random train_test_split，imputer 只能 fit training rows；RMSE 必須用 `np.sqrt(mean_squared_error(...))`，不得使用不相容的 `squared=False`。Grafana Preview 只顯示分析 PNG 與文字摘要，不要建立原生 Grafana data chart。先提供 Analysis Preview；未確認前不要執行 Grafana Query、Python 或 Grafana 寫入。")
     preview_status, _ = poll_run(preview["runId"], False)
     preview_tools = tool_names(preview_status)
     require(preview_status.get("status") == "completed" and not tool_errors(preview_status), "Analysis Preview failed")
-    require(not any("execute" in name or name == "mcp-grafana_update_dashboard" for name in preview_tools), f"Analysis Preview executed work: {preview_tools}")
+    ontology_tools = {"ontology_get_semantic_context", "ontology_classify_fields", "ontology_validate_analysis_contract"}
+    require(ontology_tools.issubset(preview_tools), f"Analysis Preview omitted ontology context/validation: {preview_tools}")
+    require(not any(name in {"grafana-query_execute_planned_query", "sandbox-analysis_execute_python_analysis", "mcp-grafana_update_dashboard"} for name in preview_tools), f"Analysis Preview executed work: {preview_tools}")
     session_id = str(preview.get("sessionId") or preview_status.get("sessionId") or "")
     require(bool(session_id), "session missing")
 
-    execution = start_run("確認執行並建立可檢視的 Grafana Preview；不要正式發佈。Dashboard 必須使用 opaque asset binding 顯示 SHAP PNG，並可附文字摘要；不得建立原生 Grafana data chart 或任何 panel target。", session_id)
+    execution = start_run("確認依剛才完整 contract 執行並建立可檢視的 Grafana Preview；Planner minimum_rows 必須為 100，quality_filter 必須精確使用 ontology policy 的 field/accepted_values/minimum_valid_rows，不得自行改寫成 op/value；Python 的 RMSE 必須用 `np.sqrt(mean_squared_error(...))`，不得使用 `squared=False`。Dashboard 必須使用 opaque asset binding 顯示 SHAP PNG，並可附文字摘要；不得建立原生 Grafana data chart 或任何 panel target。", session_id)
     execution_status, execution_approvals = poll_run(execution["runId"], True)
     execution_names = tool_names(execution_status)
     errors = tool_errors(execution_status)
@@ -163,6 +174,15 @@ def main() -> int:
     require(not any(name.startswith("grafana-renderer_") or name.startswith("artifact-bridge_") for name in execution_names), f"internal bridge leaked into LLM tool flow: {execution_names}")
     sandbox_args = tool_arguments(execution_status, "sandbox-analysis_execute_python_analysis")
     require(len(sandbox_args) == 1 and "shap" in str(sandbox_args[0].get("python_code", "")).lower(), "Ask O11y did not generate SHAP Python")
+    code = str(sandbox_args[0].get("python_code", ""))
+    require("sort_values" in code and "date" in code and "train_test_split(" not in code, "SHAP code did not use a chronological holdout")
+    require(".fit(" in code and ".transform(" in code and "random_state" in code, "SHAP code did not prove training-only preprocessing and fixed seed")
+    planner_results = tool_result_text(execution_status, "data-query-planner_plan_query") or tool_result_text(preview_status, "data-query-planner_plan_query")
+    require(bool(planner_results) and "ontology" in planner_results and "81304bc7daf0b6c87711c76a3cd3ac45f162dd6ffd0e91c5997a88d89484aa01" in planner_results and "plan_sha256" in planner_results, "Planner result omitted ontology/plan provenance")
+    require("data-query-planner_plan_query" in preview_tools or "data-query-planner_plan_query" in execution_names, "Planner semantic gate did not run")
+    if "data-query-planner_plan_query" in execution_names:
+        require(execution_names.index("data-query-planner_plan_query") < execution_names.index("grafana-query_execute_planned_query"), "semantic gate did not run before query")
+    require(execution_names.index("grafana-query_execute_planned_query") < execution_names.index("sandbox-analysis_execute_python_analysis"), "query did not run before sandbox")
     update_args = tool_arguments(execution_status, "mcp-grafana_update_dashboard")
     require(len(update_args) == 1 and isinstance(update_args[0].get("dashboard"), dict), "built-in Grafana preview write missing")
     model_dashboard = update_args[0]["dashboard"]
@@ -212,6 +232,12 @@ def main() -> int:
             "query_only_panel_targets_return_data": True,
             "analysis_uses_image_only": True,
             "shap_png_visible_in_preview": True,
+            "ontology_context_before_planning": True,
+            "planner_semantic_gate_before_query": True,
+            "chronological_holdout": True,
+            "training_only_preprocessing": True,
+            "fixed_seed": True,
+            "snapshot_plan_provenance": True,
         },
     }
     OUT.parent.mkdir(parents=True, exist_ok=True)

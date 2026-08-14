@@ -34,22 +34,30 @@ set +a
 docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -i /init/01_create_wferp_test.sql >/dev/null
 
 start() {
-	local name=$1 log=$2
-	shift 2
+	local name=$1 log=$2 restart=$3
+	shift 3
 	local pid_file="$RUNTIME_DIR/$name.pid"
 	if [[ -s $pid_file ]] && kill -0 "$(<"$pid_file")" 2>/dev/null; then
-		return
+		[[ $restart == 0 ]] && return
+		kill "$(<"$pid_file")"
+		for _ in {1..30}; do
+			kill -0 "$(<"$pid_file")" 2>/dev/null || break
+			sleep 0.1
+		done
 	fi
 	rm -f "$pid_file"
 	nohup "$@" >>"$RUNTIME_DIR/$log" 2>&1 &
 	echo $! >"$pid_file"
 }
 
-start opensandbox opensandbox.log uvx opensandbox-server --config config/opensandbox.local.toml
-start data-query-planner data-query-planner.log uv run python data-query-planner-mcp/server.py
-start grafana-query grafana-query.log uv run python grafana-query-mcp/server.py
-start sandbox sandbox.log uv run python sandbox-analysis-mcp/server.py
-start artifact-bridge artifact-bridge.log uv run python artifact-bridge-mcp/server.py
+# The OpenSandbox daemon may be reused. Python MCPs must restart so imported
+# contract/snapshot validation code cannot remain stale across local deploys.
+start opensandbox opensandbox.log 0 uvx opensandbox-server --config config/opensandbox.local.toml
+start ontology ontology.log 1 uv run python ontology-mcp/server.py
+start data-query-planner data-query-planner.log 1 uv run python data-query-planner-mcp/server.py
+start grafana-query grafana-query.log 1 uv run python grafana-query-mcp/server.py
+start sandbox sandbox.log 1 uv run python sandbox-analysis-mcp/server.py
+start artifact-bridge artifact-bridge.log 1 uv run python artifact-bridge-mcp/server.py
 
 if ! curl -fsS http://127.0.0.1:4000/healthz >/dev/null 2>&1; then
 	[[ -f $GATEWAY_CLI ]] || {
@@ -59,7 +67,7 @@ if ! curl -fsS http://127.0.0.1:4000/healthz >/dev/null 2>&1; then
 	nohup node "$GATEWAY_CLI" >>"$RUNTIME_DIR/pi-gateway.log" 2>&1 &
 fi
 
-for endpoint in 3000 8080 8768 8772 8773 8777 4000 14334; do
+for endpoint in 3000 8080 8768 8771 8772 8773 8777 4000 14334; do
 	for _ in {1..30}; do
 		(echo >/dev/tcp/127.0.0.1/"$endpoint") >/dev/null 2>&1 && break
 		sleep 1
