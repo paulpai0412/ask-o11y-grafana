@@ -9,3 +9,4 @@ node_modules/
 
 .pi/
 .pi-subagents/
+.pi-meetings/

@@ -1,4 +1,4 @@
-"""Trusted in-sandbox bootstrap for DataFrame injection and rich output capture."""
+"""Trusted in-sandbox bootstrap for authorized inputs and rich output capture."""
 from __future__ import annotations
 
 import ast
@@ -15,6 +15,9 @@ from typing import Any
 OUTPUT_DIR = Path("/tmp/sandbox-output")
 MAX_ITEM_BYTES = 4 * 1024 * 1024
 MAX_LOG_BYTES = 256 * 1024
+MAX_FRAME_FIELDS = 200
+MAX_FRAME_ROWS = 5_000
+DERIVED_FRAME_MIME = "application/vnd.ask-o11y.dataframe+json"
 
 
 class BoundedLog:
@@ -57,7 +60,10 @@ def pipe_output(fd: int, sink: BoundedLog) -> tuple[int, threading.Thread]:
 
 
 def load_dataframe(bundle_path: str, pd: Any) -> tuple[Any, dict[str, Any]]:
-    bundle = json.loads(Path(bundle_path).read_text(encoding="utf-8"))
+    try:
+        bundle = json.loads(Path(bundle_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("authorized frame bundle is invalid") from exc
     frame = bundle.get("frame") if isinstance(bundle, dict) else None
     rules = bundle.get("validity_rules", []) if isinstance(bundle, dict) else None
     fields = frame.get("schema", {}).get("fields") if isinstance(frame, dict) else None
@@ -95,11 +101,10 @@ def load_dataframe(bundle_path: str, pd: Any) -> tuple[Any, dict[str, Any]]:
     filtered = data.loc[mask].copy()
     if rules and filtered.empty:
         raise ValueError("validity rules exclude every row")
-    audit = {"input_rows": len(data), "valid_rows": len(filtered), "excluded_rows": len(data) - len(filtered), "rules": applied}
-    return filtered, audit
+    return filtered, {"input_rows": len(data), "valid_rows": len(filtered), "excluded_rows": len(data) - len(filtered), "rules": applied}
 
 
-def run(code: str, bundle_path: str, seed: int) -> None:
+def runtime_modules() -> tuple[Any, Any, Any, Any]:
     matplotlib = importlib.import_module("matplotlib")
     matplotlib.use("Agg")
     matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC", "DejaVu Sans"]
@@ -108,15 +113,20 @@ def run(code: str, bundle_path: str, seed: int) -> None:
     np = importlib.import_module("numpy")
     pd = importlib.import_module("pandas")
     Figure = importlib.import_module("matplotlib.figure").Figure
+    return plt, np, pd, Figure
 
-    shutil.rmtree(OUTPUT_DIR, ignore_errors=True)
-    OUTPUT_DIR.mkdir(mode=0o700)
+
+def execute(code: str, seed: int, namespace: dict[str, Any], audit: dict[str, Any], plt: Any, np: Any, pd: Any, Figure: Any) -> None:
+    try:
+        shutil.rmtree(OUTPUT_DIR, ignore_errors=True)
+        OUTPUT_DIR.mkdir(mode=0o700)
+    except OSError as exc:
+        raise RuntimeError("sandbox output directory is unavailable") from exc
     random.seed(seed)
     np.random.seed(seed)
     manifest: list[dict[str, str]] = []
     captured_figures: set[int] = set()
-    data, audit = load_dataframe(bundle_path, pd)
-    Path(bundle_path).unlink(missing_ok=True)
+    emitted_frame = False
 
     def label(value: str | None, index: int, fallback: str) -> str:
         if not isinstance(value, str):
@@ -131,6 +141,38 @@ def run(code: str, bundle_path: str, seed: int) -> None:
         path = OUTPUT_DIR / name
         path.write_bytes(payload)
         manifest.append({"path": str(path), "mime_type": mime_type, "display_name": display_name})
+
+    def emit_frame(value: Any, name: str | None = None) -> None:
+        nonlocal emitted_frame
+        if emitted_frame:
+            raise ValueError("only one derived frame may be emitted")
+        if not isinstance(value, pd.DataFrame) or value.empty:
+            raise ValueError("emit_frame requires a non-empty pandas DataFrame")
+        if not 1 <= len(value.columns) <= MAX_FRAME_FIELDS or len(value) > MAX_FRAME_ROWS:
+            raise ValueError(f"derived frame must contain 1..{MAX_FRAME_FIELDS} fields and at most {MAX_FRAME_ROWS} rows")
+        columns = [str(column).strip() for column in value.columns]
+        if any(not column for column in columns) or len(set(columns)) != len(columns):
+            raise ValueError("derived frame field names must be unique non-empty strings")
+        logical_types = []
+        for column in value.columns:
+            series = value[column]
+            if pd.api.types.is_datetime64_any_dtype(series.dtype):
+                logical_types.append("time")
+            elif pd.api.types.is_bool_dtype(series.dtype):
+                logical_types.append("boolean")
+            elif pd.api.types.is_numeric_dtype(series.dtype):
+                logical_types.append("number")
+            else:
+                logical_types.append("string")
+        try:
+            split = json.loads(value.set_axis(columns, axis=1).to_json(orient="split", date_format="iso", date_unit="ms", force_ascii=False))
+            payload = json.dumps({"format": "ask-o11y-dataframe-v1", "columns": columns, "types": logical_types, "data": split["data"]}, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise ValueError("derived frame contains unsupported values") from exc
+        index = len(manifest) + 1
+        display_name = label(name, index, f"Derived frame {index}")
+        write(f"derived-frame-{index}.json", DERIVED_FRAME_MIME, payload, display_name)
+        emitted_frame = True
 
     def emit(value: Any, name: str | None = None) -> None:
         if value is None:
@@ -173,7 +215,7 @@ def run(code: str, bundle_path: str, seed: int) -> None:
             return
         write(f"output-{index}.txt", "text/plain", repr(value), display_name)
 
-    namespace = {"df": data, "pd": pd, "np": np, "display": emit, "emit": emit}
+    namespace.update({"pd": pd, "np": np, "display": emit, "emit": emit, "emit_frame": emit_frame})
     setattr(plt, "show", lambda *args, **kwargs: None)
     stdout_log, stderr_log = BoundedLog(), BoundedLog()
     stdout_fd, stdout_thread = pipe_output(1, stdout_log)
@@ -200,11 +242,26 @@ def run(code: str, bundle_path: str, seed: int) -> None:
         for number in plt.get_fignums():
             if number not in captured_figures:
                 emit(plt.figure(number))
-        for name, log in (("stdout.txt", stdout_log), ("stderr.txt", stderr_log)):
-            path = OUTPUT_DIR / name
+        for output_name, log in (("stdout.txt", stdout_log), ("stderr.txt", stderr_log)):
+            path = OUTPUT_DIR / output_name
             path.write_bytes(log.data)
             path.chmod(0o600)
         (OUTPUT_DIR / "audit.json").write_text(json.dumps(audit), encoding="utf-8")
         (OUTPUT_DIR / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         if stdout_log.overflow or stderr_log.overflow:
             raise RuntimeError("generated output exceeded the sandbox log limit")
+
+
+def run(code: str, bundle_path: str, seed: int) -> None:
+    plt, np, pd, Figure = runtime_modules()
+    data, audit = load_dataframe(bundle_path, pd)
+    Path(bundle_path).unlink(missing_ok=True)
+    execute(code, seed, {"df": data}, audit, plt, np, pd, Figure)
+
+
+def run_document(code: str, document_path: str, input_format: str, seed: int) -> None:
+    if input_format not in {"csv", "xlsx"}:
+        raise ValueError("unsupported document format")
+    plt, np, pd, Figure = runtime_modules()
+    audit = {"input_rows": 0, "valid_rows": 0, "excluded_rows": 0, "rules": []}
+    execute(code, seed, {"document_path": document_path, "input_format": input_format}, audit, plt, np, pd, Figure)

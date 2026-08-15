@@ -150,7 +150,7 @@ def read_limited(stream: BinaryIO, content_length: int) -> bytes:
     return raw
 
 
-def store_upload(*, context: dict[str, str], session_id: str, filename: str, raw: bytes, sheet: str | None = None) -> dict[str, Any]:
+def store_upload(*, context: dict[str, str], session_id: str, filename: str, raw: bytes, sheet: str | None = None, parent_upload_id: str | None = None) -> dict[str, Any]:
     suffix = Path(filename).suffix.lower()
     if suffix not in {".csv", ".xlsx"}:
         raise ValueError("only .csv and .xlsx uploads are supported")
@@ -158,7 +158,10 @@ def store_upload(*, context: dict[str, str], session_id: str, filename: str, raw
     root = UPLOAD_ROOT / upload_id
     root.mkdir(parents=True, mode=0o700)
     csv_path = root / "data.csv"
+    source_path = root / f"source{suffix}"
     try:
+        source_path.write_bytes(raw)
+        source_path.chmod(0o600)
         if suffix == ".xlsx":
             selected_sheet = _write_xlsx(raw, csv_path, sheet)
         else:
@@ -172,6 +175,9 @@ def store_upload(*, context: dict[str, str], session_id: str, filename: str, raw
             "session_id": session_id,
             "filename": _safe_name(filename),
             "sheet": selected_sheet,
+            "source_format": suffix.removeprefix("."),
+            "source_sha256": hashlib.sha256(raw).hexdigest(),
+            "parent_upload_id": parent_upload_id,
             "rows": rows,
             "columns": len(fields),
             "fields": fields,
@@ -208,6 +214,17 @@ def inspect_upload(context: dict[str, str], upload_id: str, session_id: str | No
     if session_id is not None and metadata.get("session_id") != session_id:
         raise PermissionError("uploaded dataset session mismatch")
     return metadata
+
+
+def read_source(context: dict[str, str], upload_id: str, session_id: str | None = None) -> tuple[Path, dict[str, Any]]:
+    metadata = inspect_upload(context, upload_id, session_id)
+    source_format = metadata.get("source_format")
+    if source_format not in {"csv", "xlsx"}:
+        raise PermissionError("uploaded source document is unavailable")
+    path = UPLOAD_ROOT / metadata["id"] / f"source.{source_format}"
+    if not path.is_file():
+        raise PermissionError("uploaded source document is unavailable")
+    return path, metadata
 
 
 def delete_upload(context: dict[str, str], upload_id: str, session_id: str) -> None:

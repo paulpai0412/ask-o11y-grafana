@@ -58,7 +58,7 @@ GRAFANA_PASSWORD = os.environ.get("GRAFANA_PASSWORD", "admin")
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
 uploaded_datasets.cleanup_expired()
-SERVER_INFO = {"name": "grafana-query-mcp", "version": "0.3.0"}
+SERVER_INFO = {"name": "grafana-query-mcp", "version": "0.4.0"}
 PROTOCOL = "2025-03-26"
 CATALOG_FILE = ROOT / "config" / "authorized-grafana-datasets.json"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -210,7 +210,7 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
             fields = [{"name": field["name"], "type": field["type"], "display_name": field["name"]} for field in upload["fields"]]
             query_columns = [{"selector": field["name"], "text": field["name"], "type": "timestamp" if field["type"] == "date" else field["type"]} for field in upload["fields"]]
             query_template = {"refId": "A", "datasource": {"uid": uid, "type": live.get("type")}, "type": "csv", "source": "url", "url": signed_url, "parser": "backend", "format": "table", "url_options": {"method": "GET", "data": ""}, "csv_options": {"delimiter": ",", "skip_empty_lines": True}, "columns": query_columns}
-            metadata_artifact = {"dataset_id": dataset_id, "title": upload["filename"], "description": "Session-owned uploaded dataset", "domain_hints": ["uploaded", "csv", "excel"], "datasource_uid": uid, "datasource_type": live.get("type"), "query_kind": query_kind, "session_id": upload["session_id"], "fields": fields, "minimum_rows": 1, "row_count_hint": upload["rows"], "date_range": {"all_from": "2000-01-01", "all_to": "2000-12-31"}, "query_template": query_template}
+            metadata_artifact = {"dataset_id": dataset_id, "title": upload["filename"], "description": "Session-owned uploaded dataset", "domain_hints": ["uploaded", "csv", "excel"], "datasource_uid": uid, "datasource_type": live.get("type"), "query_kind": query_kind, "session_id": upload["session_id"], "source_format": upload.get("source_format"), "fields": fields, "minimum_rows": 1, "row_count_hint": upload["rows"], "date_range": {"all_from": "2000-01-01", "all_to": "2000-12-31"}, "query_template": query_template}
         elif query_kind == "wferp_llm_sql" and configured is not None:
             schema_bundle = load_json(ROOT / "data-query-planner-mcp" / "metadata" / "wferp" / "schema_bundle.json")
             metadata_artifact = {
@@ -242,12 +242,19 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
             raise workflow_node.WorkflowContractError("configured dataset query_kind is unsupported")
         run_id = ARTIFACTS.create_run(context)
         metadata_ref = ARTIFACTS.write_json(context, run_id, "dataset-metadata", metadata_artifact)
+        document_ref = None
+        if upload is not None and upload.get("source_format") in {"csv", "xlsx"}:
+            uploaded_datasets.read_source(context, dataset_id, upload["session_id"])
+            document_ref = ARTIFACTS.write_json(context, run_id, "uploaded-document", {"upload_id": dataset_id, "session_id": upload["session_id"], "filename": upload["filename"], "sheet": upload.get("sheet"), "source_format": upload["source_format"], "source_sha256": upload["source_sha256"]})
     except (RuntimeError, workflow_node.WorkflowContractError, OSError, StopIteration) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; authorized dataset inspection failed.")
-    preview_keys = ["dataset_id", "title", "description", "domain_hints", "datasource_uid", "datasource_type", "query_kind", "fields", "minimum_rows", "row_count_hint", "date_range", "schema_summary"]
+    preview_keys = ["dataset_id", "title", "description", "domain_hints", "datasource_uid", "datasource_type", "query_kind", "source_format", "fields", "minimum_rows", "row_count_hint", "date_range", "schema_summary"]
     preview = {key: metadata_artifact[key] for key in preview_keys if key in metadata_artifact}
     instruction = "For WFERP, search its bounded schema context before authoring SQL. For other datasets, use sanitized fields to prepare the user-visible preview. No datasource query has executed."
-    return success_response(step=step, run_id=run_id, refs={"dataset_metadata_ref": metadata_ref}, instruction=instruction, evidence={"grafana_metadata_read": True, "datasource_query_executed": False}, dataset_metadata_ref=metadata_ref, metadata=preview)
+    refs = {"dataset_metadata_ref": metadata_ref}
+    if document_ref is not None:
+        refs["document_ref"] = document_ref
+    return success_response(step=step, run_id=run_id, refs=refs, instruction=instruction, evidence={"grafana_metadata_read": True, "datasource_query_executed": False}, dataset_metadata_ref=metadata_ref, document_ref=document_ref, metadata=preview)
 
 
 def validate_frame(response: dict[str, Any], contract: dict[str, Any], ref_id: str = "A") -> dict[str, Any]:

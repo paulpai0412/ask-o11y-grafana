@@ -5,11 +5,12 @@ Executes Ask O11y-generated Python against one authorized Grafana columnar frame
 ## Tools
 
 - `execute_python_analysis(frame_ref, python_code, seed?)`
+- `execute_python_preprocessing(document_ref, python_code, seed?)`
 - `list_python_analyses()`
 - `inspect_python_analysis(provenance_ref)`
 - `revise_python_analysis(provenance_ref, python_code, seed?)`
 
-The query frame and validity rules are transferred as bounded JSON. Trusted `capture.py`, baked into the image, creates filtered `df` and captures named tables, bounded CSV outputs, JSON results, Matplotlib PNG, Plotly JSON, HTML, text, errors, and validity audit. Explicit text/JSON results are returned inline up to 32 KiB total; CSV outputs receive retention-bound signed download URLs. Display names never control physical paths. No CSV or SQLite input intermediate is created.
+A query frame and its validity rules are transferred as bounded JSON. Original user-uploaded CSV/XLSX documents use an owner/session-bound `document_ref` and are copied into the fresh sandbox without exposing a host path. Trusted `capture.py`, baked into the image, creates filtered `df` and captures named tables, bounded CSV outputs, JSON results, Matplotlib PNG, Plotly JSON, HTML, text, errors, and validity audit. Explicit text/JSON results are returned inline up to 32 KiB total; CSV outputs receive retention-bound signed download URLs. `emit_frame(df)` returns a validated `derived_frame_ref`; document preprocessing also registers the same output as a derived session dataset for later discover/inspect/Planner/Grafana Query use. Display names never control physical paths. No CSV or SQLite input intermediate is created.
 
 The image pins NumPy, SciPy, pandas, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna. PyTorch and TensorFlow are intentionally omitted because their image and runtime cost is disproportionate for this bounded tabular-analysis service.
 

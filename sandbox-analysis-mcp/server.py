@@ -10,6 +10,7 @@ import hashlib
 import io
 import importlib.util
 import json
+import math
 import os
 import sys
 import tempfile
@@ -38,6 +39,7 @@ workflow_node = load_module("workflow_node", ROOT / "workflow_node.py")
 artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 artifact_assets = load_module("artifact_assets", ROOT / "artifact_assets.py")
+uploaded_datasets = load_module("uploaded_datasets", ROOT / "uploaded_datasets.py")
 ontology_contract = load_module("ontology_contract", ROOT / "ontology_contract.py")
 ArtifactStore = artifact_store.ArtifactStore
 WorkflowContractError = workflow_node.WorkflowContractError
@@ -54,7 +56,7 @@ try:
 except ValueError:
     PORT = 8777
 
-SERVER_INFO = {"name": "sandbox-analysis-mcp", "version": "0.4.0"}
+SERVER_INFO = {"name": "sandbox-analysis-mcp", "version": "0.5.0"}
 PROTOCOL = "2025-03-26"
 MAX_CODE_BYTES = 32 * 1024
 MAX_RPC_BODY_BYTES = 128 * 1024
@@ -63,6 +65,9 @@ MAX_OUTPUT_BYTES = 5 * 1024 * 1024
 MAX_LOG_BYTES = 256 * 1024
 MAX_INLINE_RESULT_BYTES = 32 * 1024
 MAX_OUTPUT_FIELDS = 200
+MAX_DERIVED_ROWS = 5_000
+MAX_DERIVED_BYTES = 4 * 1024 * 1024
+DERIVED_FRAME_MIME = "application/vnd.ask-o11y.dataframe+json"
 DEFAULT_SEED = 42
 ARTIFACT_PUBLIC_BASE = os.environ.get("ARTIFACT_PUBLIC_BASE", "http://127.0.0.1:8777").rstrip("/")
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
@@ -71,7 +76,7 @@ ARTIFACTS.cleanup_expired()
 TOOLS = [
     {
         "name": "execute_python_analysis",
-        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. The sandbox receives df, pd, np, display(value), and emit(value, name=None). Name JSON results *.json for bounded inline return and DataFrame/string downloads *.csv for a signed URL. The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna; use Matplotlib PNG when a plot may become a Grafana panel.",
+        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. The sandbox receives df, pd, np, display(value), emit(value, name=None), and emit_frame(dataframe, name=None). emit_frame returns a derived_frame_ref for a later Sandbox step. Name JSON results *.json for bounded inline return and DataFrame/string downloads *.csv for a signed URL. The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna; use Matplotlib PNG when a plot may become a Grafana panel.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -82,6 +87,20 @@ TOOLS = [
             "required": ["frame_ref", "python_code"],
             "additionalProperties": False,
         },
+    },
+    {
+        "name": "execute_python_preprocessing",
+        "description": "Execute generated Python over one authorized original uploaded CSV/XLSX document in a fresh network-denied OpenSandbox after preview confirmation. The sandbox receives document_path, input_format, pd, np, emit, and emit_frame. emit_frame returns both a derived_frame_ref and a session-owned derived_dataset_id for later Sandbox or Grafana Query steps.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "document_ref": {"type": "string", "description": "Opaque authorized uploaded-document artifact ref returned by Grafana Query inspect_dataset."},
+                "python_code": {"type": "string", "maxLength": MAX_CODE_BYTES, "description": "Python source executed only inside the isolated sandbox."},
+                "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295, "default": DEFAULT_SEED}
+            },
+            "required": ["document_ref", "python_code"],
+            "additionalProperties": False
+        }
     },
     {
         "name": "list_python_analyses",
@@ -205,6 +224,22 @@ def read_authorized_frame(context: dict[str, str], frame_ref: str) -> tuple[str,
     return run_id, frames[0]
 
 
+def read_authorized_document(context: dict[str, str], document_ref: str) -> tuple[bytes, dict[str, Any]]:
+    _run_id, parts = parse_artifact_ref(document_ref)
+    if parts != ("uploaded-document",):
+        raise WorkflowContractError("document_ref must reference an uploaded-document artifact")
+    document = ARTIFACTS.read_json(context, document_ref)
+    if not isinstance(document, dict) or not isinstance(document.get("upload_id"), str) or not isinstance(document.get("session_id"), str):
+        raise WorkflowContractError("uploaded document artifact is invalid")
+    path, metadata = uploaded_datasets.read_source(context, document["upload_id"], document["session_id"])
+    if not 0 < path.stat().st_size <= uploaded_datasets.MAX_UPLOAD_BYTES:
+        raise WorkflowContractError("uploaded document size is invalid")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != document.get("source_sha256") or metadata.get("source_format") != document.get("source_format"):
+        raise WorkflowContractError("uploaded document hash/format mismatch")
+    return raw, document
+
+
 def validate_frame(frame: dict[str, Any]) -> tuple[list[str], int]:
     fields = frame.get("schema", {}).get("fields")
     values = frame.get("data", {}).get("values")
@@ -255,6 +290,10 @@ def wrapped_code(python_code: str, seed: int) -> str:
     return f"from capture import run\nrun({python_code!r}, '/tmp/input-frame.json', {seed})"
 
 
+def wrapped_document_code(python_code: str, input_format: str, seed: int) -> str:
+    return f"from capture import run_document\nrun_document({python_code!r}, '/tmp/input-document.{input_format}', {input_format!r}, {seed})"
+
+
 def serialize_execution(execution: Any) -> dict[str, Any]:
     results = []
     for result in execution.result:
@@ -295,7 +334,7 @@ def read_captured_outputs(filesystem: Any) -> list[dict[str, Any]]:
         raise WorkflowContractError("sandbox output manifest is invalid") from exc
     if not isinstance(manifest, list) or len(manifest) > 20:
         raise WorkflowContractError("sandbox output manifest must contain at most 20 items")
-    allowed_mime = {"text/plain", "text/csv", "text/html", "image/png", "application/json", "application/vnd.plotly.v1+json"}
+    allowed_mime = {"text/plain", "text/csv", "text/html", "image/png", "application/json", "application/vnd.plotly.v1+json", DERIVED_FRAME_MIME}
     outputs = []
     total = len(manifest_bytes)
     output_root = Path("/tmp/sandbox-output")
@@ -350,7 +389,7 @@ def read_input_audit(filesystem: Any) -> dict[str, Any]:
     return audit
 
 
-def execute_opensandbox(frame_bundle_json: str, python_code: str, seed: int) -> dict[str, Any]:
+def execute_opensandbox_input(input_path: str, input_data: str | bytes, source: str) -> dict[str, Any]:
     from code_interpreter.models.code import SupportedLanguage
     from code_interpreter.sync.code_interpreter import CodeInterpreterSync
     from opensandbox.config import ConnectionConfigSync
@@ -381,10 +420,9 @@ def execute_opensandbox(frame_bundle_json: str, python_code: str, seed: int) -> 
             volumes=policy["volumes"],
             connection_config=connection,
         )
-        sandbox.files.write_files([WriteEntry(path="/tmp/input-frame.json", data=frame_bundle_json, mode=600)])
-        interpreter = CodeInterpreterSync.create(sandbox=sandbox)
-        execution = interpreter.codes.run(
-            wrapped_code(python_code, seed),
+        sandbox.files.write_files([WriteEntry(path=input_path, data=input_data, mode=600)])
+        execution = CodeInterpreterSync.create(sandbox=sandbox).codes.run(
+            source,
             language=SupportedLanguage.PYTHON,
             handlers=ExecutionHandlersSync(skip_accumulation=True),
         )
@@ -402,6 +440,14 @@ def execute_opensandbox(frame_bundle_json: str, python_code: str, seed: int) -> 
             with contextlib.suppress(Exception):
                 sandbox.kill()
             sandbox.close()
+
+
+def execute_opensandbox(frame_bundle_json: str, python_code: str, seed: int) -> dict[str, Any]:
+    return execute_opensandbox_input("/tmp/input-frame.json", frame_bundle_json, wrapped_code(python_code, seed))
+
+
+def execute_document_opensandbox(document_bytes: bytes, input_format: str, python_code: str, seed: int) -> dict[str, Any]:
+    return execute_opensandbox_input(f"/tmp/input-document.{input_format}", document_bytes, wrapped_document_code(python_code, input_format, seed))
 
 
 def output_asset_summary(execution: dict[str, Any], execution_ref: str) -> list[dict[str, Any]]:
@@ -468,6 +514,70 @@ def output_download_summary(execution: dict[str, Any], execution_ref: str, conte
             "expires_at": expires_at,
         })
     return downloads
+
+
+def parse_derived_frame(execution: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    candidates = []
+    for result in execution.get("results", []):
+        mime = result.get("mime") if isinstance(result, dict) else None
+        payload = mime.get(DERIVED_FRAME_MIME) if isinstance(mime, dict) else None
+        if isinstance(payload, str):
+            candidates.append((payload, result.get("display_name") or "derived-data.csv"))
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise WorkflowContractError("sandbox may emit exactly one derived frame")
+    raw, display_name = candidates[0]
+    if len(raw.encode("utf-8")) > MAX_DERIVED_BYTES:
+        raise WorkflowContractError("derived frame exceeds bounded output limit")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise WorkflowContractError("derived frame JSON is invalid") from exc
+    if not isinstance(value, dict) or set(value) != {"format", "columns", "types", "data"} or value.get("format") != "ask-o11y-dataframe-v1":
+        raise WorkflowContractError("derived frame contract is invalid")
+    columns, logical_types, rows = value["columns"], value["types"], value["data"]
+    allowed_types = {"string", "number", "boolean", "time"}
+    if not isinstance(columns, list) or not 1 <= len(columns) <= MAX_OUTPUT_FIELDS or any(not isinstance(column, str) or not column for column in columns) or len(set(columns)) != len(columns):
+        raise WorkflowContractError("derived frame fields are invalid")
+    if not isinstance(logical_types, list) or len(logical_types) != len(columns) or any(item not in allowed_types for item in logical_types):
+        raise WorkflowContractError("derived frame types are invalid")
+    if not isinstance(rows, list) or not rows or len(rows) > MAX_DERIVED_ROWS:
+        raise WorkflowContractError("derived frame rows are invalid")
+    for row in rows:
+        if not isinstance(row, list) or len(row) != len(columns):
+            raise WorkflowContractError("derived frame row width is invalid")
+        for cell in row:
+            if cell is not None and (isinstance(cell, (dict, list)) or not isinstance(cell, (str, int, float, bool)) or isinstance(cell, float) and not math.isfinite(cell)):
+                raise WorkflowContractError("derived frame contains unsupported cell values")
+    fields = [{"name": name, "type": logical_type} for name, logical_type in zip(columns, logical_types, strict=True)]
+    values = [[row[index] for row in rows] for index in range(len(columns))]
+    return {"name": str(display_name), "schema": {"fields": fields}, "data": {"values": values}}, str(display_name)
+
+
+def derived_frame_csv(frame: dict[str, Any]) -> bytes:
+    fields = [field["name"] for field in frame["schema"]["fields"]]
+    values = frame["data"]["values"]
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(fields)
+    writer.writerows(zip(*values, strict=True))
+    return output.getvalue().encode("utf-8")
+
+
+def persist_derived_data(context: dict[str, str], execution: dict[str, Any], output_run_id: str, document: dict[str, Any] | None = None) -> tuple[dict[str, str], dict[str, Any] | None]:
+    parsed = parse_derived_frame(execution)
+    if parsed is None:
+        return {}, None
+    frame, display_name = parsed
+    frame_ref = ARTIFACTS.write_json(context, output_run_id, "grafana-frame", [frame])
+    refs = {"derived_frame_ref": frame_ref}
+    summary = {"derived_frame_ref": frame_ref, "fields": frame["schema"]["fields"], "rows": len(frame["data"]["values"][0])}
+    if document is not None:
+        filename = (Path(display_name).stem.strip(". ")[:200] or "derived-data") + ".csv"
+        metadata = uploaded_datasets.store_upload(context=context, session_id=document["session_id"], filename=filename, raw=derived_frame_csv(frame), parent_upload_id=document["upload_id"])
+        summary.update({"derived_dataset_id": metadata["id"], "filename": metadata["filename"], "parent_upload_id": document["upload_id"]})
+    return refs, summary
 
 
 def output_summary(execution: dict[str, Any]) -> dict[str, Any]:
@@ -606,9 +716,15 @@ def execute_python_analysis(
     execution_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-execution", execution)
     summary["assets"] = output_asset_summary(execution, execution_ref)
     summary["downloads"] = output_download_summary(execution, execution_ref, context)
-    provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
-    refs = {"execution_ref": execution_ref, "provenance_ref": provenance_ref}
     execution_error = execution.get("error")
+    try:
+        derived_refs, derived_summary = ({}, None) if execution_error else persist_derived_data(context, execution, output_run_id)
+    except (OSError, PermissionError, ValueError, WorkflowContractError) as exc:
+        return error_response(step=step, error=f"derived frame rejected: {exc}", recoverable=False, instruction="Stop; the Sandbox output did not satisfy the derived-data contract.", evidence={"execution_ref": execution_ref})
+    if derived_summary is not None:
+        summary["derived_data"] = derived_summary
+    provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
+    refs = {"execution_ref": execution_ref, "provenance_ref": provenance_ref, **derived_refs}
     if execution_error:
         error_name = execution_error.get("name") if isinstance(execution_error, dict) else None
         if error_name in {"SyntaxError", "IndentationError"}:
@@ -637,12 +753,104 @@ def execute_python_analysis(
     )
 
 
+def execute_python_preprocessing(
+    args: dict[str, Any],
+    executor: Callable[[bytes, str, str, int], dict[str, Any]] = execute_document_opensandbox,
+) -> dict[str, Any]:
+    step = "execute_python_preprocessing"
+    unexpected = sorted(set(args) - {"document_ref", "python_code", "seed", "context", "_server_context"})
+    if unexpected:
+        return error_response(step=step, error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; pass only the declared document ref, Python source, and seed.")
+    document_ref = args.get("document_ref")
+    python_code = args.get("python_code")
+    seed = args.get("seed", DEFAULT_SEED)
+    if not isinstance(document_ref, str):
+        return error_response(step=step, error="document_ref is required", recoverable=False, instruction="Stop; inspect an authorized uploaded dataset first.")
+    if not isinstance(python_code, str) or not python_code.strip():
+        return error_response(step=step, error="python_code is required", recoverable=False, instruction="Stop; provide the confirmed Python preprocessing source.")
+    code_bytes = python_code.encode("utf-8")
+    if len(code_bytes) > MAX_CODE_BYTES:
+        return error_response(step=step, error=f"python_code exceeds {MAX_CODE_BYTES} bytes", recoverable=False, instruction="Stop; reduce the code to the requested preprocessing only.")
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 4294967295:
+        return error_response(step=step, error="seed must be an integer from 0 to 4294967295", recoverable=False, instruction="Stop; provide a valid deterministic seed.")
+    try:
+        context = context_from_args(args)
+        document_bytes, document = read_authorized_document(context, document_ref)
+        input_format = document.get("source_format")
+        if input_format not in {"csv", "xlsx"}:
+            raise WorkflowContractError("uploaded document format is unsupported")
+    except (PermissionError, OSError, WorkflowContractError, ValueError, TypeError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; the uploaded document is invalid or unauthorized.")
+    code_sha256 = hashlib.sha256(code_bytes).hexdigest()
+    try:
+        execution = executor(document_bytes, input_format, python_code, seed)
+    except Exception as exc:
+        return error_response(step=step, error=f"sandbox execution unavailable: {type(exc).__name__}", recoverable=False, instruction="Stop; inspect service-side logs; never expose input data through exception text or execute this code on the MCP host.")
+    if len(json.dumps(execution, ensure_ascii=False).encode("utf-8")) > MAX_OUTPUT_BYTES:
+        return error_response(step=step, error=f"sandbox output exceeds {MAX_OUTPUT_BYTES} bytes", recoverable=False, instruction="Stop; request smaller displayed outputs.")
+    validity = execution.get("input_audit")
+    if validity != {"input_rows": 0, "valid_rows": 0, "excluded_rows": 0, "rules": []}:
+        return error_response(step=step, error="sandbox execution returned an invalid trusted document audit", recoverable=False, instruction="Stop; do not trust outputs without host-verified input evidence.")
+    settings = runtime_settings() if executor is execute_document_opensandbox else {"image": "self-check", "runtime_class": "fake"}
+    summary = output_summary(execution)
+    output_run_id = ARTIFACTS.create_run(context)
+    code_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-code", {"sha256": code_sha256, "source": python_code})
+    provenance = {
+        "runtime": "opensandbox",
+        "runtime_class": settings["runtime_class"],
+        "server_config_sha256": settings.get("server_config_sha256"),
+        "image": settings["image"],
+        "code_sha256": code_sha256,
+        "code_ref": code_ref,
+        "input_document_ref": document_ref,
+        "input_upload_id": document["upload_id"],
+        "input_format": input_format,
+        "input_fields": [],
+        "seed": seed,
+        "network": "deny",
+        "resource": sandbox_policy()["resource"],
+        "limits": {"timeout_seconds": sandbox_policy()["timeout_seconds"], "source_bytes": MAX_CODE_BYTES, "document_bytes": uploaded_datasets.MAX_UPLOAD_BYTES, "captured_execution_bytes": MAX_OUTPUT_BYTES, "derived_frame_bytes": MAX_DERIVED_BYTES, "derived_rows": MAX_DERIVED_ROWS, "derived_fields": MAX_OUTPUT_FIELDS},
+        "validity": validity,
+        "output_summary": summary,
+        "parent_provenance_ref": None,
+    }
+    execution_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-execution", execution)
+    summary["assets"] = output_asset_summary(execution, execution_ref)
+    summary["downloads"] = output_download_summary(execution, execution_ref, context)
+    execution_error = execution.get("error")
+    try:
+        derived_refs, derived_summary = ({}, None) if execution_error else persist_derived_data(context, execution, output_run_id, document)
+    except (OSError, PermissionError, ValueError, WorkflowContractError) as exc:
+        return error_response(step=step, error=f"derived frame rejected: {exc}", recoverable=False, instruction="Stop; the Sandbox output did not satisfy the derived-data contract.", evidence={"execution_ref": execution_ref})
+    if derived_summary is not None:
+        summary["derived_data"] = derived_summary
+    provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
+    refs = {"execution_ref": execution_ref, "provenance_ref": provenance_ref, **derived_refs}
+    if execution_error:
+        error_name = execution_error.get("name") if isinstance(execution_error, dict) else None
+        if error_name in {"SyntaxError", "IndentationError"}:
+            return error_response(step=step, error=f"generated Python has a {error_name}; fix the syntax and resubmit complete corrected code", recoverable=True, instruction="Call execute_python_preprocessing again with the same document_ref and corrected complete code.", evidence={"refs": refs, "code_sha256": code_sha256})
+        return error_response(step=step, error="sandbox Python failed; details retained only in the authorized execution artifact", recoverable=False, instruction="Stop and report the opaque execution_ref; do not expose exception values or silently execute replacement code.", evidence={"refs": refs, "code_sha256": code_sha256})
+    return success_response(
+        step=step,
+        run_id=output_run_id,
+        refs=refs,
+        instruction="Use derived_frame_ref for the next Sandbox step or derived_dataset_id with discover/inspect/Planner/Grafana Query. Both remain owner/session bound.",
+        evidence={"input_format": input_format, "source_sha256": document.get("source_sha256")},
+        output_summary=summary,
+        derived_frame_ref=derived_refs.get("derived_frame_ref"),
+        derived_dataset_id=derived_summary.get("derived_dataset_id") if derived_summary else None,
+        provenance={key: value for key, value in provenance.items() if key != "code_ref"},
+    )
+
+
 def read_provenance(context: dict[str, str], provenance_ref: str) -> dict[str, Any]:
     _run_id, parts = parse_artifact_ref(provenance_ref)
     if parts != ("sandbox-provenance",):
         raise WorkflowContractError("provenance_ref must reference sandbox-provenance")
     provenance = ARTIFACTS.read_json(context, provenance_ref)
-    if not isinstance(provenance, dict) or not isinstance(provenance.get("input_frame_ref"), str) or not isinstance(provenance.get("code_ref"), str):
+    input_refs = [provenance.get("input_frame_ref"), provenance.get("input_document_ref")] if isinstance(provenance, dict) else []
+    if not isinstance(provenance, dict) or sum(isinstance(value, str) for value in input_refs) != 1 or not isinstance(provenance.get("code_ref"), str):
         raise WorkflowContractError("sandbox provenance artifact is incomplete")
     return provenance
 
@@ -687,7 +895,7 @@ def inspect_python_analysis(args: dict[str, Any]) -> dict[str, Any]:
     return success_response(
         step="inspect_python_analysis",
         run_id=parse_artifact_ref(provenance_ref)[0],
-        instruction="Revise the complete Python source with revise_python_analysis; raw frame rows are intentionally not returned.",
+        instruction="Inspect the retained source and outputs; raw input rows/document bytes are intentionally not returned.",
         python_code=code["source"],
         provenance_ref=provenance_ref,
         code_sha256=provenance.get("code_sha256"),
@@ -709,6 +917,8 @@ def revise_python_analysis(args: dict[str, Any], executor: Callable[[str, str, i
         provenance = read_provenance(context, provenance_ref)
     except (PermissionError, WorkflowContractError) as exc:
         return error_response(step="revise_python_analysis", error=str(exc), recoverable=False, instruction="Stop; the prior revision is invalid or unauthorized.")
+    if not isinstance(provenance.get("input_frame_ref"), str):
+        return error_response(step="revise_python_analysis", error="prior revision used a document input", recoverable=False, instruction="Call execute_python_preprocessing with the retained input_document_ref and complete replacement code.")
     return execute_python_analysis(
         {"frame_ref": provenance["input_frame_ref"], "python_code": args.get("python_code"), "seed": args.get("seed", DEFAULT_SEED), "_server_context": context},
         executor=executor,
@@ -749,6 +959,7 @@ def handle_rpc(msg: dict[str, Any]):
         else:
             handlers = {
                 "execute_python_analysis": execute_python_analysis,
+                "execute_python_preprocessing": execute_python_preprocessing,
                 "list_python_analyses": list_python_analyses,
                 "inspect_python_analysis": inspect_python_analysis,
                 "revise_python_analysis": revise_python_analysis,
@@ -824,8 +1035,10 @@ class Handler(BaseHTTPRequestHandler):
 def self_check() -> None:
     global ARTIFACTS
     original = ARTIFACTS
+    original_upload_root = getattr(uploaded_datasets, "UPLOAD_ROOT")
     with tempfile.TemporaryDirectory() as tmp:
         ARTIFACTS = ArtifactStore(Path(tmp) / "runs")
+        setattr(uploaded_datasets, "UPLOAD_ROOT", Path(tmp) / "uploads")
         context = {"org_id": "1", "user_id": "self-check"}
         source_run = ARTIFACTS.create_run(context)
         frame_ref = ARTIFACTS.write_json(
@@ -848,6 +1061,8 @@ def self_check() -> None:
             except json.JSONDecodeError as exc:
                 raise AssertionError("invalid test frame bundle") from exc
             observed.update({"bundle": bundle, "code": code, "seed": seed})
+            input_rows = len(bundle["frame"]["data"]["values"][0])
+            excluded_rows = 1 if bundle["validity_rules"] else 0
             return {
                 "execution_id": "fake",
                 "execution_count": 1,
@@ -862,7 +1077,7 @@ def self_check() -> None:
                 "stderr": [],
                 "error": None,
                 "complete": {"timestamp": 2, "execution_time_in_millis": 1},
-                "input_audit": {"input_rows": 3, "valid_rows": 2, "excluded_rows": 1, "rules": bundle["validity_rules"]},
+                "input_audit": {"input_rows": input_rows, "valid_rows": input_rows - excluded_rows, "excluded_rows": excluded_rows, "rules": bundle["validity_rules"]},
             }
 
         args = {"frame_ref": frame_ref, "python_code": "display(df)", "seed": 7, "_server_context": context}
@@ -887,8 +1102,31 @@ def self_check() -> None:
         assert observed["bundle"]["validity_rules"][0]["field"] == "heat_rate_valid"
         assert "display(df)" not in json.dumps(result) and '"values"' not in json.dumps(result)
         assert ARTIFACTS.read_json(context, result["refs"]["execution_ref"])["results"][3]["mime"]["image/png"] == "aW1hZ2U="
+
+        source = uploaded_datasets.store_upload(context=context, session_id="session-self-check", filename="source.csv", raw=b"old_a,old_b\n1,3\n2,4\n")
+        document_run = ARTIFACTS.create_run(context)
+        document_ref = ARTIFACTS.write_json(context, document_run, "uploaded-document", {"upload_id": source["id"], "session_id": source["session_id"], "filename": source["filename"], "sheet": None, "source_format": source["source_format"], "source_sha256": source["source_sha256"]})
+        derived_payload = json.dumps({"format": "ask-o11y-dataframe-v1", "columns": ["clean_a", "clean_b"], "types": ["number", "number"], "data": [[1, 3], [2, 4]]})
+
+        def fake_document_executor(document_bytes: bytes, input_format: str, code: str, seed: int) -> dict[str, Any]:
+            assert document_bytes == b"old_a,old_b\n1,3\n2,4\n" and input_format == "csv" and code == "emit_frame(cleaned)" and seed == 9
+            return {"execution_id": "document", "results": [{"text": None, "mime": {DERIVED_FRAME_MIME: derived_payload}, "display_name": "cleaned-data"}], "stdout": [], "stderr": [], "error": None, "complete": {}, "input_audit": {"input_rows": 0, "valid_rows": 0, "excluded_rows": 0, "rules": []}}
+
+        preprocessed = execute_python_preprocessing({"document_ref": document_ref, "python_code": "emit_frame(cleaned)", "seed": 9, "_server_context": context}, executor=fake_document_executor)
+        assert preprocessed["ok"] and preprocessed["derived_frame_ref"].endswith("/grafana-frame") and preprocessed["derived_dataset_id"].startswith("upload_")
+        foreign_document = execute_python_preprocessing({"document_ref": document_ref, "python_code": "emit_frame(cleaned)", "_server_context": {"org_id": "2", "user_id": "attacker"}}, executor=lambda *_: (_ for _ in ()).throw(AssertionError("must not execute")))
+        assert not foreign_document["ok"]
+        invalid_frame_execution = fake_document_executor(b"old_a,old_b\n1,3\n2,4\n", "csv", "emit_frame(cleaned)", 9)
+        invalid_frame_execution["results"][0]["mime"][DERIVED_FRAME_MIME] = json.dumps({"format": "ask-o11y-dataframe-v1", "columns": ["x"], "types": ["number"], "data": [[1, 2]]})
+        invalid_derived = execute_python_preprocessing({"document_ref": document_ref, "python_code": "emit_frame(cleaned)", "seed": 9, "_server_context": context}, executor=lambda *_: invalid_frame_execution)
+        assert not invalid_derived["ok"] and "derived frame rejected" in invalid_derived["error"]
+        derived_upload = uploaded_datasets.inspect_upload(context, preprocessed["derived_dataset_id"], "session-self-check")
+        assert derived_upload["parent_upload_id"] == source["id"] and [field["name"] for field in derived_upload["fields"]] == ["clean_a", "clean_b"]
+        chained = execute_python_analysis({"frame_ref": preprocessed["derived_frame_ref"], "python_code": "display(df)", "seed": 7, "_server_context": context}, executor=fake_executor)
+        assert chained["ok"] and chained["provenance"]["input_fields"] == ["clean_a", "clean_b"], chained
+
         listed = list_python_analyses({"_server_context": context})
-        assert listed["ok"] and listed["analyses"][0]["provenance_ref"] == result["refs"]["provenance_ref"], listed
+        assert listed["ok"] and any(item["provenance_ref"] == result["refs"]["provenance_ref"] for item in listed["analyses"]), listed
         inspected = inspect_python_analysis({"provenance_ref": result["refs"]["provenance_ref"], "_server_context": context})
         assert inspected["ok"] and inspected["python_code"] == "display(df)" and "values" not in inspected
         revised = revise_python_analysis({"provenance_ref": result["refs"]["provenance_ref"], "python_code": "display(df.head())", "seed": 8, "_server_context": context}, executor=fake_executor)
@@ -907,7 +1145,8 @@ def self_check() -> None:
             raise AssertionError("invalid test tool response") from exc
         assert not payload["ok"] and "unsupported tool arguments" in payload["error"]
     ARTIFACTS = original
-    print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "bounded_inline_results", "signed_csv_download", "200_field_output_summary", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))
+    setattr(uploaded_datasets, "UPLOAD_ROOT", original_upload_root)
+    print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "document_preprocessing", "foreign_document_rejected", "invalid_derived_frame_rejected", "derived_frame_chaining", "derived_session_dataset", "bounded_inline_results", "signed_csv_download", "200_field_output_summary", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))
 
 
 def main() -> int:

@@ -37,7 +37,7 @@ RETIRED_PATHS = [
     ROOT / "docs/research/ask-o11y-pi-agent-loop-assessment.md",
 ]
 ACTIVE_PORTS = [8768, 8771, 8772, 8773, 8777]
-RETIRED_PORTS = [8765, 8769, 8771, 8774, 8775, 8776]
+RETIRED_PORTS = [8765, 8769, 8774, 8775, 8776]
 
 
 def port_open(port: int) -> bool:

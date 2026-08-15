@@ -23,6 +23,8 @@ def main() -> int:
         csv_result = uploads.store_upload(context=context, session_id="session-one", filename="sales.csv", raw=b"code,amount\n001,10\n002,20\n")
         assert csv_result["rows"] == 2 and csv_result["columns"] == 2
         assert csv_result["fields"] == [{"name": "code", "type": "string"}, {"name": "amount", "type": "number"}]
+        source_path, source_metadata = uploads.read_source(context, csv_result["id"], "session-one")
+        assert source_path.read_bytes() == b"code,amount\n001,10\n002,20\n" and source_metadata["source_format"] == "csv"
         wide_headers = [f"field_{index}" for index in range(uploads.MAX_UPLOAD_FIELDS)]
         wide_csv = (",".join(wide_headers) + "\n" + ",".join("1" for _ in wide_headers) + "\n").encode()
         assert uploads.store_upload(context=context, session_id="session-wide-csv", filename="wide.csv", raw=wide_csv)["columns"] == 200
@@ -73,6 +75,8 @@ def main() -> int:
             raise AssertionError("multi-sheet workbook did not require selection")
         xlsx_result = uploads.store_upload(context=context, session_id="session-two", filename="book.xlsx", raw=buffer.getvalue(), sheet="Data")
         assert xlsx_result["rows"] == 2 and xlsx_result["columns"] == 200 and xlsx_result["sheet"] == "Data"
+        xlsx_source, _xlsx_metadata = uploads.read_source(context, xlsx_result["id"], "session-two")
+        assert xlsx_source.read_bytes() == buffer.getvalue()
         normalized = (uploads.UPLOAD_ROOT / xlsx_result["id"] / "data.csv").read_text()
         assert "=SUM" not in normalized
 

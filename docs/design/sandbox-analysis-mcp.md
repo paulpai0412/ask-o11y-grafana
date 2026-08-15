@@ -30,9 +30,10 @@ The external endpoints bind loopback, require the shared service bearer, and use
 
 ## Sandbox contract
 
-Sandbox Analysis exposes four tools:
+Sandbox Analysis exposes five tools:
 
 - `execute_python_analysis`: execute a new revision against one authorized frame.
+- `execute_python_preprocessing`: execute generated preprocessing against one authorized original uploaded CSV/XLSX document; `emit_frame` returns both a chained frame and derived session dataset.
 - `list_python_analyses`: list retained revisions for the authenticated context.
 - `inspect_python_analysis`: return retained source and compact metadata, never frame rows.
 - `revise_python_analysis`: run complete replacement source against a prior revision's authorized frame.
@@ -49,13 +50,13 @@ A minimal call is:
 
 Rules:
 
-- `frame_ref` must be exactly one authorized `grafana-frame`.
+- `frame_ref` must be exactly one authorized `grafana-frame`; `document_ref` must be an owner/session-bound `uploaded-document` ref returned by upload inspection.
 - The trusted input bundle carries native Grafana columnar JSON and query-plan validity rules.
 - Trusted bootstrap constructs and filters `df` before generated code runs, then unlinks the input bundle.
 - Source is UTF-8 and limited to 32 KiB. The MCP hashes and transfers it but never executes it locally.
-- The sandbox receives `df`, `pd`, `np`, `display(value)`, and `emit(value, name=None)`. A `.json` name captures JSON; a `.csv` name captures a downloadable CSV.
+- Frame execution receives `df`, `pd`, `np`, `display`, `emit`, and `emit_frame`. Document preprocessing receives `document_path`, `input_format`, `pd`, `np`, `emit`, and `emit_frame`; original host paths are never exposed. A `.json` name captures JSON; a `.csv` name captures a downloadable CSV.
 - An analysis dashboard is a static report: generated Python emits a Matplotlib PNG plus optional textual summary; no Sandbox output becomes a native Grafana chart target.
-- Output names are sanitized metadata and never filesystem paths.
+- Output names are sanitized metadata and never filesystem paths. `emit_frame` accepts one non-empty DataFrame with at most 200 fields, 5,000 rows, and 4 MiB encoded content; host validation persists it as `derived_frame_ref`, and document preprocessing also creates a parent-linked session upload dataset.
 - Raw frames, query bodies, physical paths, credentials, full MIME payloads, stdout logs, and exception values are not returned to the model. Only explicitly emitted text/JSON is returned inline, bounded to 32 KiB total.
 
 Success returns opaque refs, validity evidence, provenance, and compact output metadata:
@@ -105,7 +106,9 @@ Every call creates and destroys one sandbox. No kernel persists across turns.
 | memory | 1 GiB |
 | source | 32 KiB |
 | input bundle | 16 MiB |
+| original uploaded document | 50 MiB, CSV/XLSX only |
 | captured execution | 5 MiB |
+| derived frame | 200 fields, 5,000 rows, 4 MiB |
 | inline text/JSON | 32 KiB total |
 | signed CSV download | 4 MiB each, artifact-retention expiry |
 | output field summary | 200 fields |

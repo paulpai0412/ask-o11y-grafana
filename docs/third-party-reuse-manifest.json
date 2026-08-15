@@ -102,12 +102,13 @@
     {
       "name": "Sandbox analysis image package set",
       "status": "adopted-pinned-image-dependencies",
-      "image": "ask-o11y-sandbox-analysis@sha256:eefd0c1d05b365249c41245ae7f55163ebe322f46b3ff1b752e76e4c00b92c21",
+      "image": "ask-o11y-sandbox-analysis@sha256:787a5ebd9c4d87757f1148b2db23ebefdefa80f069e58dfa613bfaa507379f0a",
       "pinfile": "sandbox-analysis-mcp/Dockerfile",
       "local_patches": [],
       "components": [
         {"name": "numpy", "version": "2.4.6", "license": "BSD-3-Clause", "url": "https://github.com/numpy/numpy"},
         {"name": "scipy", "version": "1.18.0", "license": "BSD-3-Clause", "url": "https://github.com/scipy/scipy"},
+        {"name": "openpyxl", "version": "3.1.5", "license": "MIT", "url": "https://foss.heptapod.net/openpyxl/openpyxl"},
         {"name": "matplotlib", "version": "3.11.1", "license": "PSF-2.0/BSD-compatible", "url": "https://github.com/matplotlib/matplotlib"},
         {"name": "seaborn", "version": "0.13.2", "license": "BSD-3-Clause", "url": "https://github.com/mwaskom/seaborn"},
         {"name": "plotly", "version": "6.9.0", "license": "MIT", "url": "https://github.com/plotly/plotly.py"},
