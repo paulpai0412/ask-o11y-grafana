@@ -48,7 +48,7 @@ def main() -> int:
         result = server.execute_python_analysis(
             {
                 "frame_ref": frame_ref,
-                "python_code": "import imblearn, lightgbm, optuna, plotly, scipy, seaborn, shap, statsmodels, xgboost\nfrom sklearn.ensemble import RandomForestRegressor\nimport matplotlib.pyplot as plt\nX = df[['load_mw', 'ambient_c']]\nmodel = RandomForestRegressor(n_estimators=20, random_state=42).fit(X, df['heat_rate'])\nvalues = shap.TreeExplainer(model)(X)\ndisplay(df[['timestamp', 'heat_rate']])\nshap.plots.beeswarm(values, show=False)\nemit(plt.gcf(), name='shap-beeswarm')",
+                "python_code": "import catboost, imblearn, lightgbm, optuna, plotly, scipy, seaborn, shap, statsmodels, xgboost\nfrom sklearn.ensemble import RandomForestRegressor\nimport matplotlib.pyplot as plt\nX = df[['load_mw', 'ambient_c']]\nmodel = RandomForestRegressor(n_estimators=20, random_state=42).fit(X, df['heat_rate'])\nvalues = shap.TreeExplainer(model)(X)\ndisplay(df[['timestamp', 'heat_rate']])\nshap.plots.beeswarm(values, show=False)\nemit(plt.gcf(), name='shap-beeswarm')",
                 "seed": 42,
                 "_server_context": context,
             }
@@ -80,7 +80,7 @@ def main() -> int:
             "output_summary": summary,
             "validity": result["provenance"]["validity"],
             "cross_conversation": {"listed": len(listed.get("analyses", [])), "inspect_code_sha256": inspected.get("code_sha256")},
-            "sandbox_packages_imported": ["numpy", "scipy", "pandas", "matplotlib", "seaborn", "plotly", "scikit-learn", "statsmodels", "shap", "xgboost", "lightgbm", "imbalanced-learn", "optuna"],
+            "sandbox_packages_imported": ["numpy", "scipy", "pandas", "matplotlib", "seaborn", "plotly", "scikit-learn", "statsmodels", "shap", "catboost", "xgboost", "lightgbm", "imbalanced-learn", "optuna"],
             "runtime_config_attested": len(str(result["provenance"].get("server_config_sha256") or "")) == 64 and result["provenance"].get("runtime_class") == "runc",
             "enforced_limits": result["provenance"].get("limits"),
             "shap_plot_captured": "image/png" in summary.get("mime_types", []),

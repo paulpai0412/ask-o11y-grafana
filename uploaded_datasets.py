@@ -14,6 +14,8 @@ import secrets
 import shutil
 import time
 import zipfile
+import importlib.util
+import sys
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -185,6 +187,7 @@ def store_upload(*, context: dict[str, str], session_id: str, filename: str, raw
             "expires_at": int(time.time()) + UPLOAD_RETENTION_SECONDS,
         }
         (root / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        metadata["ontology_annotated"] = _annotate_best_effort(root, upload_id, context)
         return metadata
     except Exception:
         shutil.rmtree(root, ignore_errors=True)
@@ -205,6 +208,20 @@ def _load_metadata(upload_id: str) -> dict[str, Any]:
     if expired:
         raise PermissionError("uploaded dataset expired")
     return metadata
+
+
+def _annotate_best_effort(root: Path, upload_id: str, context: dict[str, str]) -> bool:
+    """Workstream A: best-effort ontology candidate + analysis hints; never fails an upload."""
+    try:
+        spec = importlib.util.spec_from_file_location("upload_semantics", Path(__file__).resolve().parent / "upload_semantics.py")
+        if spec is None or spec.loader is None:
+            return False
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module.annotate_upload(root, dataset_id=upload_id, org_id=context["org_id"], user_id=context["user_id"]) is not None
+    except Exception:
+        return False
 
 
 def inspect_upload(context: dict[str, str], upload_id: str, session_id: str | None = None) -> dict[str, Any]:

@@ -36,6 +36,8 @@ artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 wferp_sql = load_module("wferp_sql", HERE / "wferp_sql.py")
 ontology_contract = load_module("ontology_contract", ROOT / "ontology_contract.py")
+uploaded_datasets = load_module("uploaded_datasets", ROOT / "uploaded_datasets.py")
+upload_semantics = load_module("upload_semantics", ROOT / "upload_semantics.py")
 WFERP_METADATA = wferp_sql.load_metadata()
 authenticate_headers = mcp_security.authenticate_headers
 require_runtime_token = mcp_security.require_runtime_token
@@ -54,9 +56,16 @@ except ValueError:
     PORT = 8768
 SERVER_INFO = {"name": "data-query-planner-mcp", "version": "0.2.0"}
 PROTOCOL = "2025-03-26"
-MAX_PLAN_ROWS = 5_000
+MAX_PLAN_ROWS = 100_000
 MAX_PLAN_FIELDS = 200
-MAX_PLAN_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_PLAN_RESPONSE_BYTES = 50 * 1024 * 1024
+ANALYSIS_KINDS = ("catboost", "random_forest_shap", "gradient_boosting", "logistic_regression", "xgboost")
+
+
+def execution_template_for_kind(kind: str) -> str:
+    if kind not in ANALYSIS_KINDS:
+        raise ValueError(f"unsupported analysis kind: {kind}")
+    return f"ask_o11y_{kind}_v1"
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
 
@@ -151,31 +160,51 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
         if analysis_contract is not None:
             if not isinstance(analysis_contract, dict):
                 raise workflow_node.WorkflowContractError("analysis_contract must be an object")
-            snapshot = ontology_contract.load_snapshot(dataset_id=str(analysis_contract.get("dataset_id")))
-            semantic_validation = ontology_contract.validate_analysis_contract(snapshot, analysis_contract)
+            if analysis_contract.get("autotune"):
+                budget = analysis_contract.get("search_budget", 20)
+                objective = analysis_contract.get("objective", "roc_auc")
+                minimum = analysis_contract.get("objective_minimum")
+                if isinstance(budget, bool) or not isinstance(budget, int) or not 1 <= budget <= 40 or objective not in {"accuracy", "roc_auc", "pr_auc"} or (minimum is not None and (isinstance(minimum, bool) or not isinstance(minimum, (int, float)) or not 0 <= minimum <= 1)):
+                    raise workflow_node.WorkflowContractError("autoresearch contract bounds are invalid")
+            contract_dataset_id = str(analysis_contract.get("dataset_id"))
+            if contract_dataset_id.startswith("upload_"):
+                upload_metadata = uploaded_datasets.inspect_upload(context, contract_dataset_id, context.get("session_id"))
+                hints = upload_semantics.load_hints(uploaded_datasets.UPLOAD_ROOT / contract_dataset_id)
+                semantic_validation = upload_semantics.validate_analysis_contract(hints, analysis_contract)
+                semantic_validation["snapshot"].update({"sha256": upload_metadata["source_sha256"], "snapshot_id": f"candidate:{contract_dataset_id}"})
+                if analysis_contract.get("ontology_snapshot_sha256") != upload_metadata["source_sha256"]:
+                    semantic_validation["conforms"] = False
+                    semantic_validation["rejection_codes"].append("SNAPSHOT_HASH_MISMATCH")
+                required_projection = {str(analysis_contract.get("target")), *semantic_validation["included_fields"]}
+                quality_fields: set[str] = set()
+                minimum_valid_rows = int(hints["quality_policy"]["minimum_valid_rows"])
+            else:
+                snapshot = ontology_contract.load_snapshot(dataset_id=contract_dataset_id)
+                semantic_validation = ontology_contract.validate_analysis_contract(snapshot, analysis_contract)
+                dataset = ontology_contract.find_dataset(snapshot, str(metadata.get("dataset_id")))
+                if dataset is None:
+                    raise workflow_node.WorkflowContractError("ontology dataset does not match authorized metadata")
+                required_projection = {dataset["time_identity"], dataset["target"], *semantic_validation["included_fields"]}
+                quality_fields = {field["physical_name"] for field in dataset["fields"] if field["status"] == "approved" and field["analysis_role"] == "quality"}
+                minimum_valid_rows = int(dataset["quality_policy"]["minimum_valid_rows"])
             if not semantic_validation["conforms"]:
                 return error_response(
                     step=step,
                     error="ontology semantic gate rejected the analysis contract",
                     recoverable=False,
                     instruction="Stop before Grafana Query; resolve every semantic rejection and create a new preview/plan hash.",
-                    evidence={"rejection_codes": semantic_validation["rejection_codes"], "failed_rules": semantic_validation["failed_rules"], "downstream_call_counts": {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}},
+                    evidence={"rejection_codes": semantic_validation["rejection_codes"], "failed_rules": semantic_validation["failed_rules"], "limitations": semantic_validation.get("limitations", []), "downstream_call_counts": {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}},
                 )
-            dataset = ontology_contract.find_dataset(snapshot, str(metadata.get("dataset_id")))
-            if dataset is None:
-                raise workflow_node.WorkflowContractError("ontology dataset does not match authorized metadata")
-            required_projection = {dataset["time_identity"], dataset["target"], *semantic_validation["included_fields"]}
-            quality_fields = {field["physical_name"] for field in dataset["fields"] if field["status"] == "approved" and field["analysis_role"] == "quality"}
             requested_projection = set(requested_fields) - quality_fields
             if requested_projection != required_projection:
                 return error_response(
                     step=step,
                     error="selected_fields do not match the approved ontology analysis projection",
                     recoverable=False,
-                    instruction="Stop before Grafana Query; use exactly the time, target, and approved feature fields returned by the semantic gate.",
+                    instruction="Stop before Grafana Query; use exactly the target and approved feature fields returned by the semantic gate.",
                     evidence={"rejection_codes": ["ANALYSIS_PROJECTION_MISMATCH"], "approved_projection": sorted(required_projection), "downstream_call_counts": {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}},
                 )
-            if minimum_rows < int(dataset["quality_policy"]["minimum_valid_rows"]):
+            if minimum_rows < minimum_valid_rows:
                 return error_response(
                     step=step,
                     error="minimum_rows is below the approved ontology quality policy",
@@ -222,6 +251,15 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
             }
             plan["analysis_input_contract"]["ontology_snapshot_sha256"] = semantic_validation["snapshot"]["sha256"]
             plan["analysis_input_contract"]["analysis_kind"] = analysis_contract["kind"]
+            plan["analysis_input_contract"]["execution_template"] = execution_template_for_kind(str(analysis_contract["kind"]))
+            plan["analysis_input_contract"]["preprocessing_fit_scope"] = analysis_contract["split"]["preprocessing_fit_scope"]
+            if analysis_contract.get("autotune"):
+                plan["analysis_input_contract"]["autoresearch"] = {
+                    "objective": analysis_contract.get("objective", "roc_auc"),
+                    "objective_minimum": analysis_contract.get("objective_minimum"),
+                    "search_budget": analysis_contract.get("search_budget", 20),
+                    "max_search_budget": 40,
+                }
             plan["provenance"].update({"ontology_snapshot_id": semantic_validation["snapshot"]["snapshot_id"], "ontology_snapshot_sha256": semantic_validation["snapshot"]["sha256"]})
             plan["plan_sha256"] = hashlib.sha256(json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         plan_ref = ARTIFACTS.write_json(context, run_id, "query-plan", plan)
@@ -380,9 +418,206 @@ def tool_validate_query(args: dict[str, Any]) -> dict[str, Any]:
 
 
 TOOLS = [
-    {"name": "plan_query", "description": "Compile and validate a safe bounded Grafana query plan from an opaque inspected dataset_metadata_ref plus explicit fields and bounds. For ontology-assisted analysis, the deterministic gate validates the complete analysis_contract and pins its approved snapshot/hash before returning an executable plan.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "selected_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200, "uniqueItems": True}, "minimum_rows": {"type": "integer", "minimum": 1, "maximum": 5000}, "maximum_rows": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 5000}, "refId": {"type": "string", "default": "A"}, "analysis_contract": {"type": "object", "additionalProperties": False, "properties": {"kind": {"const": "random_forest_shap"}, "dataset_id": {"type": "string"}, "target": {"type": "string"}, "features": {"type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": True, "items": {"type": "string"}}, "as_of": {"type": "string", "format": "date"}, "split": {"type": "object"}, "seed": {"type": "integer"}, "ontology_snapshot_sha256": {"type": "string"}, "quality_filter": {"type": "object"}}, "required": ["kind", "dataset_id", "target", "features", "as_of", "split", "seed", "ontology_snapshot_sha256"]}}, "required": ["dataset_metadata_ref", "selected_fields"]}},
+    {
+    "name": "plan_query",
+    "description": "Compile and validate a safe bounded Grafana query plan from an opaque inspected dataset_metadata_ref plus explicit fields and bounds. For ontology-assisted analysis, the deterministic gate validates the complete analysis_contract and pins its approved snapshot/hash before returning an executable plan.",
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "dataset_metadata_ref": {
+                "type": "string"
+            },
+            "selected_fields": {
+                "type": "array",
+                "items": {
+                    "type": "string"
+                },
+                "minItems": 1,
+                "maxItems": 200,
+                "uniqueItems": True
+            },
+            "minimum_rows": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100000
+            },
+            "maximum_rows": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100000,
+                "default": 100000
+            },
+            "refId": {
+                "type": "string",
+                "default": "A"
+            },
+            "analysis_contract": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "kind": {
+                        "enum": [
+                            "catboost",
+                            "random_forest_shap",
+                            "gradient_boosting",
+                            "logistic_regression",
+                            "xgboost"
+                        ]
+                    },
+                    "dataset_id": {
+                        "type": "string"
+                    },
+                    "target": {
+                        "type": "string"
+                    },
+                    "features": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 200,
+                        "uniqueItems": True,
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "format": "date"
+                    },
+                    "split": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": [
+                                    "stratified_holdout",
+                                    "chronological_holdout",
+                                    "grouped_holdout"
+                                ]
+                            },
+                            "test_fraction": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 0.5
+                            },
+                            "preprocessing_fit_scope": {
+                                "const": "training_only"
+                            },
+                            "time_field": {
+                                "type": "string"
+                            },
+                            "group_field": {
+                                "type": "string"
+                            },
+                            "seed": {
+                                "type": "integer"
+                            }
+                        },
+                        "required": [
+                            "kind",
+                            "test_fraction",
+                            "preprocessing_fit_scope"
+                        ]
+                    },
+                    "seed": {
+                        "type": "integer"
+                    },
+                    "ontology_snapshot_sha256": {
+                        "type": "string"
+                    },
+                    "quality_filter": {
+                        "type": "object"
+                    },
+                    "class_imbalance_strategy": {
+                        "type": "string",
+                        "enum": [
+                            "balanced",
+                            "scale_pos_weight",
+                            "smote",
+                            "none"
+                        ]
+                    },
+                    "positive_class": {
+                        "type": "string",
+                        "maxLength": 64
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "maxLength": 512
+                    },
+                    "conclusion": {
+                        "type": "string",
+                        "maxLength": 512
+                    },
+                    "autotune": {
+                        "type": "boolean",
+                        "default": False
+                    },
+                    "objective": {
+                        "type": "string",
+                        "enum": [
+                            "accuracy",
+                            "roc_auc",
+                            "pr_auc"
+                        ],
+                        "default": "roc_auc"
+                    },
+                    "objective_minimum": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                    },
+                    "search_budget": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 40,
+                        "default": 20
+                    },
+                    "cost_matrix": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "false_negative": {
+                                "type": "number",
+                                "exclusiveMinimum": 0
+                            },
+                            "false_positive": {
+                                "type": "number",
+                                "exclusiveMinimum": 0
+                            }
+                        },
+                        "required": [
+                            "false_negative",
+                            "false_positive"
+                        ]
+                    },
+                    "minimum_recall": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                    }
+                },
+                "required": [
+                    "kind",
+                    "dataset_id",
+                    "target",
+                    "features",
+                    "as_of",
+                    "split",
+                    "seed",
+                    "ontology_snapshot_sha256"
+                ]
+            }
+        },
+        "required": [
+            "dataset_metadata_ref",
+            "selected_fields"
+        ]
+    }
+},
     {"name": "search_wferp_schema", "description": "Build a bounded multilingual WFERP table/column/relationship context from an authorized WFERP dataset_metadata_ref and the user's exact request. Ask O11y uses this context to author SQL; this tool does not generate or execute SQL.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 8192}, "top_k": {"type": "integer", "minimum": 1, "maximum": 8, "default": 8}}, "required": ["dataset_metadata_ref", "prompt"]}},
-    {"name": "plan_wferp_query", "description": "Validate one Ask O11y LLM-authored legacy MSSQL SELECT against the authorized WFERP schema, SQL policy, and explicit prompt constraints. On recoverable failure, revise the SQL using the returned repair hint. On success, returns an opaque plan_ref for later Grafana-only execution.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 8192}, "sql": {"type": "string", "minLength": 1, "maxLength": 32768}, "output_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200, "uniqueItems": True}, "minimum_rows": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 0}, "maximum_rows": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 5000}, "refId": {"type": "string", "default": "A"}}, "required": ["dataset_metadata_ref", "prompt", "sql", "output_fields"]}},
+    {"name": "plan_wferp_query", "description": "Validate one Ask O11y LLM-authored legacy MSSQL SELECT against the authorized WFERP schema, SQL policy, and explicit prompt constraints. On recoverable failure, revise the SQL using the returned repair hint. On success, returns an opaque plan_ref for later Grafana-only execution.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_metadata_ref": {"type": "string"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 8192}, "sql": {"type": "string", "minLength": 1, "maxLength": 32768}, "output_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200, "uniqueItems": True}, "minimum_rows": {"type": "integer", "minimum": 0, "maximum": 100000, "default": 0}, "maximum_rows": {"type": "integer", "minimum": 1, "maximum": 100000, "default": 100000}, "refId": {"type": "string", "default": "A"}}, "required": ["dataset_metadata_ref", "prompt", "sql", "output_fields"]}},
     {"name": "validate_query", "description": "Revalidate an authorized opaque query plan without executing it.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"plan_ref": {"type": "string"}}, "required": ["plan_ref"]}},
 ]
 
@@ -475,7 +710,7 @@ def self_check() -> None:
     if not plan.get("ok") or plan.get("datasource_uid") != "self-check" or not plan.get("plan_ref", "").startswith("artifact://"):
         raise RuntimeError(str(plan))
     plan_artifact = ARTIFACTS.read_json(context, plan["plan_ref"])
-    if plan_artifact["analysis_input_contract"] != {"required_fields": ["timestamp", "metric", "feature"], "optional_fields": [], "validity_rules": [], "minimum_rows": 20, "maximum_rows": 5000, "maximum_fields": 200, "maximum_response_bytes": 4194304} or plan_artifact.get("time_range") != {"from": "2026-01-01T00:00:00Z", "to": "2026-12-31T23:59:59Z"}:
+    if plan_artifact["analysis_input_contract"] != {"required_fields": ["timestamp", "metric", "feature"], "optional_fields": [], "validity_rules": [], "minimum_rows": 20, "maximum_rows": 100000, "maximum_fields": 200, "maximum_response_bytes": 52428800} or plan_artifact.get("time_range") != {"from": "2026-01-01T00:00:00Z", "to": "2026-12-31T23:59:59Z"}:
         raise RuntimeError(str(plan_artifact))
     if "next_step" in plan or "request" in plan_artifact:
         raise RuntimeError("query plan must not contain a fixed workflow or natural-language routing")

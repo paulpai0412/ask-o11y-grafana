@@ -107,9 +107,36 @@ def load_dataframe(bundle_path: str, pd: Any) -> tuple[Any, dict[str, Any]]:
 def runtime_modules() -> tuple[Any, Any, Any, Any]:
     matplotlib = importlib.import_module("matplotlib")
     matplotlib.use("Agg")
-    matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC", "DejaVu Sans"]
-    matplotlib.rcParams["axes.unicode_minus"] = False
+
+    def apply_cjk_defaults() -> None:
+        matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC", "DejaVu Sans"]
+        matplotlib.rcParams["axes.unicode_minus"] = False
+
+    apply_cjk_defaults()
     plt = importlib.import_module("matplotlib.pyplot")
+    original_style_use = plt.style.use
+
+    def style_use_with_cjk(style: Any) -> Any:
+        result = original_style_use(style)
+        apply_cjk_defaults()
+        return result
+
+    plt.style.use = style_use_with_cjk
+
+    try:
+        sns = importlib.import_module("seaborn")
+    except ModuleNotFoundError:
+        pass
+    else:
+        original_set_theme = sns.set_theme
+
+        def set_theme_with_cjk(*args: Any, **kwargs: Any) -> Any:
+            result = original_set_theme(*args, **kwargs)
+            apply_cjk_defaults()
+            return result
+
+        setattr(sns, "set_theme", set_theme_with_cjk)
+
     np = importlib.import_module("numpy")
     pd = importlib.import_module("pandas")
     Figure = importlib.import_module("matplotlib.figure").Figure

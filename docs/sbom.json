@@ -2,7 +2,7 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
   "serialNumber": "urn:uuid:7d99a6c4-57ac-4d75-9b94-4fd7779acae8",
-  "version": 3,
+  "version": 4,
   "metadata": {
     "component": {"type": "application", "name": "adaptive-ask-o11y-ml-platform", "version": "sandbox-poc-v1"}
   },
@@ -72,7 +72,7 @@
       "type": "container",
       "name": "ask-o11y-sandbox-analysis",
       "version": "sandbox-poc-v1",
-      "purl": "pkg:docker/ask-o11y-sandbox-analysis@sha256:787a5ebd9c4d87757f1148b2db23ebefdefa80f069e58dfa613bfaa507379f0a",
+      "purl": "pkg:docker/ask-o11y-sandbox-analysis@sha256:3ab47ccd64edbb326b3e4b90ba5eb0e9469309559a71c7071f0e5a0e8d689548",
       "properties": [{"name": "definition", "value": "sandbox-analysis-mcp/Dockerfile"}, {"name": "base.digest", "value": "sha256:133a3c1720dd52291a019740c2987e7164ea6de79e23d8198798e58950ae2e6e"}]
     },
     {"type": "library", "name": "fonts-noto-cjk", "version": "1:20230817+repack1-3", "licenses": [{"license": {"id": "OFL-1.1"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
@@ -86,6 +86,7 @@
     {"type": "library", "name": "scikit-learn", "version": "1.9.0", "purl": "pkg:pypi/scikit-learn@1.9.0", "licenses": [{"license": {"id": "BSD-3-Clause"}}], "properties": [{"name": "notice", "value": "NOTICE#scikit-learn"}, {"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
     {"type": "library", "name": "statsmodels", "version": "0.14.6", "purl": "pkg:pypi/statsmodels@0.14.6", "licenses": [{"license": {"id": "BSD-3-Clause"}}], "properties": [{"name": "notice", "value": "NOTICE#statsmodels"}, {"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
     {"type": "library", "name": "shap", "version": "0.52.0", "purl": "pkg:pypi/shap@0.52.0", "licenses": [{"license": {"id": "MIT"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
+    {"type": "library", "name": "catboost", "version": "1.2.10", "purl": "pkg:pypi/catboost@1.2.10", "licenses": [{"license": {"id": "Apache-2.0"}}], "externalReferences": [{"type": "vcs", "url": "https://github.com/catboost/catboost"}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
     {"type": "library", "name": "xgboost-cpu", "version": "3.4.0", "purl": "pkg:pypi/xgboost-cpu@3.4.0", "licenses": [{"license": {"id": "Apache-2.0"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
     {"type": "library", "name": "lightgbm", "version": "4.7.0", "purl": "pkg:pypi/lightgbm@4.7.0", "licenses": [{"license": {"id": "MIT"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},
     {"type": "library", "name": "imbalanced-learn", "version": "0.14.2", "purl": "pkg:pypi/imbalanced-learn@0.14.2", "licenses": [{"license": {"id": "MIT"}}], "properties": [{"name": "pinfile", "value": "sandbox-analysis-mcp/Dockerfile"}]},

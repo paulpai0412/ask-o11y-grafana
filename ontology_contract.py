@@ -10,6 +10,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 CATALOG_PATH = ROOT / "semantic/catalog.json"
 MAX_FIELDS = 200
+ALLOWED_ANALYSIS_KINDS = ("catboost", "random_forest_shap", "gradient_boosting", "logistic_regression", "xgboost")
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -136,7 +137,7 @@ def validate_analysis_contract(snapshot: dict[str, Any], contract: dict[str, Any
     mismatch = verify_snapshot_ref(snapshot, snapshot_ref or contract.get("ontology_snapshot_sha256"))
     if mismatch:
         reject(mismatch, "snapshot.pin")
-    allowed = {"kind", "dataset_id", "target", "features", "as_of", "split", "seed", "ontology_snapshot_sha256", "quality_filter"}
+    allowed = {"kind", "dataset_id", "target", "features", "as_of", "split", "seed", "ontology_snapshot_sha256", "quality_filter", "positive_class", "purpose", "conclusion", "autotune", "objective", "objective_minimum", "search_budget", "class_imbalance_strategy", "cost_matrix", "minimum_recall"}
     if not isinstance(contract, dict) or set(contract) - allowed:
         reject("ANALYSIS_CONTRACT_INVALID", "contract.shape")
         contract = contract if isinstance(contract, dict) else {}
@@ -203,7 +204,7 @@ def validate_analysis_contract(snapshot: dict[str, Any], contract: dict[str, Any
     split_keys = {"kind", "time_field", "test_fraction", "preprocessing_fit_scope", "seed"}
     if not isinstance(split, dict) or set(split) - split_keys or any(split.get(key) != policy[key] for key in ("kind", "time_field", "test_fraction", "preprocessing_fit_scope")) or ("seed" in split and split["seed"] != policy["seed"]):
         reject("SPLIT_POLICY_VIOLATION", "split.policy")
-    if contract.get("kind") != "random_forest_shap" or contract.get("seed") != policy["seed"]:
+    if contract.get("kind") not in ALLOWED_ANALYSIS_KINDS or contract.get("seed") != policy["seed"]:
         reject("ANALYSIS_CONTRACT_INVALID", "analysis.kind_seed")
     selected = set(included)
     excluded = [{"field": field["physical_name"], "reason": field["reason"], "status": field["status"], "role": field["analysis_role"]} for field in dataset["fields"] if field["physical_name"] not in selected and field["physical_name"] not in {dataset["target"], dataset["time_identity"], dataset["quality_policy"]["field"]}]

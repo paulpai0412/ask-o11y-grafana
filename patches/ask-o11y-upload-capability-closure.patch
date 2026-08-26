@@ -1,0 +1,81 @@
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -7,6 +7,7 @@
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"regexp"
+ 	"strings"
+ 	"time"
+ 
+@@ -16,6 +17,8 @@
+ 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+ 	"github.com/grafana/grafana-plugin-sdk-go/backend/tracing"
+ )
++
++var exactUploadDatasetPattern = regexp.MustCompile(`(^|[^[:alnum:]_])upload_[a-f0-9]{32}($|[^[:alnum:]_])`)
+ 
+ const defaultMaxIterations = 25
+ const defaultMaxCompletionTokens = 4096
+@@ -400,6 +403,15 @@
+ 	return false
+ }
+ 
++func conversationHasExactUploadDataset(messages []Message) bool {
++	for _, message := range messages {
++		if message.Role == "user" && exactUploadDatasetPattern.MatchString(message.Content) {
++			return true
++		}
++	}
++	return false
++}
++
+ func (a *AgentLoop) selectRelevantTools(ctx context.Context, req LoopRequest, tools []mcp.Tool) ([]mcp.Tool, []Message, bool, bool) {
+ 	if len(tools) == 0 {
+ 		return tools, nil, false, false
+@@ -486,6 +498,19 @@
+ 			}
+ 		}
+ 		selected[name] = struct{}{}
++	}
++	if conversationHasExactUploadDataset(req.Messages) {
++		required := map[string]struct{}{
++			"grafana-query_discover_datasets": {},
++			"grafana-query_inspect_dataset":  {},
++			"ontology_classify_fields":       {},
++			"data-query-planner_plan_query":  {},
++		}
++		for _, tool := range tools {
++			if _, ok := required[tool.Name]; ok {
++				selected[tool.Name] = struct{}{}
++			}
++		}
+ 	}
+ 	for _, server := range req.MCPServers {
+ 		prefix := server.ID + "_"
+diff --git a/pkg/agent/upload_capability_test.go b/pkg/agent/upload_capability_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/agent/upload_capability_test.go
+@@ -0,0 +1,20 @@
++package agent
++
++import "testing"
++
++func TestConversationHasExactUploadDataset(t *testing.T) {
++	valid := []Message{{Role: "user", Content: "Use uploaded dataset `upload_c67e717d4686ec55d897dee03dddd917` (adult.csv)."}}
++	if !conversationHasExactUploadDataset(valid) {
++		t.Fatal("exact UI upload evidence was not recognized")
++	}
++	invalid := [][]Message{
++		{{Role: "assistant", Content: "upload_c67e717d4686ec55d897dee03dddd917"}},
++		{{Role: "user", Content: "upload_short"}},
++		{{Role: "user", Content: "prefix_upload_c67e717d4686ec55d897dee03dddd917_suffix"}},
++	}
++	for _, messages := range invalid {
++		if conversationHasExactUploadDataset(messages) {
++			t.Fatalf("invalid upload evidence was accepted: %q", messages[0].Content)
++		}
++	}
++}

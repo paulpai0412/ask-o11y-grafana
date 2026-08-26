@@ -1,0 +1,303 @@
+diff --git a/pkg/agent/skills/ml-method-selection/SKILL.md b/pkg/agent/skills/ml-method-selection/SKILL.md
+new file mode 100644
+index 0000000..355736e
+--- /dev/null
++++ b/pkg/agent/skills/ml-method-selection/SKILL.md
+@@ -0,0 +1,293 @@
++---
++name: ml-method-selection
++description: REQUIRED for any machine-learning or statistical analysis turn. Always select for 模型訓練、自動調參、分類、迴歸、分群、異常偵測、時間序列、預測、特徵重要性、結果解釋，或要求把 ML 過程/結果做成 Grafana Dashboard；亦涵蓋智慧製造設備健康、預測性維護 predictive maintenance、異常偵測 anomaly detection、良率/不良、製程參數、SPC/Cpk/OEE、需求預測。
++---
++
++# 智慧製造分析方法指引（設備・製程・製造營運）
++
++本 skill 是 advisory knowledge：提供選法準則、判定門檻與解讀規範，不構成固定流程。
++實際工具 schema 與資料現況永遠優先。方法必須落在 sandbox 已安裝套件內：
++scikit-learn、statsmodels、imbalanced-learn、xgboost、lightgbm、shap。
++
++### Session-owned upload 的 ontology 規則
++
++當 dataset id 是精確的 `upload_<32 hex>` 且任務是 ML：
++
++- 先 inspect sanitized fields，再直接對 upload candidate 做 field classification；不要以「沒有 approved snapshot」為由停止，也不要只查 approved snapshot list。
++- candidate classification 會回傳 `target_candidate`、`feature_allowlist`、排除角色、quality policy 與 candidate snapshot SHA；這些是本次 session 的 observed semantic evidence，不等同組織級正式 ontology promotion。
++- `leakage_risk`（如 Satisfaction/Reason/Rating 等事後欄位）與 `sensitive`（如 Gender/Sex/Race 等受保護屬性）欄位會被 deterministic gate 自動排除，Planner 直接拒絕含它們的 contract；請在 Analysis Preview 主動說明排除原因，不要等待閘門報錯，也不要嘗試納入。
++- ML query plan 必須使用 candidate 回傳的 target/allowlist/hash 建 analysis contract，並由 Planner 的 upload semantic gate 做最終 deterministic 驗證。
++- split 必須明確含 `kind`、`test_fraction` 與 `preprocessing_fit_scope: "training_only"`；一般無時間欄的二元分類使用 stratified holdout。不要把缺少 fit scope 誤解成必須改成順序切分。
++- 同一 ML plan 的 selected fields 必須精確等於 target + model features；被排除或只供公平性/subgroup 檢查的欄位不能偷偷混進模型 query。若使用者需要 subgroup 稽核，先在 Preview 說明，待模型結果後以獨立授權 plan 進行。
++- 使用者對 Analysis Preview 的確認只授權本次分析；不能把 upload candidate 宣稱為全域 approved ontology。
++- 若 candidate classification 不確定或無 target，才向使用者釐清，不得回退為人工猜欄位。
++
++## 1. 問題分型（先分型，再選法）
++
++| 分型 | 典型製造提問 | 首選方向 |
++|---|---|---|
++| 預測 | 下週不良率？這批會不會超標？機台還能撐多久？ | 監督式學習 / 時間序列 |
++| 推論 | 哪些參數真正影響良率？A/B 兩線差異是否顯著？ | statsmodels 統計推論 + 效應量 |
++| 描述/分群 | 機台行為有幾種模式？哪些批次相似？ | PCA + clustering |
++| 異常偵測 | 這個感測器讀值正常嗎？（通常無標籤） | IsolationForest / PCA 重構誤差 |
++
++推論型問題禁止只用樹模型特徵重要性回答——樹模型的 importance 不提供不確定性，
++推論必須回到 statsmodels（OLS/GLM）拿係數、信賴區間與 p-value。
++
++## 2. 製造資料現實檢查（動手前逐項判定，附實際門檻）
++
++### 2.1 時序自相關與資料洩漏
++
++- 同機台連續取樣的感測器資料幾乎必有自相關。先算 Durbin-Watson（偏離 2 越多越嚴重）
++  或畫 ACF；ACF 在 lag>0 顯著超出信賴帶即視為自相關。
++- **時序切分**：一律 `TimeSeriesSplit`（forward-chaining），禁止隨機 k-fold。
++- **批次/批號洩漏**：同批號樣本共享環境因子，跨切分即洩漏 → 用 `GroupKFold`，
++  group=批號/lot/換線週期。
++- 特徵工程禁止使用未來資訊：滾動統計只准用 `shift(1)` 後的視窗；
++  目標編碼（target encoding）必須在 fold 內計算。
++
++### 2.2 類別不平衡（不良分析的核心陷阱）
++
++- 先算不平衡比。**經驗法則**：不良率 <5% 時 accuracy 直接作廢
++  （98% 良率下全猜「良品」就有 98% accuracy）；>20:1 必須處理。
++- 處理順序：`class_weight="balanced"`（先試，最簡單）→ imbalanced-learn 的
++  SMOTE（僅用在訓練 fold 內，驗證集絕不 resample）→ 閾值調整。
++- 評估指標以 PR-AUC 為主；PR-AUC 的隨機基線 = 不良率本身
++  （例：不良率 2%，PR-AUC 0.05 只比亂猜好一點，別拿 0.05 自稱「高」）。
++- 分類閾值依成本決定：漏檢成本（不良流出）通常遠高於誤判（誤殺良品），
++  預設往高 recall 偏移，並回報所選閾值下的 precision/recall 成對數值，
++  不准只報閾值 0.5 的結果。
++- CatBoost 只能作**受控 challenger**：只有使用者或已確認的比較方案明確要求時才執行，
++  不加入預設模型清單；必須保留原始 categorical 欄位、禁止先 one-hot，並以相同
++  CV/search budget/guards 與 incumbent 公平比較。未同時改善 PR-AUC、成本與 verdict 時不得取代預設模型。
++
++### 2.3 設限資料（censoring）
++
++- 「還沒壞 ≠ 不會壞」。預測性維護資料中仍在服役的設備是右設限觀察，
++  把它們當成「未故障負樣本」跑普通二分類會低估風險。
++- 有壽命資料（裝機→故障時間）時走存活分析（見 §3.3），不要二分類硬套。
++
++### 2.4 量測系統誤差（Gage R&R）
++
++- 若量測變異佔總變異 >10%（%GRR>10% 可接受上限，>30% 量測系統不合格），
++  任何模型學到的「訊號」可能只是量測噪音。資料含重複量測時先估量測變異比例，
++  無法估計時在限制欄明確聲明「量測系統能力未知」。
++
++### 2.5 混雜因子
++
++- 批次、換線、班別、季節、原料供應商常同時影響 X 與 Y。
++- 迴歸至少控制批號固定效應或加入批次層特徵；看見參數「顯著」前先問：
++  換一批/換一個班別還顯著嗎？可用交互項或分層檢定抽查穩定性。
++
++### 2.6 因果紀律
++
++- ERP/o11y 都是觀察性資料。相關係數、SHAP、特徵重要性都**不是因果證據**。
++- 要宣稱「調降參數 X 可提升良率」，唯一正當路徑是 DOE/受控實驗；
++  分析結論只能寫到「X 與 Y 存在統計關聯，建議以實驗驗證」。
++
++## 3. 設備分析
++
++### 3.1 感測器異常偵測（無標籤）
++
++- **單變數快篩**：穩態製程下用 robust z-score（median/MAD），
++  |z|>3 為候選異常點；資料有趨勢時先差分或用滾動窗 z-score，否則漂移會被誤判為異常。
++- **多元變數 IsolationForest**：`contamination` 不要留 "auto"——
++  依歷史已知異常比例設定（無知識時 0.01–0.05 起步）；
++  用 `score_samples` 排序輸出 top-N 而非二元标签，讓人判讀嚴重度。
++- **PCA 重構誤差（SPE/Q 統計量）**：適合多感測器聯合監控，控制限取訓練期
++  Q 統計量的 99 百分位。主成分數以解釋變異 ≥90–95% 起步。
++- 解讀紀律：異常分數高只代表「偏離訓練分布」，
++  必須回到原始感測器值指出**哪幾個通道、偏差多少個標準差、從何時開始**，
++  否則報告不可交付。
++
++### 3.2 設備健康度 HI（Equipment Health Index）
++
++目標：把多感測器狀態壓成單一可追蹤、可比較、有門檻的分數。
++
++1. **基準期選擇**：取設備確認健康的歷史區間（如大修後 30 天）。
++   基準期若含異常，整個 HI 會被污染——先用 §3.1 快篩剔除離群段再算基準。
++2. **逐通道標準化**：每個關鍵通道相對基準期算 z-score
++   （z=(現值−基準均值)/基準標準差）。基準標準差過小（近常數通道）要剔除，
++   否則 z 會爆炸。
++3. **合成**：
++   - 通道間近似獨立 → HI = 各通道 |z| 加權平均，權重由工程知識或與故障史
++     的關聯強度決定，並記錄權重依據。
++   - 通道高度相關 → 先 PCA 取主成分，HI 用 Mahalanobis 距離
++     （`sklearn.covariance.EmpiricalCovariance` + Mahalanobis），
++     避免相關通道重複計分。
++4. **門檻設定（實際值）**：門檻由基準期 HI 分布的百分位導出，禁止拍腦袋：
++   - 注意級：μ+2σ（約基準期 2.5% 尾端）
++   - 警戒級：μ+3σ（約 0.15%）
++   - 行動級：結合工程極限（如振動 ISO 10816 分級、溫度規格上限），
++     統計門檻只能佐證不能取代工程規格。
++5. **持續監控加兩件事**：
++   - **趨勢**：HI 序列做線性迴歸斜率，斜率顯著為正（p<0.05 且效應量
++     每 30 天上升 >0.5σ）比單點超標更早預警劣化。
++   - **漂移偵測**：以 PSI 監控特徵分布，PSI<0.1 穩定、0.1–0.25 中度偏移、
++     >0.25 顯著位移（需重算基準或調查事件）。
++6. **驗證**：HI 至少要在一次已知事件（故障、大修、換油）上回測，
++   展示事件前 HI 的爬升軌跡；沒有任何事件驗證的 HI 只能標注「未驗證原型」。
++
++### 3.3 預測性維護 / RUL（剩餘壽命）
++
++- 資料形態決定方法：
++  - 有「裝機→故障」時間且部分設備仍存活（右設限）→
++    `statsmodels.duration.hazard_regression.PHReg`（Cox PH）。
++    回報係數要用 hazard ratio（exp(β)）附 95% CI；
++    HR=2.5 (CI 1.4–4.5) 讀作「該特徵每增加一單位，故障風險約 2.5 倍」。
++    預測 RUL 用 baseline hazard 曲線推生存函數，回報中位壽命與 CI，
++    不報單點天數。
++  - 只有健康/故障二分類快照 → 按 §2.2 不平衡流程處理，
++    特徵用故障前窗口聚合（最後 24h/72h 的均值、斜率、變異數），
++    並用 GroupKFold(by 設備) 確保同一設備不同時間的樣本不分家。
++- 樣本量誠實條款：故障事件 <20 台次時，任何模型都是描述性統計而非預測模型，
++  改走 §3.1+§3.2 的監控路線，並明說「事件數不足以支撐預測模型」。
++
++## 4. 製程分析
++
++### 4.1 良率/不良歸因
++
++1. 模型：LightGBM/XGBoost（表格資料首選）配合 class_weight 或 SMOTE（§2.2）。
++   小樣本（n<1000）改用 L2 正則 logistic regression，避免樹模型過擬合。
++2. 歸因雙軌制（缺一不可）：
++   - **全域**：SHAP summary（beeswarm）看整體排序；
++   - **局部**：對實際不良樣本抽 10–20 筆做 individual SHAP force plot，
++     指出「這一批主要是溫度偏高 + 壓力偏低」等具體組合，
++     全域平均值會掩蓋批次間相反方向的效應。
++3. SHAP 解讀紀律：只講相對重要性與方向，講因果就是違反 §2.6；
++   高度相關特徵的 SHAP 會互相分攤，先查相關矩陣（|r|>0.8 的特徵群視為一組解讀）。
++4. 統計佐證：對 SHAP 前 K 名特徵（K≤10）回頭做單變數檢定
++   （t-test/Mann-Whitney 或 logistic 係數），掃描多個特徵必須多重比較校正
++   （Bonferroni：α/K）。校正後仍顯著的才進結論。
++
++### 4.2 製程參數—品質迴應
++
++- statsmodels GLM（連續品質值 OLS/Gaussian，良/不良 Binomial）。
++- 共線性檢查：VIF>10 的參數群只能選代表入模或合併，
++  否則係數符號會翻轉且不可解讀。
++- 殘差診斷：Durbin-Watson 偏離 2 查時序結構；殘差對 fitted 值的扇形圖示
++  異質變異 → 改用 robust 標準誤（HC1）或對品質值轉換。
++- 交互項按工程直覺假設（溫度×壓力類）逐一加入，以 AIC 比較取捨，
++  回報保留的交互項及其係數 CI。
++
++### 4.3 SPC 與製程能力
++
++- Cpk 直接由規格限與製程 σ 計算，判讀門檻（業界慣例）：
++  Cpk≥1.33 可接受；1.0–1.33 邊際需監控；<1.0 製程能力不足。
++  報告時附 Cp 以區分「潛力足但中心偏移」（Cp 高 Cpk 低）與「散布過大」（兩者皆低）。
++- Cpk 前提是製程穩定（受控）：先以管制圖確認無特殊原因變異，
++  離控狀態下算出的 Cpk 無意義，必須聲明。
++- 違規點分析：管制圖違規規則（Western Electric 規則）指出的是「何時」，
++  分析要補上「為何」——將違規時間點與換線/保養/原料批次表 join，
++  用 Fisher exact test 或卡方檢定違規率在事件前後的差異。
++
++### 4.4 多變量製程監控（MSPC）
++
++- 大量相關感測器時：PCA 降維後雙指標監控——T²（模型空間內偏離）
++  與 SPE/Q（模型外殘差），控制限各取訓練期 99 百分位。
++- 診斷分工：T² 超限而 Q 正常 → 正常關聯模式下的整體水準偏移（查共同上游因子）；
++  Q 超限 → 出現訓練期沒有的新模式（感測器故障或真實新異常）。
++- 貢獻圖定位：對超限樣本算逐變數貢獻，回報 top 3 通道及各自貢獻占比。
++
++## 5. 製造營運
++
++### 5.1 需求/產出預測
++
++- statsmodels ETS/ARIMA 為基準。階數選擇：ACF/PACF 定初步候選，
++  以 AICc 在小候選集內比較；平穩性用 ADF 檢定（p<0.05 視為平穩），
++  非平穩先差分。
++- 日曆效應（排班、國定假日、月底衝刺）以外生變數加入（ARIMAX），
++  不靠模型自己學。
++- 評估：rolling-origin 回測，報 MAPE 之外必報區間覆蓋率
++  （95% 區間實際涵蓋多少 %；長期 <85% 表示區間過窄、不確定性被低估）。
++- 序列長度 <30 期時不做季節模型，直接報水平+區間並聲明資料不足。
++
++### 5.2 ERP/WFERP 觀察性關聯分析
++
++- SQL 抽出的 ERP 資料先做三查：join 後筆數膨脹（一對多重複）、
++  缺漏鍵值造成的靜默遺失、日期語義（單據日 vs 過帳日）。
++- 所有關聯結論套 §2.5+§2.6：控制批次層混雜、禁因果措辭、
++  效應量附 CI。範例合格句：「供應商 B 的物料其相關工單不良率高出 1.8 倍
++  （95% CI 1.2–2.7，p=0.004，Bonferroni 校正後顯著）；
++  因未控制投產批量差異，此關聯尚需實驗或分層分析確認。」
++
++## 6. 實際值解讀規範（所有分析共用）
++
++| 量 | 判讀門檻 | 語句要求 |
++|---|---|---|
++| p-value | p<0.05 顯著；多重比較時 Bonferroni α/k | 必須與效應量並列；p 小效應小 → 寫「統計顯著但實務影響可忽略」 |
++| 效應量 | Cohen's d：0.2/0.5/0.8 小/中/大；勝算比看 CI 是否含 1 | 一律附 95% CI，CI 含無效果點時不得下結論 |
++| PR-AUC | 基線=不良率 | 相對基線提升倍數才是不平衡場景的可比數字 |
++| ROC-AUC | 不平衡>20:1 時失真，改用 PR-AUC | — |
++| VIF | >10 共線嚴重 | 入模前處理，報告列出被排除/合併的參數 |
++| Durbin-Watson | ≈2 無自相關；<1 或 >3 嚴重 | 觸發時改時序切分並聲明 |
++| Cpk | ≥1.33 / 1.0–1.33 / <1.0 | 附 Cp 與受控前提 |
++| PSI | <0.1 / 0.1–0.25 / >0.25 | >0.25 必須觸發行動（調查或重建基準） |
++| %GRR | <10% 可接受 / >30% 不合格 | 未估計時列為資料限制 |
++| 區間覆蓋率 | 95% 區間實際覆蓋應接近 95% | 低於 85% 必須揭露 |
++
++SHAP 三原則：(1) 只談相關與相對重要性；(2) 高相關特徵成組解讀；
++(3) 平均值之外必須展示個案分布——「平均 SHAP 最高」可能由少數極端批次驅動。
++
++## 7. 固定回報模板
++
++每次分析結果以此骨架呈現（章節可留白但不得刪除標題）：
++
++```
++## 問題與分型
++- 問題：<使用者問題的一句話重述>
++- 分型：預測 / 推論 / 描述 / 異常偵測
++- 決策用途：這個結果將被用來做什麼決定
++
++## 資料與限制
++- 範圍：<期間/機台/批號>
++- 筆數與粒度：n=<...>，每列代表<一筆/一班/一批>
++- 限制清單：<不平衡比、自相關、設限、量測能力未知…逐項列出，無則寫「未發現」>
++
++## 方法與理由
++- 方法：<具體到函式庫/模型>
++- 為何選它：<一句話，引用 §2–§5 的準則>
++- 切分方式：<TimeSeriesSplit / GroupKFold(by=…) / …>
++
++## 實際值分析
++- 關鍵數值：<指標+數值+門檻對照，如 PR-AUC 0.31（不良率基線 0.06，約 5 倍基線）>
++- 不確定性：<CI / 區間覆蓋率>
++- 具體定位：<哪個機台/參數/時間窗，偏差多少個 σ>
++
++## 限制與下一步
++- 本分析不能宣稱的事：<因果、外推範圍、未驗證項>
++- 建議下一步：<實驗設計 / 收集何種資料 / 監控部署>
++```
++
++## 8. 使用者要求 Grafana Dashboard 時的呈現規則
++
++Dashboard 的第一個讀者是假設不懂 ML 的現場主管。先講實際影響，工程術語收合：
++
++1. 每個百分比都換算成「每 1,000 件/筆會發生幾次」。
++2. 新舊模型用錯誤數比較：每 1,000 筆少錯幾筆、錯誤量相對降低多少。
++3. 分開顯示：
++   - `模型驗證`：holdout/泛化是否通過；
++   - `營運使用`：成本、門檻、subgroup 尚未核准時一律寫「尚待確認」，不得直接寫可部署。
++4. 第一視窗只回答：能不能用、比舊模型好多少、每 1,000 筆會怎樣、下一步做什麼。
++5. ROC-AUC、PR-AUC、SHAP、hash、參數只放收合的工程細節；若放圖，caption 必須解釋漏判/誤報的實際取捨。
++6. 優先圖：每千件 outcome、新舊錯誤比較、混淆矩陣、ROC+PR、流程六步、泛化健康、trial history、依 ontology property 聚合的重要因素。
++7. 語言要求：analysis contract 的 `purpose` 與 `conclusion` 必須用繁體中文撰寫——它們會直接出現在 Dashboard 與敘事報告的第一句。
++
++8. Dashboard 必須包含：
++   - 「分析目的」與「結論」文字面板（不用術語，結論必須回應分析目的）；
++   - 至少一張「資料分布」圖與一張「相關性分析」圖（manifest 的 data_profile.png / correlation_analysis.png），讓使用者先熟悉資料再看模型結果；
++   - 「特徵重要性」圖（feature_importance.png，依 ontology property 聚合）放在 SHAP 摘要圖（shap_summary.png）之前——先看整體欄位重要性，再看 SHAP 個體歸因；接「前三大規格建議」面板（manifest 的 spec_recommendations，逐條列出欄位、門檻值與建議）；
++   - 「分析報告敘事」面板：完整引用 manifest 的 narrative 欄位（已由系統從數值組合的敘事，不得改寫數字）；
++   - 「指標解讀指引」面板：引用 manifest 的 metric_guidance（primary_metric_reason、watch_first、trade_off_explanation、per_metric 白話對照），讓主管知道該先看哪個數字、怎麼取捨；
++   - 有 holdout labels/probabilities 時，必須加入 `calibration_curve.png` 與 `threshold_cost_curve.png`：前者解釋 Brier/機率可信度，後者明示 train-OOF 選出的門檻、3:1 成本與 holdout recall/precision；不得從 holdout 曲線重選門檻；
++   - 每張圖的下方必須緊接該圖的白話說明文字——你必須親自閱讀 PNG 圖表的實際內容（數值、趨勢、分布形狀），用你自己的話寫出此圖想傳達的發現；不要照抄 manifest caption，也不要用固定句式；
++   - SHAP 圖：解讀顏色與左右位置的實際含義（例如「Contract 為 Month-to-Month 的紅色點明顯靠右，代表月約客戶被模型推向流失預測」）；
++   - 相關性熱圖：指出最高與最低相關的欄位對，以及是否有預期外的強相關；
++   - 敘事報告（narrative）：不要照抄 manifest 的 deterministic narrative，而是以你對圖表與數據的理解，用敘事方式重新撰寫完整分析故事，包含你觀察到的具體數值與趨勢；
++   - 指標解讀指引（metric_guidance）：保留 deterministic 骨架（先看什麼/怎麼取捨），但加入你對本次分析為何適合這個指標的具體說明；
++   - 技術細節以 `<details>` 收合。
++
++Sandbox 已提供 `ml_presentation`。分析完成且使用者確認需要 Grafana 時：
++
++- 用 `build_manifest(...)` 產 bounded `ask-o11y-ml-presentation-v1`；不得自行添加 raw rows、path、URL 或超出 top5 trials/top20 features。
++- 用 `render_assets(manifest, output_dir, y_true=..., probabilities=result["calibrated_probabilities"], emit_figure=emit, frame=df, target=...)` 產圖（含 data_profile.png、calibration_curve.png、threshold_cost_curve.png）；不得把 raw probabilities 套用 calibrated threshold。再 `emit(manifest, name="ml-presentation.json")`。manifest 必須帶 `purpose`（分析目的）與 `conclusion`（結論）。
++- 沒有 holdout probabilities 時，不得假造混淆矩陣或 ROC/PR；明說缺少證據。
++- Dashboard 版面由 selected dashboarding Skill 根據使用者意圖決定，不硬編固定 JSON；但需有決策摘要、分析過程、實際結果、泛化/解釋四個語意區塊。
++- 分析 Dashboard 只能使用 image/text panels + opaque Sandbox bindings，不能將 Sandbox 結果偽裝為 native datasource targets。
++- 製造分類沒有 threshold/cost evidence 時，最高狀態只能是「模型驗證通過，營運門檻待確認」。

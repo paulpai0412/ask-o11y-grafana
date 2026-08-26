@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "notice": "NOTICE",
   "sbom": "docs/sbom.json",
   "sources": [
@@ -102,7 +102,7 @@
     {
       "name": "Sandbox analysis image package set",
       "status": "adopted-pinned-image-dependencies",
-      "image": "ask-o11y-sandbox-analysis@sha256:787a5ebd9c4d87757f1148b2db23ebefdefa80f069e58dfa613bfaa507379f0a",
+      "image": "ask-o11y-sandbox-analysis@sha256:3ab47ccd64edbb326b3e4b90ba5eb0e9469309559a71c7071f0e5a0e8d689548",
       "pinfile": "sandbox-analysis-mcp/Dockerfile",
       "local_patches": [],
       "components": [
@@ -115,6 +115,7 @@
         {"name": "scikit-learn", "version": "1.9.0", "license": "BSD-3-Clause", "url": "https://github.com/scikit-learn/scikit-learn"},
         {"name": "statsmodels", "version": "0.14.6", "license": "BSD-3-Clause", "url": "https://github.com/statsmodels/statsmodels"},
         {"name": "shap", "version": "0.52.0", "license": "MIT", "url": "https://github.com/shap/shap"},
+        {"name": "catboost", "version": "1.2.10", "license": "Apache-2.0", "url": "https://github.com/catboost/catboost"},
         {"name": "xgboost-cpu", "version": "3.4.0", "license": "Apache-2.0", "url": "https://github.com/dmlc/xgboost"},
         {"name": "lightgbm", "version": "4.7.0", "license": "MIT", "url": "https://github.com/microsoft/LightGBM"},
         {"name": "imbalanced-learn", "version": "0.14.2", "license": "MIT", "url": "https://github.com/scikit-learn-contrib/imbalanced-learn"},

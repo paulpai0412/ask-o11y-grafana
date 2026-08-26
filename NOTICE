@@ -84,6 +84,10 @@ Source: https://github.com/statsmodels/statsmodels (v0.14.6)
 Licensed under the MIT License.
 Source: https://github.com/shap/shap (v0.52.0)
 
+## CatBoost
+Licensed under the Apache License 2.0.
+Source: https://github.com/catboost/catboost (v1.2.10)
+
 ## XGBoost CPU
 Licensed under the Apache License 2.0.
 Source: https://github.com/dmlc/xgboost (v3.4.0)

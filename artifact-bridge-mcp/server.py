@@ -36,6 +36,7 @@ workflow_node = load_module("workflow_node", ROOT / "workflow_node.py")
 artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 artifact_assets = load_module("artifact_assets", ROOT / "artifact_assets.py")
+ml_dashboard_contract = load_module("ml_dashboard_contract", ROOT / "ml_dashboard_contract.py")
 ArtifactAuthError = artifact_store.ArtifactAuthError
 ArtifactStore = artifact_store.ArtifactStore
 WorkflowContractError = workflow_node.WorkflowContractError
@@ -239,7 +240,9 @@ def resolve_panels(context: dict[str, str], panels: Any, counters: dict[str, int
             raise WorkflowContractError(f"dashboard has more than {MAX_PANELS} panels")
         if not isinstance(panel, dict):
             raise WorkflowContractError("dashboard panel is invalid")
-        item = resolve_asset_bindings(context, json_clone(panel), counters)
+        raw_item = json_clone(panel)
+        nested_panels = raw_item.pop("panels", None)
+        item = resolve_asset_bindings(context, raw_item, counters)
         targets = item.get("targets", [])
         if not isinstance(targets, list):
             raise WorkflowContractError("dashboard panel targets must be an array")
@@ -250,8 +253,8 @@ def resolve_panels(context: dict[str, str], panels: Any, counters: dict[str, int
         datasources = [target.get("datasource") for target in item["targets"] if isinstance(target, dict) and isinstance(target.get("datasource"), dict)]
         if datasources and all(datasource == datasources[0] for datasource in datasources):
             item["datasource"] = datasources[0]
-        if "panels" in item:
-            item["panels"] = resolve_panels(context, item["panels"], counters)
+        if nested_panels is not None:
+            item["panels"] = resolve_panels(context, nested_panels, counters)
         resolved.append(item)
     return resolved
 
@@ -266,6 +269,9 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
         if len(json.dumps(dashboard, ensure_ascii=False).encode()) > MAX_DASHBOARD_BYTES:
             raise WorkflowContractError("dashboard exceeds resolver size limit")
         output = json_clone(dashboard)
+        tags = output.get("tags")
+        if isinstance(tags, list) and any("ml" in str(tag).lower() for tag in tags):
+            ml_dashboard_contract.validate_ml_dashboard_minimum(output)
         counters = {"panels": 0, "targets": 0, "assets": 0}
         output["panels"] = resolve_panels(context, output.get("panels", []), counters)
         if counters["assets"] and counters["targets"]:
@@ -386,6 +392,7 @@ def self_check() -> int:
         ]}
         result = resolve_dashboard_refs({"dashboard": query_dashboard, "_server_context": context})
         image_result = resolve_dashboard_refs({"dashboard": image_dashboard, "_server_context": context})
+        nested_image_result = resolve_dashboard_refs({"dashboard": {"panels": [{"type": "row", "collapsed": True, "panels": image_dashboard["panels"]}]}, "_server_context": context})
         analysis_target = resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$execution_ref": execution_ref}]}]}, "_server_context": context})
         mixed_dashboard = resolve_dashboard_refs({"dashboard": {"panels": [*query_dashboard["panels"], *image_dashboard["panels"]]}, "_server_context": context})
         bad = resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$plan_ref": plan_ref, "fields": ["missing"]}]}]}, "_server_context": context})
@@ -399,6 +406,7 @@ def self_check() -> int:
             "plan_ref_resolved_server_side": result.get("dashboard", {}).get("panels", [{}])[0].get("targets", [{}])[0].get("url") == "http://data.example/input.csv",
             "opaque_refs_removed_before_grafana": "$plan_ref" not in json.dumps(result.get("dashboard", {})),
             "asset_url_resolved_without_panel_generation": image_result.get("ok") and "/assets/" in image_result.get("dashboard", {}).get("panels", [{}])[0].get("options", {}).get("content", "") and "askO11yAssetBindings" not in image_result.get("dashboard", {}).get("panels", [{}])[0],
+            "nested_asset_url_resolved": nested_image_result.get("ok") and "/assets/" in json.dumps(nested_image_result.get("dashboard", {})) and "askO11yAssetBindings" not in json.dumps(nested_image_result.get("dashboard", {})),
             "analysis_target_rejected": not analysis_target.get("ok"),
             "mixed_analysis_and_native_targets_rejected": not mixed_dashboard.get("ok"),
             "unknown_field_rejected": not bad.get("ok"),

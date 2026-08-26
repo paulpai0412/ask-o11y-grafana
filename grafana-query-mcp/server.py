@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -61,8 +62,8 @@ uploaded_datasets.cleanup_expired()
 SERVER_INFO = {"name": "grafana-query-mcp", "version": "0.4.0"}
 PROTOCOL = "2025-03-26"
 CATALOG_FILE = ROOT / "config" / "authorized-grafana-datasets.json"
-MAX_RESPONSE_BYTES = 4 * 1024 * 1024
-MAX_RESULT_ROWS = 5_000
+MAX_RESPONSE_BYTES = 50 * 1024 * 1024
+MAX_RESULT_ROWS = 100_000
 MAX_RESULT_FIELDS = 200
 MAX_TIME_RANGE_SECONDS = 367 * 24 * 60 * 60
 UPLOAD_PUBLIC_BASE = os.environ.get("UPLOAD_PUBLIC_BASE", "http://127.0.0.1:8772").rstrip("/")
@@ -298,6 +299,22 @@ def validate_frame(response: dict[str, Any], contract: dict[str, Any], ref_id: s
     return {"ok": not errors, "errors": errors, "field_names": fields, "row_count": row_count, "minimum_rows": minimum_rows, "maximum_rows": maximum_rows, "maximum_fields": maximum_fields, "frames": frames}
 
 
+def verify_authorized_plan(context: dict[str, str], plan: dict[str, Any]) -> None:
+    dataset_id = str(plan.get("dataset_id") or "")
+    if not dataset_id.startswith("upload_"):
+        ontology_contract.verify_plan(plan)
+        return
+    claimed = plan.get("plan_sha256")
+    ontology = plan.get("ontology")
+    if not isinstance(claimed, str) or not isinstance(ontology, dict):
+        raise ValueError("CONTRACT_HASH_MISMATCH")
+    metadata = uploaded_datasets.inspect_upload(context, dataset_id, context.get("session_id"))
+    payload = {key: value for key, value in plan.items() if key != "plan_sha256"}
+    actual = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if claimed != actual or ontology.get("sha256") != metadata["source_sha256"] or ontology.get("snapshot_id") != f"candidate:{dataset_id}":
+        raise ValueError("CONTRACT_HASH_MISMATCH")
+
+
 def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
     unexpected = sorted(set(args) - {"plan_ref", "context", "_server_context", "_server_session_id"})
     if unexpected:
@@ -315,7 +332,7 @@ def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         return error_response(step="execute_planned_query", error=str(exc), recoverable=False, instruction="Stop; plan_ref could not be read or authorized.")
     try:
-        ontology_contract.verify_plan(plan)
+        verify_authorized_plan(context, plan)
     except ValueError as exc:
         return error_response(step="execute_planned_query", error=str(exc), recoverable=False, instruction="Stop before datasource execution; the ontology/plan contract hash is invalid.", evidence={"rejection_codes": [str(exc)]})
     expected_session = plan.get("upload_session_id")

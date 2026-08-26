@@ -28,6 +28,8 @@ def load_module(name: str, path: Path):
 contract = load_module("ontology_contract", ROOT / "ontology_contract.py")
 ontology_graph = load_module("ontology_graph", ROOT / "ontology_graph.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
+uploaded_datasets = load_module("uploaded_datasets", ROOT / "uploaded_datasets.py")
+upload_semantics = load_module("upload_semantics", ROOT / "upload_semantics.py")
 authenticate_headers = mcp_security.authenticate_headers
 require_runtime_token = mcp_security.require_runtime_token
 require_service_identity = mcp_security.require_service_identity
@@ -145,10 +147,28 @@ def tool_get_semantic_context(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _classify_uploaded_fields(dataset_id: str, fields: list[str], context: dict[str, str]) -> dict[str, Any]:
+    metadata = uploaded_datasets.inspect_upload(context, dataset_id, context.get("session_id"))
+    upload_dir = uploaded_datasets.UPLOAD_ROOT / dataset_id
+    hints = upload_semantics.load_hints(upload_dir)
+    by_name = {field["physical_name"]: field for field in hints["fields"]}
+    identity = {"snapshot_id": f"candidate:{dataset_id}", "sha256": metadata["source_sha256"], "status": "observed"}
+    classifications = []
+    for name in fields:
+        field = by_name.get(name)
+        classifications.append({"requested": name, "found": field is not None, "classification": field if field else None})
+    return response("classify_fields", snapshot=identity, classifications=classifications, candidate=True, feature_allowlist=upload_semantics.feature_allowlist(hints), target_candidate=upload_semantics.primary_target(hints), quality_policy=hints["quality_policy"])
+
+
 def tool_classify_fields(args: dict[str, Any]) -> dict[str, Any]:
     dataset_id, fields = args.get("dataset_id"), args.get("fields")
     if not isinstance(dataset_id, str) or not isinstance(fields, list) or not fields or len(fields) > MAX_FIELDS or any(not isinstance(field, str) or not field for field in fields):
         raise ValueError(f"dataset_id and 1..{MAX_FIELDS} fields are required")
+    if dataset_id.startswith("upload_"):
+        context = args.get("_server_context")
+        if not isinstance(context, dict):
+            raise ValueError("uploaded dataset requires authenticated session context")
+        return _classify_uploaded_fields(dataset_id, fields, context)
     snapshot, identity = load_verified(args.get("snapshot_ref"), dataset_id=dataset_id)
     dataset = contract.find_dataset(snapshot, dataset_id)
     if dataset is None:
@@ -188,7 +208,7 @@ def rpc_error(rid: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
 
 
-def handle_rpc(msg: dict[str, Any]):
+def handle_rpc(msg: dict[str, Any], context: dict[str, str] | None = None):
     method, rid = msg.get("method", ""), msg.get("id")
     if method == "initialize":
         return rpc_result(rid, {"protocolVersion": PROTOCOL, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": SERVER_INFO})
@@ -206,8 +226,11 @@ def handle_rpc(msg: dict[str, Any]):
             return rpc_error(rid, -32602, "tool arguments must be an object")
         schema = next(tool["inputSchema"] for tool in TOOLS if tool["name"] == name)
         unexpected = sorted(set(args) - set(schema["properties"]))
+        internal_args = dict(args)
+        if context is not None:
+            internal_args["_server_context"] = context
         try:
-            output = handler(args) if not unexpected else (_ for _ in ()).throw(ValueError("unsupported tool arguments: " + ", ".join(unexpected)))
+            output = handler(internal_args) if not unexpected else (_ for _ in ()).throw(ValueError("unsupported tool arguments: " + ", ".join(unexpected)))
         except (OSError, ValueError, TypeError, KeyError) as exc:
             output = {"ok": False, "step": name, "error": str(exc), "rejection_codes": [str(exc).split(":", 1)[0]]}
         return rpc_result(rid, {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}], "isError": not output.get("ok", False)})
@@ -238,14 +261,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path.rstrip("/") != "/mcp":
             return self._send(404, {"error": "not found"})
-        if authenticate_headers(self.headers) is None:
+        context = authenticate_headers(self.headers)
+        if context is None:
             return self._send(401, {"error": "authenticated MCP service identity is required"})
         try:
             payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         except (ValueError, TypeError):
             return self._send(400, rpc_error(None, -32700, "parse error"))
         messages = payload if isinstance(payload, list) else [payload]
-        replies = [reply for message in messages if isinstance(message, dict) and (reply := handle_rpc(message)) is not None]
+        replies = [reply for message in messages if isinstance(message, dict) and (reply := handle_rpc(message, context)) is not None]
         if not replies:
             return self._send(202)
         self._send(200, replies if isinstance(payload, list) else replies[0])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import contextlib
 import csv
@@ -89,6 +90,20 @@ TOOLS = [
         },
     },
     {
+        "name": "execute_ml_contract",
+        "description": "Structured supervised-ML executor over one authorized Grafana frame. Takes the Planner's opaque plan_ref as contract_ref; the trusted host composes the full pipeline from the pinned analysis contract (target, features, split, autotune budget, objective) using the image's ml_preprocessing/ml_autoresearch/ml_presentation modules, then emits ml-presentation.json plus plain-language PNG assets. No model-authored Python. Use this for standard classification/autotune requests instead of execute_python_analysis.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "frame_ref": {"type": "string", "description": "Opaque authorized grafana-frame artifact ref."},
+                "contract_ref": {"type": "string", "description": "Opaque Planner query-plan artifact ref carrying the ontology-pinned analysis contract."},
+                "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295, "default": DEFAULT_SEED},
+            },
+            "required": ["frame_ref", "contract_ref"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "execute_python_preprocessing",
         "description": "Execute generated Python over one authorized original uploaded CSV/XLSX document in a fresh network-denied OpenSandbox after preview confirmation. The sandbox receives document_path, input_format, pd, np, emit, and emit_frame. emit_frame returns both a derived_frame_ref and a session-owned derived_dataset_id for later Sandbox or Grafana Query steps.",
         "inputSchema": {
@@ -168,9 +183,9 @@ def context_from_args(args: dict[str, Any]) -> dict[str, str]:
 
 def sandbox_policy() -> dict[str, Any]:
     return {
-        "timeout_seconds": 600,
+        "timeout_seconds": 1200,
         "ready_timeout_seconds": 20,
-        "resource": {"cpu": "1", "memory": "1Gi"},
+        "resource": {"cpu": "4", "memory": "2Gi"},
         "network_default_action": "deny",
         "env": {},
         "volumes": [],
@@ -256,6 +271,43 @@ def validate_frame(frame: dict[str, Any]) -> tuple[list[str], int]:
     return [str(name) for name in names], next(iter(lengths))
 
 
+def validate_ml_execution_contract(contract: dict[str, Any], analysis: dict[str, Any]) -> dict[str, str]:
+    kind = analysis.get("kind")
+    if kind not in ontology_contract.ALLOWED_ANALYSIS_KINDS:
+        raise WorkflowContractError("unsupported ML analysis kind")
+    expected_template = f"ask_o11y_{kind}_v1"
+    if contract.get("execution_template") != expected_template:
+        raise WorkflowContractError("ML execution template does not match analysis kind")
+    if contract.get("preprocessing_fit_scope") != "training_only":
+        raise WorkflowContractError("ML preprocessing must be fit on training data only")
+    result: dict[str, Any] = {"execution_template": expected_template, "preprocessing_fit_scope": "training_only"}
+    autoresearch = contract.get("autoresearch")
+    if autoresearch is not None:
+        if not isinstance(autoresearch, dict) or autoresearch.get("objective") not in {"accuracy", "roc_auc", "pr_auc"}:
+            raise WorkflowContractError("autoresearch objective is invalid")
+        budget = autoresearch.get("search_budget")
+        if isinstance(budget, bool) or not isinstance(budget, int) or not 1 <= budget <= 40:
+            raise WorkflowContractError("autoresearch budget is invalid")
+        result["autoresearch"] = autoresearch
+    return result
+
+
+def verify_plan_for_context(context: dict[str, str], plan: dict[str, Any]) -> None:
+    dataset_id = str(plan.get("dataset_id") or "")
+    if not dataset_id.startswith("upload_"):
+        ontology_contract.verify_plan(plan)
+        return
+    claimed = plan.get("plan_sha256")
+    ontology = plan.get("ontology")
+    if not isinstance(claimed, str) or not isinstance(ontology, dict):
+        raise WorkflowContractError("CONTRACT_HASH_MISMATCH")
+    metadata = uploaded_datasets.inspect_upload(context, dataset_id, context.get("session_id"))
+    payload = {key: value for key, value in plan.items() if key != "plan_sha256"}
+    actual = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if claimed != actual or ontology.get("sha256") != metadata["source_sha256"] or ontology.get("snapshot_id") != f"candidate:{dataset_id}":
+        raise WorkflowContractError("CONTRACT_HASH_MISMATCH")
+
+
 def read_plan_contract(context: dict[str, str], source_run_id: str, field_names: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         plan = ARTIFACTS.read_json(context, f"artifact://{source_run_id}/query-plan")
@@ -264,11 +316,12 @@ def read_plan_contract(context: dict[str, str], source_run_id: str, field_names:
     if not isinstance(plan, dict):
         raise WorkflowContractError("query plan must be an object")
     try:
-        ontology_contract.verify_plan(plan)
-    except ValueError as exc:
+        verify_plan_for_context(context, plan)
+    except (ValueError, WorkflowContractError) as exc:
         raise WorkflowContractError(str(exc)) from exc
-    contract = plan.get("analysis_input_contract") if isinstance(plan, dict) else {}
-    rules = contract.get("validity_rules", []) if isinstance(contract, dict) else []
+    raw_contract = plan.get("analysis_input_contract") if isinstance(plan, dict) else {}
+    contract: dict[str, Any] = raw_contract if isinstance(raw_contract, dict) else {}
+    rules = contract.get("validity_rules", [])
     if not isinstance(rules, list):
         raise WorkflowContractError("query plan validity_rules must be an array")
     for rule in rules:
@@ -281,6 +334,11 @@ def read_plan_contract(context: dict[str, str], source_run_id: str, field_names:
     semantic = {key: plan.get(key) for key in ("ontology", "analysis_contract", "plan_sha256") if plan.get(key) is not None}
     if semantic and set(semantic) != {"ontology", "analysis_contract", "plan_sha256"}:
         raise WorkflowContractError("ontology analysis plan contract is incomplete")
+    if semantic:
+        analysis = semantic.get("analysis_contract")
+        if not isinstance(analysis, dict):
+            raise WorkflowContractError("ontology analysis contract must be an object")
+        semantic.update(validate_ml_execution_contract(contract, analysis))
     return rules, semantic
 
 
@@ -629,6 +687,183 @@ def output_summary(execution: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def compose_ml_template(plan: dict[str, Any], contract: dict[str, Any], seed: int) -> str:
+    """Deterministic trusted template for standard supervised ML; host-owned, never model-authored."""
+    kind = str(contract["kind"])
+    try:
+        seed = int(seed)
+    except (TypeError, ValueError) as exc:
+        raise WorkflowContractError("execution seed is invalid") from exc
+    target = str(contract["target"])
+    features = [str(name) for name in contract["features"]]
+    split = contract.get("split") or {}
+    autoresearch = plan.get("analysis_input_contract", {}).get("autoresearch") or {}
+    try:
+        budget = int(autoresearch.get("search_budget", 20))
+    except (TypeError, ValueError) as exc:
+        raise WorkflowContractError("autoresearch budget is invalid") from exc
+    objective = str(autoresearch.get("objective", "roc_auc"))
+    minimum = autoresearch.get("objective_minimum")
+    positive = contract.get("positive_class")
+    purpose = str(contract.get("purpose") or "依核准的分析契約預測目標，供主管判斷是否可試用。")
+    conclusion = str(contract.get("conclusion") or "模型驗證完成；營運門檻與成本確認前不建議直接部署。")
+    dataset_id = str(plan.get("dataset_id") or "")
+    ontology = plan.get("ontology") or {}
+    try:
+        test_fraction = float(split.get("test_fraction", 0.2))
+    except (TypeError, ValueError) as exc:
+        raise WorkflowContractError("split test_fraction is invalid") from exc
+    imbalance = contract.get("class_imbalance_strategy")
+    cost_matrix = contract.get("cost_matrix")
+    minimum_recall = contract.get("minimum_recall")
+    template = f'''import json
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from ml_autoresearch import run_classification_autoresearch
+from ml_presentation import build_manifest, render_assets, render_shap_summary, recommend_spec_values
+import shap
+
+TARGET = {target!r}
+FEATURES = {features!r}
+POSITIVE = {positive!r}
+SEED = {seed}
+BUDGET = {budget}
+OBJECTIVE = {objective!r}
+TEST_FRACTION = {test_fraction!r}
+IMBALANCE = {imbalance!r}
+KIND = {kind!r}
+DATASET_ID = {dataset_id!r}
+SNAPSHOT_SHA = {str(ontology.get("sha256") or "")!r}
+SNAPSHOT_ID = {str(ontology.get("snapshot_id") or "")!r}
+PLAN_SHA = {str(plan.get("plan_sha256") or "")!r}
+MINIMUM = {minimum!r}
+COST_MATRIX = {cost_matrix!r}
+MIN_RECALL = {minimum_recall!r}
+PURPOSE = {purpose!r}
+CONCLUSION = {conclusion!r}
+
+if TARGET not in df.columns:
+    raise ValueError("target column missing from authorized frame")
+missing = [name for name in FEATURES if name not in df.columns]
+if missing:
+    raise ValueError("authorized frame lacks planned features: " + ", ".join(missing))
+
+raw_target = df[TARGET]
+if POSITIVE is None:
+    y_all = pd.to_numeric(raw_target, errors="coerce")
+    valid = y_all.notna()
+    work = df.loc[valid].copy()
+    y = y_all.loc[valid].astype(int)
+else:
+    y = (raw_target.astype(str).str.strip() == str(POSITIVE)).astype(int)
+    work = df.copy()
+X = work[FEATURES]
+if y.nunique() != 2:
+    raise ValueError("target must be binary after contract mapping")
+if IMBALANCE == "balanced":
+    X = X.copy(); X["__sample_weight__"] = 1.0  # placeholder keeps column count stable
+
+X_train, X_hold, y_train, y_hold = train_test_split(X, y, test_size=TEST_FRACTION, random_state=SEED, stratify=y)
+if IMBALANCE == "balanced":
+    X_train = X_train.drop(columns=["__sample_weight__"]); X_hold = X_hold.drop(columns=["__sample_weight__"])
+
+result = run_classification_autoresearch(X_train, y_train, X_hold, y_hold, kind=KIND, objective=OBJECTIVE, seed=SEED, n_iter=BUDGET, cv_folds=5, objective_minimum=MINIMUM, cost_matrix=COST_MATRIX, minimum_recall=MIN_RECALL)
+
+positive_rate = float(y_hold.mean())
+baseline_accuracy = float((y_hold == 0).mean())
+probs = result["calibrated_probabilities"]
+preds = [1 if value >= result["operating_threshold"] else 0 for value in probs]
+tp = sum(1 for actual, predicted in zip(y_hold.tolist(), preds) if actual == 1 and predicted == 1)
+fn = sum(1 for actual, predicted in zip(y_hold.tolist(), preds) if actual == 1 and predicted == 0)
+fp = sum(1 for actual, predicted in zip(y_hold.tolist(), preds) if actual == 0 and predicted == 1)
+tn = sum(1 for actual, predicted in zip(y_hold.tolist(), preds) if actual == 0 and predicted == 0)
+errors_per_1000 = round((fn + fp) / len(y_hold) * 1000)
+
+manifest = build_manifest(
+    purpose=PURPOSE,
+    conclusion=CONCLUSION,
+    identity={{"run_id": "ml-contract", "dataset_id": DATASET_ID, "ontology_snapshot_id": SNAPSHOT_ID, "ontology_sha256": SNAPSHOT_SHA, "contract_sha256": PLAN_SHA, "seed": SEED}},
+    objective={{"target": TARGET, "task_kind": "binary_classification", "primary_metric": OBJECTIVE, "positive_class": POSITIVE, "threshold": result["operating_threshold"], "threshold_cost_approved": bool(COST_MATRIX), "cost_matrix": COST_MATRIX}},
+    data={{"rows": int(len(work)), "features": len(FEATURES), "train_rows": int(len(X_train)), "holdout_rows": int(len(X_hold)), "split_kind": "stratified_holdout", "excluded_fields": [{{"name": name, "reason": "未納入模型特徵"}} for name in df.columns if name not in FEATURES and name != TARGET]}},
+    process={{"model_family": KIND, "search_budget": BUDGET, "completed_trials": BUDGET, "cv_folds": 5, "preprocessing_fit_scope": "training_only", "calibration_method": "isotonic", "best_params": result["best_params"]}},
+    baseline_metrics={{"accuracy": baseline_accuracy}},
+    selected_metrics=result["metrics"],
+    guards={{**result["guards"], "verdict": result["verdict"]}},
+    trials=result["trials"],
+    features=[{{"name": item["name"], "importance": item["importance"], "explanation": item["name"] + " 是模型參考的資料；重要不代表因果"}} for item in result["top_features"]],
+    limitations=["觀察性資料，不能解讀為因果。", "營運門檻尚未核准，不能直接部署。"],
+)
+manifest["operating_scenarios"] = result["operating_scenarios"]
+render_assets(manifest, Path("/tmp/ml-presentation"), y_true=y_hold.tolist(), probabilities=probs, emit_figure=emit, frame=work[FEATURES + [TARGET]], target=TARGET)
+emit(manifest, name="ml-presentation.json")
+
+'''
+
+    shap_block = """
+if KIND in ("catboost", "gradient_boosting", "random_forest_shap", "xgboost"):
+    estimator = result["estimator"]
+    preprocess = estimator.named_steps["preprocess"]
+    model_only = estimator.named_steps["model"]
+    sample_n = min(400, X_hold.shape[0])
+    X_sample = X_hold.sample(sample_n, random_state=SEED)
+    transformed = preprocess.transform(X_sample)
+    if hasattr(transformed, "toarray"):
+        transformed = transformed.toarray()
+    shap_model = model_only.model_ if KIND == "catboost" else model_only
+    raw_shap = shap.TreeExplainer(shap_model).shap_values(transformed)
+    if isinstance(raw_shap, list):
+        raw_shap = raw_shap[-1]
+    shap_values = np.asarray(raw_shap)
+    if shap_values.ndim == 3:
+        shap_values = shap_values[:, :, -1]
+    transformed_names = [str(name).split("__", 1)[-1] for name in preprocess.get_feature_names_out()]
+    shap_by_column = {}
+    for column_index, column_name in enumerate(transformed_names):
+        target_column = next((f for f in FEATURES if column_name == f or column_name.startswith(f + "_")), column_name)
+        if target_column in shap_by_column:
+            shap_by_column[target_column] = shap_by_column[target_column] + shap_values[:, column_index]
+        else:
+            shap_by_column[target_column] = shap_values[:, column_index].copy()
+    render_shap_summary(manifest, shap_values, transformed_names, transformed, Path("/tmp/ml-presentation"), emit_figure=emit)
+    recommend_spec_values(manifest, shap_by_column=shap_by_column, sample_frame=X_sample, top_n=3)
+    emit(manifest, name="ml-presentation.json")
+"""
+    return template + shap_block
+
+
+def execute_ml_contract(args: dict[str, Any], executor: Callable[[str, str, int], dict[str, Any]] = execute_opensandbox) -> dict[str, Any]:
+    step = "execute_ml_contract"
+    unexpected = sorted(set(args) - {"frame_ref", "contract_ref", "seed", "context", "_server_context"})
+    if unexpected:
+        return error_response(step=step, error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; pass only the opaque frame ref, plan contract ref, and seed.")
+    frame_ref = args.get("frame_ref")
+    contract_ref = args.get("contract_ref")
+    seed = args.get("seed", DEFAULT_SEED)
+    if not isinstance(frame_ref, str) or not isinstance(contract_ref, str):
+        return error_response(step=step, error="frame_ref and contract_ref are required", recoverable=False, instruction="Stop; Grafana Query must return a frame_ref and the Planner a plan_ref first.")
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 4294967295:
+        return error_response(step=step, error="seed must be an integer from 0 to 4294967295", recoverable=False, instruction="Stop; provide a valid deterministic seed.")
+    try:
+        context = context_from_args(args)
+        source_run_id, parts = parse_artifact_ref(contract_ref)
+        if parts != ("query-plan",):
+            raise WorkflowContractError("contract_ref must reference a query-plan")
+        plan = ARTIFACTS.read_json(context, contract_ref)
+        verify_plan_for_context(context, plan)
+        contract = plan.get("analysis_contract")
+        if not isinstance(contract, dict):
+            raise WorkflowContractError("query plan has no analysis contract")
+        analysis_input = plan.get("analysis_input_contract") or {}
+        enforced = validate_ml_execution_contract(analysis_input, contract)
+        template = compose_ml_template(plan, contract, seed)
+        ast.parse(template)
+    except (PermissionError, WorkflowContractError, ValueError, TypeError, KeyError, OSError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; the analysis contract is invalid or not authorized.")
+    return execute_python_analysis({"frame_ref": frame_ref, "python_code": template, "seed": seed, "_server_context": context}, executor=executor, step=step)
+
+
 def execute_python_analysis(
     args: dict[str, Any],
     executor: Callable[[str, str, int], dict[str, Any]] = execute_opensandbox,
@@ -958,6 +1193,7 @@ def handle_rpc(msg: dict[str, Any]):
             out = error_response(step=name, error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; pass only arguments declared by this tool schema.")
         else:
             handlers = {
+                "execute_ml_contract": execute_ml_contract,
                 "execute_python_analysis": execute_python_analysis,
                 "execute_python_preprocessing": execute_python_preprocessing,
                 "list_python_analyses": list_python_analyses,
@@ -1097,7 +1333,7 @@ def self_check() -> None:
         assert len(wide_summary["tabular_outputs"][0]["fields"]) == MAX_OUTPUT_FIELDS
         oversized_inline = output_summary({"results": [{"text": "x" * (MAX_INLINE_RESULT_BYTES + 1), "mime": {}, "display_name": "summary.txt"}], "stdout": [], "stderr": []})
         assert oversized_inline["inline_results"] == [] and oversized_inline["inline_results_truncated"]
-        assert result["provenance"]["limits"] == {"timeout_seconds": 600, "source_bytes": MAX_CODE_BYTES, "rpc_body_bytes": MAX_RPC_BODY_BYTES, "input_bundle_bytes": MAX_INPUT_BUNDLE_BYTES, "captured_execution_bytes": MAX_OUTPUT_BYTES, "stdout_stderr_bytes_each": MAX_LOG_BYTES, "inline_result_bytes": MAX_INLINE_RESULT_BYTES, "output_fields": MAX_OUTPUT_FIELDS, "signed_download_bytes": artifact_assets.MAX_ASSET_BYTES}
+        assert result["provenance"]["limits"] == {"timeout_seconds": 1200, "source_bytes": MAX_CODE_BYTES, "rpc_body_bytes": MAX_RPC_BODY_BYTES, "input_bundle_bytes": MAX_INPUT_BUNDLE_BYTES, "captured_execution_bytes": MAX_OUTPUT_BYTES, "stdout_stderr_bytes_each": MAX_LOG_BYTES, "inline_result_bytes": MAX_INLINE_RESULT_BYTES, "output_fields": MAX_OUTPUT_FIELDS, "signed_download_bytes": artifact_assets.MAX_ASSET_BYTES}
         assert observed["seed"] == 7 and observed["bundle"]["frame"]["data"]["values"][0] == [1, 2, 3]
         assert observed["bundle"]["validity_rules"][0]["field"] == "heat_rate_valid"
         assert "display(df)" not in json.dumps(result) and '"values"' not in json.dumps(result)
@@ -1136,7 +1372,7 @@ def self_check() -> None:
         oversized = execute_python_analysis({**args, "python_code": "x" * (MAX_CODE_BYTES + 1)}, executor=lambda *_: (_ for _ in ()).throw(AssertionError("must not execute")))
         assert not oversized["ok"] and "exceeds" in oversized["error"]
         policy = sandbox_policy()
-        assert policy["network_default_action"] == "deny" and policy["env"] == {} and policy["volumes"] == [] and policy["resource"] == {"cpu": "1", "memory": "1Gi"}
+        assert policy["network_default_action"] == "deny" and policy["env"] == {} and policy["volumes"] == [] and policy["resource"] == {"cpu": "4", "memory": "2Gi"}
         raw = handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "execute_python_analysis", "arguments": {**args, "frame": []}}})
         assert raw is not None
         try:
