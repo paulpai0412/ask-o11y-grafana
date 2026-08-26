@@ -64,9 +64,15 @@ def main() -> int:
     shap_values = rng.normal(0, 0.3, size=(30, 6))
     sample_values = rng.normal(50, 10, size=(30, 6))
     feature_names = ["Contract", "Tenure", "Charge", "num__Age", "cat__Contract_Two Year", "cat__Offer_None"]
+    fields_view = [
+        {"name": "Contract", "semantic_kind": "treatment_candidate", "analysis_role": "feature"},
+        {"name": "Tenure", "semantic_kind": "measurement", "unit": "month", "analysis_role": "feature"},
+        {"name": "Charge", "semantic_kind": "measurement", "unit": "USD", "analysis_role": "feature"},
+    ]
 
     with tempfile.TemporaryDirectory() as tmp:
-        presentation.render_assets(manifest, Path(tmp), y_true=labels, probabilities=probabilities, frame=frame, target="churn")
+        evaluation_frame = frame.iloc[: len(labels)].drop(columns=["churn"])
+        presentation.render_assets(manifest, Path(tmp), y_true=labels, probabilities=probabilities, frame=frame, target="churn", fields_view=fields_view, evaluation_frame=evaluation_frame, target_values=frame["churn"].tolist())
         png_names = {asset["name"] for asset in manifest["artifacts"]}
 
         figures = presentation.build_plotly_figures(
@@ -74,14 +80,21 @@ def main() -> int:
             shap_values=shap_values,
             feature_names=feature_names,
             sample_values=sample_values,
+            fields_view=fields_view,
+            evaluation_frame=evaluation_frame,
+            target_values=frame["churn"].tolist(),
         )
 
         # Data-driven views: only charts where interactivity adds value.
         # Each view adapts the Plotly trace type to its data shape.
         expected = {
             "data_profile": "bar",
-            "correlation_analysis": "heatmap",
-            "trial_history": "scatter",
+            "ontology_field_map": "scatter",
+            "distribution_small_multiples": "bar",
+            "semantic_correlation": "heatmap",
+            "feature_target_relationships": "bar",
+            "error_slice_analysis": "bar",
+            "baseline_error_comparison": "bar",
             "feature_importance": "bar",
             "confusion_matrix": "heatmap",
             "roc_pr_curves": "scatter",
@@ -91,6 +104,8 @@ def main() -> int:
         }
         missing = expected.keys() - figures.keys()
         assert not missing, f"missing plotly figures: {sorted(missing)}"
+        removed = {"analysis_process", "trial_history", "per_1000_outcomes", "correlation_analysis"}
+        assert not (set(figures) & removed), sorted(set(figures) & removed)
         assert len(figures) <= contract.MAX_FIGURES
 
         for name, expected_type in expected.items():
@@ -110,6 +125,9 @@ def main() -> int:
             shap_values=shap_values,
             feature_names=feature_names,
             sample_values=sample_values,
+            fields_view=fields_view,
+            evaluation_frame=evaluation_frame,
+            target_values=frame["churn"].tolist(),
         )
         if json.dumps(figures, sort_keys=True) != json.dumps(repeat, sort_keys=True):
             raise AssertionError("plotly figures are not deterministic")
@@ -124,7 +142,7 @@ def main() -> int:
             raise AssertionError(f"locked threshold {threshold} not embedded in threshold_cost_curve")
 
         # PNG assets remain the fallback evidence set.
-        assert {"confusion_matrix.png", "calibration_curve.png", "threshold_cost_curve.png", "roc_pr_curves.png"} <= png_names
+        assert {"ontology_field_map.png", "distribution_small_multiples.png", "semantic_correlation.png", "feature_target_relationships.png", "error_slice_analysis.png", "confusion_matrix.png", "calibration_curve.png", "threshold_cost_curve.png", "roc_pr_curves.png"} <= png_names
 
     print("ok: plotly figures for all ML assets")
     return 0

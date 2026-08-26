@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Ask O11y Plotly">
+  <rect width="64" height="64" rx="10" fill="#1f2937"/>
+  <path d="M12 48V16M12 48H54" fill="none" stroke="#9ca3af" stroke-width="3"/>
+  <path d="M16 43l10-12 9 6 15-20" fill="none" stroke="#4fd1c5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="26" cy="31" r="3" fill="#eda06a"/>
+  <circle cx="35" cy="37" r="3" fill="#eda06a"/>
+</svg>

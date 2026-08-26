@@ -42,6 +42,8 @@ def main() -> int:
     })
     assert set(clean) == {"data", "layout", "config"}, clean
     assert clean["config"] == {"displaylogo": False, "responsive": True}, clean["config"]
+    assert contract.sanitize_figure(clean) == clean, "sanitizer must be idempotent across Sandbox → Bridge"
+    expect_reject(contract, {**clean, "config": {"displaylogo": True}}, "config")
 
     # Allowed trace types.
     for trace_type, trace in (
@@ -76,7 +78,12 @@ def main() -> int:
         expect_reject(contract, {"data": [{"type": "scatter", "x": [1], key: value}], "layout": {}}, key)
         expect_reject(contract, {"data": [{"type": "scatter", "x": [1]}], "layout": {key: value}}, key)
 
-    # Layout whitelist.
+    # Layout whitelist: bounded small-multiples support up to 12 axes, never 13.
+    contract.sanitize_figure({
+        "data": [{"type": "bar", "x": ["a"], "y": [1], "xaxis": "x12", "yaxis": "y12"}],
+        "layout": {"xaxis12": {"title": "x"}, "yaxis12": {"title": "y"}},
+    })
+    expect_reject(contract, {"data": [{"type": "bar", "x": ["a"], "y": [1]}], "layout": {"xaxis13": {"title": "x"}}}, "layout key")
     expect_reject(contract, {"data": [{"type": "bar", "x": ["a"], "y": [1]}], "layout": {"unknown_key": 1}}, "layout key")
 
     # Dangerous strings.
@@ -86,12 +93,7 @@ def main() -> int:
     expect_reject(contract, {"data": [{"type": "bar", "x": ["x" * 201], "y": [1]}], "layout": {}}, "string length")
 
     # Non-finite numbers and booleans-as-numbers.
-    try:
-        contract.sanitize_figure({"data": [{"type": "scatter", "x": [1, float("nan")], "y": [1]}], "layout": {}})
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected NaN rejection")
+    expect_reject(contract, {"data": [{"type": "scatter", "x": [1, math.nan], "y": [1]}], "layout": {}}, "finite")
     expect_reject(contract, {"data": [{"type": "scatter", "x": [True], "y": [1]}], "layout": {}}, "expected string items")
     expect_reject(contract, {"data": [{"type": "scatter", "x": [1, "two"], "y": [1, 2]}], "layout": {}}, "expected string items")
 

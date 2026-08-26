@@ -1,11 +1,11 @@
 # Plotly-first ML 圖表 + PNG Fallback 設計
 
-日期：2026-08-26　狀態：approved（TDD 一步到位實作）
+日期：2026-08-26　狀態：implemented（TDD + Grafana/Chromium E2E）
 依據：[Plotly plugin 研究](./ml-grafana-plotly-plugin-research.md)
 
 ## 目標
 
-ML Preview 的 13 張圖全部改為 **Plotly 主呈現**；PNG 不再並排顯示，降級為 **自動 fallback**（plugin 錯誤、未安裝、列印、稽核）。不繞過唯一讀／唯一算／唯一寫。
+ML Preview 的 14 張圖全部產生 **Plotly 主呈現**；PNG 不再並排顯示，降級為 **自動 fallback**（plugin 錯誤、未安裝、列印、稽核）。不繞過唯一讀／唯一算／唯一寫。
 
 ## 架構
 
@@ -35,7 +35,8 @@ mcp-grafana（唯一 writer）→ Preview → 同 UID publish
 - 字串：≤200 字元、禁 `<`、`>`、`javascript:`、`http` 開頭。
 - 數字：finite、非 bool。
 - 上限：每 figure JSON ≤64 KiB；每執行 ≤14 figures；每 trace 陣列 ≤2,000 點；每 figure 總點數 ≤6,000；heatmap z ≤100×100。
-- `config` 由 host 固定：`{displaylogo:false, responsive:true}`。
+- `config` 由 host 固定：`{displaylogo:false, responsive:true}`；sanitizer idempotent，Bridge 只接受完全相同的 fixed config。
+- small-multiples layout 只允許 `xaxis/yaxis` 1..12；`axis13` 與其他 layout key fail closed。
 
 ## Dashboard contract 變更
 
@@ -52,7 +53,7 @@ mcp-grafana（唯一 writer）→ Preview → 同 UID publish
 
 ## Grafana panel（grafana-panels/asko11y-plotly-panel）
 
-- React + plotly.js-dist-min（bundle 進 module.js；@grafana/react 為 externals）。
+- React + plotly.js-dist-min（bundle 進 module.js；React 與 `@grafana/data` 為 externals）。
 - `resolveRenderMode()`：figure 無效或 render 丟例外 → fallback `<img>`。
 - 禁止 `new Function`／eval／datasource target／動態 script（CI grep 斷言）。
 - 本地以 unsigned allowlist 安裝；production 需簽章。
@@ -62,12 +63,19 @@ mcp-grafana（唯一 writer）→ Preview → 同 UID publish
 | 檢查 | seam |
 | --- | --- |
 | `check-ml-plotly-contract.py` | sanitizer 正反向、上限、finite、禁鍵 |
-| `check-ml-plotly-presentation.py` | 13 圖全數產生 PNG + sanitized figure；deterministic |
+| `check-ml-plotly-presentation.py` | 14 圖全數產生 PNG + sanitized figure；deterministic |
 | `check-artifact-bridge-plotly.py` | binding 注入／拒絕 script、錯 plugin、literal data |
 | `check-ml-dashboard-contract.py` / write-gate | 新 panel type + fallback 規則 |
 | image rebuild | sandbox 內全部 ML checks 綠 |
 | plugin unit test | render-mode fallback 邏輯、dist 無 `new Function` |
 | E2E | 真實 artifact → bridge resolve → Grafana API 建立 Preview → 瀏覽器截圖 Plotly 渲染、fallback 邏輯、無 console error |
+
+## E2E 結果
+
+- 實際安裝 unsigned `asko11y-plotly-panel`，Grafana 13.1.2 註冊成功。
+- Telco：14 PNG + 14 Plotly；Bridge 解析 14 asset bindings + 8 Plotly bindings，Grafana API 寫入/讀回成功。
+- Chromium：Plotly toolbar/graphics 實際出現；collapsed model-evidence row 可展開；figure 缺失時 PNG fallback 實際渲染；無 console/page error。
+- 證據：`.scratch/telco-data-atlas-e2e/dashboard-*.png`。
 
 ## 非目標
 

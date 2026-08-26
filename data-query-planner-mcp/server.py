@@ -247,6 +247,7 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
                 **analysis_contract,
                 "included_fields": semantic_validation["included_fields"],
                 "excluded_fields": semantic_validation["excluded_fields"],
+                "field_views": semantic_validation.get("field_views", []),
                 "interpretation": "predictive_association_not_causation",
             }
             plan["analysis_input_contract"]["ontology_snapshot_sha256"] = semantic_validation["snapshot"]["sha256"]

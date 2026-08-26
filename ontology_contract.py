@@ -208,4 +208,15 @@ def validate_analysis_contract(snapshot: dict[str, Any], contract: dict[str, Any
         reject("ANALYSIS_CONTRACT_INVALID", "analysis.kind_seed")
     selected = set(included)
     excluded = [{"field": field["physical_name"], "reason": field["reason"], "status": field["status"], "role": field["analysis_role"]} for field in dataset["fields"] if field["physical_name"] not in selected and field["physical_name"] not in {dataset["target"], dataset["time_identity"], dataset["quality_policy"]["field"]}]
-    return {"conforms": not codes, "rejection_codes": codes[:32], "failed_rules": failed_rules[:64], "snapshot": snapshot_identity(snapshot), "included_fields": included, "excluded_fields": excluded[:MAX_FIELDS]}
+    return {
+        "conforms": not codes,
+        "rejection_codes": codes[:32],
+        "failed_rules": failed_rules[:64],
+        "snapshot": snapshot_identity(snapshot),
+        "included_fields": included,
+        "excluded_fields": excluded[:MAX_FIELDS],
+        "field_views": [
+            {key: field.get(key) for key in ("physical_name", "unit", "semantic_kind", "analysis_role", "reason") if key in field}
+            for field in dataset["fields"][:MAX_FIELDS]
+        ],
+    }

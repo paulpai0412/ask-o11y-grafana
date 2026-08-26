@@ -1,0 +1,19 @@
+{
+  "type": "panel",
+  "name": "Ask O11y Plotly",
+  "id": "asko11y-plotly-panel",
+  "info": {
+    "description": "Bounded interactive Plotly figures with PNG fallback for Ask O11y ML previews.",
+    "author": { "name": "Ask O11y" },
+    "keywords": ["machine-learning", "plotly", "ask-o11y"],
+    "logos": { "small": "img/logo.svg", "large": "img/logo.svg" },
+    "links": [],
+    "screenshots": [],
+    "version": "0.1.0",
+    "updated": "2026-08-26"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=11.0.0",
+    "plugins": []
+  }
+}

@@ -709,6 +709,18 @@ def compose_ml_template(plan: dict[str, Any], contract: dict[str, Any], seed: in
     conclusion = str(contract.get("conclusion") or "模型驗證完成；營運門檻與成本確認前不建議直接部署。")
     dataset_id = str(plan.get("dataset_id") or "")
     ontology = plan.get("ontology") or {}
+    raw_field_views = (plan.get("analysis_contract") or {}).get("field_views") or []
+    fields_view = [
+        {
+            "name": str(item.get("physical_name") or item.get("name")),
+            "semantic_kind": str(item.get("semantic_kind") or "unregistered"),
+            "unit": item.get("unit"),
+            "analysis_role": str(item.get("analysis_role") or "unknown"),
+            **({"reason": str(item["reason"])} if item.get("reason") else {}),
+        }
+        for item in raw_field_views
+        if isinstance(item, dict) and (item.get("physical_name") or item.get("name"))
+    ][:24]
     try:
         test_fraction = float(split.get("test_fraction", 0.2))
     except (TypeError, ValueError) as exc:
@@ -743,6 +755,7 @@ COST_MATRIX = {cost_matrix!r}
 MIN_RECALL = {minimum_recall!r}
 PURPOSE = {purpose!r}
 CONCLUSION = {conclusion!r}
+FIELDS_VIEW = {fields_view!r}
 
 if TARGET not in df.columns:
     raise ValueError("target column missing from authorized frame")
@@ -796,7 +809,7 @@ manifest = build_manifest(
     limitations=["觀察性資料，不能解讀為因果。", "營運門檻尚未核准，不能直接部署。"],
 )
 manifest["operating_scenarios"] = result["operating_scenarios"]
-render_assets(manifest, Path("/tmp/ml-presentation"), y_true=y_hold.tolist(), probabilities=probs, emit_figure=emit, frame=work[FEATURES + [TARGET]], target=TARGET)
+render_assets(manifest, Path("/tmp/ml-presentation"), y_true=y_hold.tolist(), probabilities=probs, emit_figure=emit, frame=work[FEATURES + [TARGET]], target=TARGET, fields_view=FIELDS_VIEW, evaluation_frame=X_hold, target_values=y.tolist())
 emit(manifest, name="ml-presentation.json")
 
 '''
@@ -828,7 +841,7 @@ if KIND in ("catboost", "gradient_boosting", "random_forest_shap", "xgboost"):
             shap_by_column[target_column] = shap_values[:, column_index].copy()
     render_shap_summary(manifest, shap_values, transformed_names, transformed, Path("/tmp/ml-presentation"), emit_figure=emit)
     recommend_spec_values(manifest, shap_by_column=shap_by_column, sample_frame=X_sample, top_n=3)
-    plotly_figures = build_plotly_figures(manifest, y_true=y_hold.tolist(), probabilities=probs, frame=work[FEATURES + [TARGET]], target=TARGET, shap_values=shap_values, feature_names=transformed_names, sample_values=X_sample)
+    plotly_figures = build_plotly_figures(manifest, y_true=y_hold.tolist(), probabilities=probs, frame=work[FEATURES + [TARGET]], target=TARGET, shap_values=shap_values, feature_names=transformed_names, sample_values=transformed, fields_view=FIELDS_VIEW, evaluation_frame=X_hold, target_values=y.tolist())
     for plotly_name, plotly_figure in plotly_figures.items():
         emit(plotly_figure, name=f"ml-plotly-{plotly_name}.json")
     emit(manifest, name="ml-presentation.json")

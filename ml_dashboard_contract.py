@@ -11,7 +11,7 @@ REQUIRED_FIRST_VIEW = (
     "每 1,000 筆少錯約 36 筆",
     "確認漏判與誤判成本",
 )
-ROW_MEANINGS = (("決策",), ("過程", "流程"), ("結果",), ("泛化", "解釋", "工程"))
+ROW_MEANINGS = (("決策",), ("資料地圖", "資料"), ("模型歸因", "歸因", "解釋"), ("模型證據", "技術", "驗證"), ("部署決策", "部署"))
 FORBIDDEN_KEYS = {"raw_rows", "frame", "python_code", "credentials", "physical_path", "signed_url"}
 ML_TAG = "ask-o11y-ml"
 PREVIEW_TAG = "ask-o11y-preview"
@@ -26,6 +26,16 @@ def _panels(value: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if isinstance(nested, list):
             flattened.extend(_panels([item for item in nested if isinstance(item, dict)]))
     return flattened
+
+
+def _story_rows(top_level: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = [panel for panel in top_level if isinstance(panel, dict) and panel.get("type") == "row"]
+    titles = tuple(str(row.get("title") or "") for row in rows)
+    if len(titles) != 5 or any(not any(keyword in title for keyword in meanings) for title, meanings in zip(titles, ROW_MEANINGS, strict=True)):
+        raise ValueError("dashboard requires five ordered semantic rows: decision, data atlas, attribution, collapsed model evidence, deployment")
+    if not bool(rows[3].get("collapsed")):
+        raise ValueError("model evidence and technical details must be collapsed by default")
+    return rows
 
 
 def _walk(value: Any, key: str = "") -> None:
@@ -57,6 +67,7 @@ def validate_ml_dashboard_minimum(dashboard: dict[str, Any]) -> None:
     top_level = dashboard.get("panels")
     if not isinstance(top_level, list) or not top_level:
         raise ValueError("dashboard panels are required")
+    _story_rows([panel for panel in top_level if isinstance(panel, dict)])
     flattened = _panels([panel for panel in top_level if isinstance(panel, dict)])
     if any(panel.get("targets") for panel in flattened):
         raise ValueError("Sandbox analysis dashboard may contain image/text panels only")
@@ -67,7 +78,7 @@ def validate_ml_dashboard_minimum(dashboard: dict[str, Any]) -> None:
     if "模型驗證" not in serialized_first_row:
         raise ValueError("ML dashboard first half must contain a model-evidence statement")
     serialized_all = json.dumps(flattened, ensure_ascii=False)
-    for required_phrase in ("分析目的", "結論", "資料分布"):
+    for required_phrase in ("分析目的", "結論", "資料分布", "特徵與目標", "錯誤切片", "部署"):
         if required_phrase not in serialized_all:
             raise ValueError(f"ML dashboard must state its {required_phrase}")
     image_count = 0
@@ -135,12 +146,7 @@ def validate_preview_dashboard(dashboard: dict[str, Any], manifest: dict[str, An
     top_level = dashboard.get("panels")
     if not isinstance(top_level, list) or not top_level:
         raise ValueError("dashboard panels are required")
-    rows = [panel for panel in top_level if isinstance(panel, dict) and panel.get("type") == "row"]
-    titles = tuple(str(row.get("title") or "") for row in rows)
-    if len(titles) != 4 or any(not any(keyword in title for keyword in meanings) for title, meanings in zip(titles, ROW_MEANINGS, strict=True)):
-        raise ValueError("dashboard requires four ordered semantic rows: decision, process, results, generalization/explanation")
-    if not bool(rows[-1].get("collapsed")):
-        raise ValueError("Generalization/Engineering details must be collapsed by default")
+    rows = _story_rows([panel for panel in top_level if isinstance(panel, dict)])
     first_row_index = top_level.index(rows[0])
     second_row_index = top_level.index(rows[1])
     first_view_json = json.dumps(top_level[first_row_index:second_row_index], ensure_ascii=False)

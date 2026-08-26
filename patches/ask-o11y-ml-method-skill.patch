@@ -276,28 +276,30 @@ index 0000000..355736e
 +   - `營運使用`：成本、門檻、subgroup 尚未核准時一律寫「尚待確認」，不得直接寫可部署。
 +4. 第一視窗只回答：能不能用、比舊模型好多少、每 1,000 筆會怎樣、下一步做什麼。
 +5. ROC-AUC、PR-AUC、SHAP、hash、參數只放收合的工程細節；若放圖，caption 必須解釋漏判/誤報的實際取捨。
-+6. 優先圖：每千件 outcome、新舊錯誤比較、混淆矩陣、ROC+PR、流程六步、泛化健康、trial history、依 ontology property 聚合的重要因素。
++6. 優先圖：ontology 欄位地圖、核可欄位分布、語義相關熱圖、特徵×目標實際關係、新舊模型每千筆 outcome 合併比較、holdout 錯誤切片、依 ontology property 聚合的重要因素、SHAP、混淆矩陣、calibration 與 threshold-cost。不得把分析流程 checklist 或 top-trial history 畫成圖。
 +7. 語言要求：analysis contract 的 `purpose` 與 `conclusion` 必須用繁體中文撰寫——它們會直接出現在 Dashboard 與敘事報告的第一句。
 +
 +8. Dashboard 必須包含：
 +   - 「分析目的」與「結論」文字面板（不用術語，結論必須回應分析目的）；
-+   - 至少一張「資料分布」圖與一張「相關性分析」圖（manifest 的 data_profile.png / correlation_analysis.png），讓使用者先熟悉資料再看模型結果；
++   - 模型結果前先放「資料地圖」列：ontology_field_map.png → data_profile.png → distribution_small_multiples.png → semantic_correlation.png → feature_target_relationships.png；先解釋欄位語義角色、缺失/低變異與被排除欄位，再談分布形狀、集中性、一起變動的欄位群，以及資料本身可見的目標比例差異；特徵×目標關係必須標示描述性、非因果且未用來重選模型/門檻；
 +   - 「特徵重要性」圖（feature_importance.png，依 ontology property 聚合）放在 SHAP 摘要圖（shap_summary.png）之前——先看整體欄位重要性，再看 SHAP 個體歸因；接「前三大規格建議」面板（manifest 的 spec_recommendations，逐條列出欄位、門檻值與建議）；
 +   - 「分析報告敘事」面板：完整引用 manifest 的 narrative 欄位（已由系統從數值組合的敘事，不得改寫數字）；
 +   - 「指標解讀指引」面板：引用 manifest 的 metric_guidance（primary_metric_reason、watch_first、trade_off_explanation、per_metric 白話對照），讓主管知道該先看哪個數字、怎麼取捨；
-+   - 有 holdout labels/probabilities 時，必須加入 `calibration_curve.png` 與 `threshold_cost_curve.png`：前者解釋 Brier/機率可信度，後者明示 train-OOF 選出的門檻、3:1 成本與 holdout recall/precision；不得從 holdout 曲線重選門檻；
++   - 有 holdout labels/probabilities 時，必須加入 `error_slice_analysis.png`、`calibration_curve.png` 與 `threshold_cost_curve.png`：錯誤切片只指出調查方向，不得宣稱公平性或因果；校正圖解釋 Brier/機率可信度；成本圖明示 train-OOF 選出的門檻、成本與 holdout recall/precision；不得從 holdout 圖重選門檻；
 +   - 每張圖的下方必須緊接該圖的白話說明文字——你必須親自閱讀 PNG 圖表的實際內容（數值、趨勢、分布形狀），用你自己的話寫出此圖想傳達的發現；不要照抄 manifest caption，也不要用固定句式；
 +   - SHAP 圖：解讀顏色與左右位置的實際含義（例如「Contract 為 Month-to-Month 的紅色點明顯靠右，代表月約客戶被模型推向流失預測」）；
-+   - 相關性熱圖：指出最高與最低相關的欄位對，以及是否有預期外的強相關；
++   - 語義相關熱圖：按 semantic kind / unit 解讀群內與跨群相關，指出最高與最低相關欄位對，以及是否有 ontology 預期外的強相關；
 +   - 敘事報告（narrative）：不要照抄 manifest 的 deterministic narrative，而是以你對圖表與數據的理解，用敘事方式重新撰寫完整分析故事，包含你觀察到的具體數值與趨勢；
 +   - 指標解讀指引（metric_guidance）：保留 deterministic 骨架（先看什麼/怎麼取捨），但加入你對本次分析為何適合這個指標的具體說明；
 +   - 技術細節以 `<details>` 收合。
 +
++面板故事順序為五幕：決策摘要 → 資料地圖 → 模型歸因（feature importance、SHAP、spec 建議）→ 收合的模型證據 → 部署決策。不得先用模型指標圖壓過資料限制。
++
 +Sandbox 已提供 `ml_presentation`。分析完成且使用者確認需要 Grafana 時：
 +
 +- 用 `build_manifest(...)` 產 bounded `ask-o11y-ml-presentation-v1`；不得自行添加 raw rows、path、URL 或超出 top5 trials/top20 features。
-+- 用 `render_assets(manifest, output_dir, y_true=..., probabilities=result["calibrated_probabilities"], emit_figure=emit, frame=df, target=...)` 產圖（含 data_profile.png、calibration_curve.png、threshold_cost_curve.png）；不得把 raw probabilities 套用 calibrated threshold。再 `emit(manifest, name="ml-presentation.json")`。manifest 必須帶 `purpose`（分析目的）與 `conclusion`（結論）。
++- 用 `render_assets(manifest, output_dir, y_true=..., probabilities=result["calibrated_probabilities"], emit_figure=emit, frame=df, target=..., fields_view=FIELDS_VIEW, evaluation_frame=X_hold, target_values=y.tolist())` 產圖（含 ontology_field_map.png、distribution_small_multiples.png、semantic_correlation.png、feature_target_relationships.png、error_slice_analysis.png、calibration_curve.png、threshold_cost_curve.png）；不得把 raw probabilities 套用 calibrated threshold。再 `emit(manifest, name="ml-presentation.json")`。manifest 必須帶 `purpose`、`conclusion`。有 approved ontology 時只能使用系統投影 fields_view；沒有時 deterministic inference 必須在 caption 標成 inferred，不得冒充 approved ontology。
 +- 沒有 holdout probabilities 時，不得假造混淆矩陣或 ROC/PR；明說缺少證據。
-+- Dashboard 版面由 selected dashboarding Skill 根據使用者意圖決定，不硬編固定 JSON；但需有決策摘要、分析過程、實際結果、泛化/解釋四個語意區塊。
++- Dashboard 版面由 selected dashboarding Skill 根據使用者意圖決定，不硬編固定 JSON；但需依序有決策摘要、資料地圖、模型歸因、收合模型證據、部署決策五個語意區塊。
 +- 分析 Dashboard 只能使用 image/text panels + opaque Sandbox bindings，不能將 Sandbox 結果偽裝為 native datasource targets。
 +- 製造分類沒有 threshold/cost evidence 時，最高狀態只能是「模型驗證通過，營運門檻待確認」。

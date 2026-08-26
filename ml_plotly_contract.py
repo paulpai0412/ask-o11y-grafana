@@ -14,12 +14,12 @@ FORBIDDEN_KEYS = {
     "images", "template", "updatemenus", "sliders", "href", "src", "base64",
     "script", "onclick", "callback",
 }
+AXIS_LAYOUT_KEYS = {"xaxis", "yaxis"} | {f"{axis}{index}" for axis in ("xaxis", "yaxis") for index in range(2, 13)}
 ALLOWED_LAYOUT_KEYS = {
-    "title", "xaxis", "yaxis", "yaxis2", "xaxis2", "xaxis3", "xaxis4", "yaxis3", "yaxis4",
-    "margin", "legend", "showlegend", "barmode", "hovermode", "annotations", "font",
+    "title", "margin", "legend", "showlegend", "barmode", "hovermode", "annotations", "font",
     "paper_bgcolor", "plot_bgcolor", "coloraxis", "width", "height", "grid", "colorway",
     "uniformtext",
-}
+} | AXIS_LAYOUT_KEYS
 ALLOWED_AXIS_KEYS = {"title", "range", "type", "tickformat", "tickvals", "ticktext", "showgrid", "zeroline", "overlaying", "side", "automargin", "dtick", "domain", "anchor"}
 ALLOWED_ANNOTATION_KEYS = {"text", "x", "y", "xref", "yref", "showarrow", "font", "ax", "ay"}
 ALLOWED_COLORAXIS_KEYS = {"cmin", "cmax", "colorscale", "showscale", "colorbar"}
@@ -290,7 +290,7 @@ def _clean_layout(layout: Any) -> dict[str, Any]:
         if key == "title":
             cleaned[key] = _check_string(str(value), where)
             continue
-        if key in {"xaxis", "yaxis", "yaxis2", "xaxis2", "xaxis3", "xaxis4", "yaxis3", "yaxis4"}:
+        if key in AXIS_LAYOUT_KEYS:
             axis = _check_mapping_keys(value, ALLOWED_AXIS_KEYS, where)
             cleaned_axis: dict[str, Any] = {}
             for axis_key, axis_value in axis.items():
@@ -388,9 +388,11 @@ def sanitize_figure(figure: Any) -> dict[str, Any]:
     """Validate one figure and return the static {data, layout, config} for a panel."""
     if not isinstance(figure, dict):
         _reject("figure must be an object")
-    unexpected = set(figure) - {"data", "layout"}
+    unexpected = set(figure) - {"data", "layout", "config"}
     if unexpected:
         _reject(f"unsupported figure keys {sorted(unexpected)}")
+    if "config" in figure and figure["config"] != FIXED_CONFIG:
+        _reject("figure config must match the host-owned fixed config")
     data = figure.get("data")
     if not isinstance(data, list) or not data:
         _reject("figure data must be a non-empty array")

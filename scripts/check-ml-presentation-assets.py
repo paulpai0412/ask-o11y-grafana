@@ -73,7 +73,12 @@ def main() -> int:
             assert path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), path
             assert asset["caption"].strip() and asset["alt_text"].strip()
         names = {asset["name"] for asset in produced}
-        assert {"per_1000_outcomes.png", "baseline_error_comparison.png", "confusion_matrix.png", "roc_pr_curves.png", "trial_history.png", "generalization_health.png", "data_profile.png", "correlation_analysis.png"} <= names
+        # Deleted decoration/redundant charts must no longer be produced.
+        removed = {"analysis_process.png", "trial_history.png", "per_1000_outcomes.png", "correlation_analysis.png"}
+        assert not (names & removed), sorted(names & removed)
+        baseline_asset = next(asset for asset in produced if asset["name"] == "baseline_error_comparison.png")
+        assert "1,000" in baseline_asset["caption"], baseline_asset  # merged per-1000 semantics
+        assert {"baseline_error_comparison.png", "confusion_matrix.png", "roc_pr_curves.png", "generalization_health.png", "data_profile.png"} <= names
 
         # SHAP summary with synthetic values.
         rng = np.random.default_rng(7)

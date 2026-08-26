@@ -199,7 +199,7 @@ def _walk(value: Any, key: str = "") -> None:
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    known_sections = REQUIRED_SECTIONS | {"purpose", "conclusion", "operating_scenarios", "spec_recommendations", "narrative", "metric_guidance", "model_comparison", "evaluation_evidence"}
+    known_sections = REQUIRED_SECTIONS | {"purpose", "conclusion", "operating_scenarios", "spec_recommendations", "narrative", "metric_guidance", "model_comparison", "evaluation_evidence", "data_atlas", "feature_target_relationships", "error_slices"}
     unknown = set(manifest) - known_sections
     if unknown or not REQUIRED_SECTIONS <= set(manifest):
         raise ValueError(f"manifest sections are incomplete or unsupported: {sorted(unknown)}")
@@ -216,6 +216,23 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("unsupported manifest format")
     if len(manifest.get("trials", [])) > 5 or len(manifest.get("features", [])) > 20 or len(manifest.get("artifacts", [])) > 14:
         raise ValueError("manifest exceeds presentation bounds")
+    atlas = manifest.get("data_atlas")
+    if atlas is not None:
+        if not isinstance(atlas, dict) or not isinstance(atlas.get("fields"), list) or len(atlas["fields"]) > 24:
+            raise ValueError("manifest data_atlas fields are invalid")
+        correlation = atlas.get("correlation")
+        warnings = atlas.get("warnings")
+        if not isinstance(correlation, dict) or len(correlation.get("columns") or []) > 12 or not isinstance(warnings, list) or len(warnings) > 8:
+            raise ValueError("manifest data_atlas is outside presentation bounds")
+        if len(correlation.get("matrix") or []) != len(correlation.get("columns") or []):
+            raise ValueError("manifest data_atlas correlation is not square")
+    for section, maximum in (("feature_target_relationships", 4), ("error_slices", 3)):
+        items = manifest.get(section)
+        if items is not None:
+            if not isinstance(items, list) or len(items) > maximum:
+                raise ValueError(f"manifest {section} is outside presentation bounds")
+            if any(not isinstance(item, dict) or not item.get("feature") or not isinstance(item.get("groups"), list) or len(item["groups"]) > 8 for item in items):
+                raise ValueError(f"manifest {section} groups are invalid")
     evidence = manifest.get("evaluation_evidence")
     if evidence is not None:
         if not isinstance(evidence, dict) or not all(isinstance(evidence.get(name), dict) for name in ("calibration", "threshold_cost")):
@@ -246,6 +263,417 @@ def register_artifact(manifest: dict[str, Any], *, name: str, caption: str, alt_
         raise ValueError("artifact metadata is invalid")
     manifest["artifacts"].append({"name": name, "caption": caption, "alt_text": alt_text})
     validate_manifest(manifest)
+
+
+def build_data_atlas(
+    frame: Any,
+    *,
+    target: str | None = None,
+    fields_view: list[dict[str, Any]] | None = None,
+    max_fields: int = 24,
+) -> dict[str, Any]:
+    """Compute bounded, ontology-ordered shape, concentration, and correlation facts."""
+    import numpy as np  # type: ignore[reportMissingImports]
+    import pandas as pd  # type: ignore[reportMissingImports]
+
+    def number(value: Any, where: str) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"data atlas {where} is not numeric") from exc
+
+    def count(value: Any, where: str) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"data atlas {where} is not an integer") from exc
+
+    metadata = {
+        str(item.get("name") or item.get("physical_name")): item
+        for item in (fields_view or [])
+        if item.get("name") or item.get("physical_name")
+    }
+    def infer_metadata(name: str) -> dict[str, Any]:
+        import pandas as pd  # type: ignore[reportMissingImports]
+
+        normalized = name.lower().replace(" ", "_")
+        series = frame[name]
+        if normalized == "id" or normalized.endswith("_id") or normalized.startswith("id_"):
+            semantic_kind = "identifier"
+        elif pd.api.types.is_datetime64_any_dtype(series):
+            semantic_kind = "temporal"
+        elif pd.api.types.is_numeric_dtype(series):
+            semantic_kind = "measurement"
+        else:
+            semantic_kind = "categorical"
+        unit = None
+        if "temp" in normalized or normalized.endswith("_c"):
+            unit = "°C"
+        elif "month" in normalized or "tenure" in normalized:
+            unit = "month"
+        elif "age" in normalized or normalized.endswith("_years"):
+            unit = "year"
+        elif any(token in normalized for token in ("charge", "cost", "price", "revenue", "refund")):
+            unit = "currency"
+        elif "gb" in normalized:
+            unit = "GB"
+        elif any(token in normalized for token in ("percent", "ratio", "rate")):
+            unit = "ratio"
+        return {"semantic_kind": semantic_kind, "unit": unit, "analysis_role": "feature"}
+
+    present = [str(column) for column in frame.columns if str(column) != target]
+    absent_governed = [
+        name for name, item in metadata.items()
+        if name not in frame.columns and (item.get("analysis_role") == "forbidden" or item.get("semantic_kind") == "target_proxy")
+    ]
+
+    def order_key(name: str) -> tuple[str, str, str]:
+        item = metadata.get(name) or (infer_metadata(name) if name in frame.columns else {})
+        return (str(item.get("semantic_kind") or "unregistered"), str(item.get("unit") or ""), name)
+
+    names = sorted(absent_governed, key=order_key) + sorted(present, key=order_key)
+    fields: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for name in names[:max_fields]:
+        available = name in frame.columns
+        item = metadata.get(name) or (infer_metadata(name) if available else {})
+        metadata_source = "ontology" if name in metadata else "inferred"
+        entry: dict[str, Any] = {
+            "name": name,
+            "semantic_kind": str(item.get("semantic_kind") or "unregistered"),
+            "unit": item.get("unit"),
+            "role": str(item.get("analysis_role") or "unknown"),
+            "metadata_source": metadata_source,
+            "available": available,
+            "missing_rate": None,
+            "numeric": None,
+            "categorical": None,
+            "flag": None,
+        }
+        if item.get("reason"):
+            entry["reason"] = str(item["reason"])
+        if not available:
+            fields.append(entry)
+            continue
+        series = frame[name]
+        missing_rate = round(number(series.isna().mean(), f"{name} missing rate"), 4)
+        entry["missing_rate"] = missing_rate
+        if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+            values = pd.to_numeric(series, errors="coerce").dropna().astype(float)
+            if values.empty:
+                numeric = {"mean": None, "std": None, "cv": None, "skew": None, "q1": None, "median": None, "q3": None, "outlier_share": None}
+            else:
+                mean = number(values.mean(), f"{name} mean")
+                std = number(values.std(ddof=0), f"{name} standard deviation")
+                q1, median, q3 = (number(value, f"{name} quantile") for value in values.quantile([0.25, 0.5, 0.75]).tolist())
+                iqr = q3 - q1
+                outlier_share = 0.0 if iqr == 0 else number(((values < q1 - 1.5 * iqr) | (values > q3 + 1.5 * iqr)).mean(), f"{name} outlier share")
+                skew = number(values.skew(), f"{name} skew") if len(values) >= 3 else 0.0
+                if not math.isfinite(skew):
+                    skew = 0.0
+                numeric = {
+                    "mean": round(mean, 4), "std": round(std, 4),
+                    "cv": None if mean == 0 else round(abs(std / mean), 4),
+                    "skew": round(skew, 4), "q1": round(q1, 4), "median": round(median, 4),
+                    "q3": round(q3, 4), "outlier_share": round(outlier_share, 4),
+                    "distinct": count(values.nunique(), f"{name} distinct count"),
+                }
+                if std == 0 or (mean != 0 and abs(std / mean) < 0.02):
+                    entry["flag"] = "low_variance"
+            entry["numeric"] = numeric
+        else:
+            values = series.dropna().astype(str)
+            counts = values.value_counts()
+            total = max(len(values), 1)
+            top_share = number(counts.iloc[0] / total, f"{name} top share") if not counts.empty else 0.0
+            entry["categorical"] = {
+                "distinct": count(values.nunique(), f"{name} distinct count"),
+                "top_share": round(top_share, 4),
+                "top3_share": round(number(counts.head(3).sum() / total, f"{name} top-three share"), 4),
+            }
+            if top_share > 0.99:
+                entry["flag"] = "low_variance"
+        if missing_rate > 0.4:
+            entry["flag"] = "high_missing"
+        if entry["flag"] and len(warnings) < 8:
+            warnings.append(f"{entry['flag']}:{name}")
+        fields.append(entry)
+
+    numeric_names = sorted(
+        [name for name in present if pd.api.types.is_numeric_dtype(frame[name]) and name != target],
+        key=order_key,
+    )[:12]
+    if numeric_names:
+        correlation = frame[numeric_names].corr(method="spearman").fillna(0.0)
+        correlation_values = correlation.to_numpy(copy=True)
+        np.fill_diagonal(correlation_values, 1.0)
+        matrix = [[round(number(value, "correlation"), 4) for value in row] for row in correlation_values]
+    else:
+        matrix = []
+    sources = {item["metadata_source"] for item in fields}
+    source = next(iter(sources)) if len(sources) == 1 else "mixed"
+    return {"metadata_source": source, "fields": fields, "correlation": {"columns": numeric_names, "matrix": matrix}, "warnings": warnings}
+
+
+def render_data_atlas_assets(
+    manifest: dict[str, Any],
+    output_dir: Path,
+    *,
+    frame: Any,
+    target: str | None = None,
+    fields_view: list[dict[str, Any]] | None = None,
+    emit_figure: Callable[[Any, str], None] | None = None,
+) -> list[dict[str, str]]:
+    """Render ontology-ordered field map, distributions, and correlations."""
+    import pandas as pd  # type: ignore[reportMissingImports]
+
+    atlas = build_data_atlas(frame, target=target, fields_view=fields_view)
+    manifest["data_atlas"] = atlas
+    validate_manifest(manifest)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plt, *_ = _plot_modules()
+    colors = {
+        "measurement": "#3274D9", "treatment_candidate": "#FF9830", "categorical": "#A352CC",
+        "temporal": "#5794F2", "identifier": "#6B7280", "target_proxy": "#E02F44", "unregistered": "#6B7280",
+    }
+
+    fields = atlas["fields"]
+    if fields:
+        shown = fields[::-1]
+        figure, axis = plt.subplots(figsize=(10, max(4, len(shown) * 0.38)))
+        missing = [100.0 if not item["available"] else (item["missing_rate"] or 0) * 100 for item in shown]
+        field_colors = ["#E02F44" if item["role"] == "forbidden" else colors.get(item["semantic_kind"], "#56A64B") for item in shown]
+        axis.scatter(missing, [item["name"] for item in shown], c=field_colors, s=90, zorder=3)
+        axis.grid(axis="x", alpha=0.25, zorder=0)
+        for row, item in enumerate(shown):
+            detail = "未進入查詢" if not item["available"] else f"缺失 {(item['missing_rate'] or 0) * 100:.1f}%"
+            if item["flag"]:
+                detail += f" · {item['flag']}"
+            axis.text(missing[row] + 0.8, row, detail, va="center", fontsize=9)
+        axis.set_xlim(0, max(105, max(missing, default=0) + 25)); axis.set_xlabel("缺失率（%）；未進入查詢欄位以 100% 顯示")
+        axis.set_title("Ontology 欄位地圖：哪些資料可用、哪些被排除？", loc="left", fontsize=16, weight="bold")
+        _save_figure(figure, output_dir / "ontology_field_map.png", emit_figure)
+        source_note = "欄位角色來自 approved ontology。" if atlas["metadata_source"] == "ontology" else "未完整連結 approved ontology；標成 inferred 的角色與單位由 deterministic 規則推論。"
+        register_artifact(manifest, name="ontology_field_map.png", caption=f"{source_note} 紅色 forbidden 欄位不進入模型，並標示缺失與低變異。", alt_text="欄位語義地圖，以顏色區分量測、類別、處置候選、禁止與推論欄位")
+
+    available_fields = [item for item in fields if item["available"] and item["name"] in frame.columns][:12]
+    if available_fields:
+        columns = 3
+        rows = math.ceil(len(available_fields) / columns)
+        figure, axes = plt.subplots(rows, columns, figsize=(15, max(4, rows * 3.3)))
+        axes_list = list(axes.flat) if hasattr(axes, "flat") else [axes]
+        for axis, item in zip(axes_list, available_fields, strict=False):
+            series = frame[item["name"]]
+            color = colors.get(item["semantic_kind"], "#56A64B")
+            if pd.api.types.is_numeric_dtype(series) and series.nunique(dropna=True) > 10:
+                axis.hist(series.dropna(), bins=20, color=color)
+                if item["numeric"] and item["numeric"]["median"] is not None:
+                    axis.axvline(item["numeric"]["median"], color="#111827", linestyle="--", linewidth=1)
+            else:
+                counts = series.dropna().astype(str).value_counts().head(8).sort_index()
+                axis.bar(counts.index.tolist(), counts.tolist(), color=color)
+                axis.tick_params(axis="x", rotation=35)
+            unit = f" ({item['unit']})" if item["unit"] else ""
+            axis.set_title(f"{item['name']}{unit}", fontsize=11, weight="bold")
+        for axis in axes_list[len(available_fields):]:
+            axis.axis("off")
+        figure.suptitle("核可欄位的分布形狀與集中性", fontsize=17, weight="bold")
+        _save_figure(figure, output_dir / "distribution_small_multiples.png", emit_figure)
+        register_artifact(manifest, name="distribution_small_multiples.png", caption="每格呈現一個核可欄位的實際分布；虛線為數值欄中位數，可看出偏態、集中與離群。", alt_text="依 ontology 語義群排列的欄位分布小 multiples")
+
+    correlation = atlas["correlation"]
+    names = correlation["columns"]
+    if len(names) >= 2:
+        figure, axis = plt.subplots(figsize=(8.5, 7))
+        image = axis.imshow(correlation["matrix"], cmap="coolwarm", vmin=-1, vmax=1)
+        axis.set_xticks(range(len(names)), names, rotation=45, ha="right", fontsize=9)
+        axis.set_yticks(range(len(names)), names, fontsize=9)
+        for row, values in enumerate(correlation["matrix"]):
+            for column, value in enumerate(values):
+                axis.text(column, row, f"{value:.2f}", ha="center", va="center", fontsize=8,
+                          color="white" if abs(value) > 0.6 else "black")
+        figure.colorbar(image, ax=axis, shrink=0.8)
+        axis.set_title("Ontology 分組的 Spearman 相關性", fontsize=15, weight="bold")
+        _save_figure(figure, output_dir / "semantic_correlation.png", emit_figure)
+        register_artifact(manifest, name="semantic_correlation.png", caption="欄位依 semantic kind 與單位分組排序；高相關表示一起變動，不代表因果。", alt_text="依 ontology 語義與單位排序的 Spearman 相關係數熱圖")
+
+    return list(manifest["artifacts"])
+
+
+def _safe_number(value: Any, where: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{where} is not numeric") from exc
+
+
+def _safe_count(value: Any, where: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{where} is not an integer") from exc
+
+
+def _group_feature(series: Any, *, bins: int) -> Any:
+    """Return bounded display groups: quantiles for continuous values, labels otherwise."""
+    import pandas as pd  # type: ignore[reportMissingImports]
+
+    if pd.api.types.is_numeric_dtype(series) and series.nunique(dropna=True) > 10:
+        grouped = pd.qcut(series, q=min(bins, series.nunique(dropna=True)), duplicates="drop")
+        return grouped.astype(str).where(series.notna(), "缺失")
+    values = series.astype("string").fillna("缺失")
+    keep = set(values.value_counts().head(8).index.tolist())
+    return values.where(values.isin(keep), "其他").astype(str)
+
+
+def build_feature_target_relationships(
+    frame: Any,
+    *,
+    target: str,
+    features: list[str],
+    target_values: list[int] | None = None,
+    positive_class: Any = None,
+    max_features: int = 4,
+) -> list[dict[str, Any]]:
+    """Describe feature/target shapes without using them to select the model or threshold."""
+    import pandas as pd  # type: ignore[reportMissingImports]
+
+    if target_values is not None:
+        if len(target_values) != len(frame):
+            raise ValueError("feature-target values must align with the descriptive frame")
+        labels = pd.Series(target_values, index=frame.index, dtype=int)
+    elif positive_class is not None:
+        labels = (frame[target].astype(str).str.strip() == str(positive_class)).astype(int)
+    else:
+        labels = pd.to_numeric(frame[target], errors="coerce")
+    output: list[dict[str, Any]] = []
+    for feature in [name for name in features if name in frame.columns and name != target][:max_features]:
+        groups = _group_feature(frame[feature], bins=6)
+        view = pd.DataFrame({"group": groups, "target": labels}).dropna(subset=["target"])
+        facts: list[dict[str, Any]] = []
+        for label, values in view.groupby("group", sort=True):
+            facts.append({
+                "label": str(label),
+                "count": _safe_count(len(values), f"{feature} group count"),
+                "positive_rate": round(_safe_number(values["target"].mean(), f"{feature} positive rate"), 4),
+            })
+        if len(facts) >= 2:
+            output.append({"feature": feature, "groups": facts[:8]})
+    return output
+
+
+def build_error_slices(
+    frame: Any,
+    *,
+    y_true: list[int],
+    probabilities: list[float],
+    threshold: float,
+    features: list[str],
+    max_features: int = 3,
+) -> list[dict[str, Any]]:
+    """Describe where locked-threshold holdout errors concentrate; not a fairness verdict."""
+    import numpy as np  # type: ignore[reportMissingImports]
+    import pandas as pd  # type: ignore[reportMissingImports]
+
+    if not y_true or len(frame) != len(y_true) or len(y_true) != len(probabilities):
+        raise ValueError("error slices require an aligned non-empty holdout frame, labels, and probabilities")
+    actual = np.asarray(y_true, dtype=int)
+    predicted = (np.asarray(probabilities, dtype=float) >= threshold).astype(int)
+    minimum_count = max(2, math.ceil(len(actual) * 0.02))
+    output: list[dict[str, Any]] = []
+    for feature in [name for name in features if name in frame.columns][:max_features]:
+        groups = _group_feature(frame[feature], bins=4)
+        view = pd.DataFrame({"group": groups, "actual": actual, "predicted": predicted}, index=frame.index)
+        facts: list[dict[str, Any]] = []
+        for label, values in view.groupby("group", sort=True):
+            count = len(values)
+            if count < minimum_count:
+                continue
+            errors = values["actual"] != values["predicted"]
+            facts.append({
+                "label": str(label), "count": _safe_count(count, f"{feature} slice count"),
+                "error_rate": round(_safe_number(errors.mean(), f"{feature} error rate"), 4),
+                "fn": _safe_count(((values["actual"] == 1) & (values["predicted"] == 0)).sum(), f"{feature} false negatives"),
+                "fp": _safe_count(((values["actual"] == 0) & (values["predicted"] == 1)).sum(), f"{feature} false positives"),
+            })
+        if len(facts) >= 2:
+            output.append({"feature": feature, "groups": facts[:8]})
+    return output
+
+
+def render_data_story_assets(
+    manifest: dict[str, Any],
+    output_dir: Path,
+    *,
+    frame: Any,
+    target: str,
+    evaluation_frame: Any = None,
+    y_true: list[int] | None = None,
+    probabilities: list[float] | None = None,
+    target_values: list[int] | None = None,
+    emit_figure: Callable[[Any, str], None] | None = None,
+) -> list[dict[str, str]]:
+    """Render descriptive feature/target relationships and locked-threshold holdout error slices."""
+    feature_names = [str(item["name"]) for item in manifest.get("features") or []]
+    relationships = build_feature_target_relationships(
+        frame, target=target, features=feature_names, target_values=target_values,
+        positive_class=manifest["objective"].get("positive_class"),
+    )
+    manifest["feature_target_relationships"] = relationships
+    slices: list[dict[str, Any]] = []
+    if evaluation_frame is not None and y_true is not None and probabilities is not None:
+        slices = build_error_slices(
+            evaluation_frame, y_true=y_true, probabilities=probabilities,
+            threshold=_as_metric(manifest["objective"], "threshold"), features=feature_names,
+        )
+    manifest["error_slices"] = slices
+    validate_manifest(manifest)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plt, *_ = _plot_modules()
+
+    if relationships:
+        columns = 2
+        rows = math.ceil(len(relationships) / columns)
+        figure, axes = plt.subplots(rows, columns, figsize=(14, max(4, rows * 4)))
+        axes_list = list(axes.flat) if hasattr(axes, "flat") else [axes]
+        for axis, relationship in zip(axes_list, relationships, strict=False):
+            labels = [item["label"] for item in relationship["groups"]]
+            rates = [item["positive_rate"] for item in relationship["groups"]]
+            axis.bar(labels, rates, color="#3274D9")
+            axis.set_ylim(0, 1); axis.set_ylabel("正類比例")
+            axis.set_title(relationship["feature"], weight="bold")
+            axis.tick_params(axis="x", rotation=25, labelsize=9)
+        figure.subplots_adjust(hspace=0.7, wspace=0.25, top=0.86, bottom=0.12)
+        for axis in axes_list[len(relationships):]:
+            axis.axis("off")
+        figure.suptitle("資料本身顯示哪些欄位與目標一起變動？（描述性、非因果）", fontsize=17, weight="bold")
+        _save_figure(figure, output_dir / "feature_target_relationships.png", emit_figure)
+        register_artifact(manifest, name="feature_target_relationships.png", caption="前四個重要欄位分組後的實際正類比例；這是描述性關聯，不用來重選模型或門檻。", alt_text="重要欄位各分組的正類比例圖")
+
+    if slices:
+        columns = 2
+        rows = math.ceil(len(slices) / columns)
+        figure, axes = plt.subplots(rows, columns, figsize=(14, max(4, rows * 4)))
+        axes_list = list(axes.flat) if hasattr(axes, "flat") else [axes]
+        for axis, sliced in zip(axes_list, slices, strict=False):
+            labels = [item["label"] for item in sliced["groups"]]
+            fn_rates = [item["fn"] / item["count"] for item in sliced["groups"]]
+            fp_rates = [item["fp"] / item["count"] for item in sliced["groups"]]
+            rates = [fn + fp for fn, fp in zip(fn_rates, fp_rates, strict=True)]
+            axis.bar(labels, fn_rates, color="#E02F44", label="漏判 FN")
+            axis.bar(labels, fp_rates, bottom=fn_rates, color="#FF9830", label="誤報 FP")
+            axis.set_ylim(0, max(0.1, min(1.0, max(rates, default=0) * 1.25))); axis.set_ylabel("Holdout 錯誤率")
+            axis.set_title(sliced["feature"], weight="bold")
+            axis.tick_params(axis="x", rotation=25, labelsize=9)
+            axis.legend(frameon=False)
+        figure.subplots_adjust(hspace=0.7, wspace=0.25, top=0.86, bottom=0.12)
+        for axis in axes_list[len(slices):]:
+            axis.axis("off")
+        figure.suptitle("鎖定門檻後，錯誤集中在哪些資料切片？（非公平性結論）", fontsize=17, weight="bold")
+        _save_figure(figure, output_dir / "error_slice_analysis.png", emit_figure)
+        register_artifact(manifest, name="error_slice_analysis.png", caption="以鎖定門檻在 holdout 比較各資料切片的漏判 FN 與誤報 FP；只用來找調查方向，不作公平性或因果結論。", alt_text="Holdout 各資料切片錯誤率比較圖")
+
+    return list(manifest["artifacts"])
 
 
 def _plot_modules():
@@ -286,6 +714,9 @@ def render_assets(
     frame: Any = None,
     target: str | None = None,
     llm_explanations: dict[str, str] | None = None,
+    fields_view: list[dict[str, Any]] | None = None,
+    evaluation_frame: Any = None,
+    target_values: list[int] | None = None,
 ) -> list[dict[str, str]]:
 
     """Render bounded PNG evidence with values and plain-language captions."""
@@ -294,6 +725,12 @@ def render_assets(
     manifest["artifacts"] = []
     plt, np, confusion_matrix, precision_recall_curve, roc_curve = _plot_modules()
     blue, orange, green, red, grey = "#3274D9", "#FF9830", "#56A64B", "#E02F44", "#6B7280"
+
+    if frame is not None:
+        render_data_atlas_assets(
+            manifest, output_dir, frame=frame, target=target,
+            fields_view=fields_view, emit_figure=emit_figure,
+        )
 
     # 0. Data-distribution profile so users meet the data before the model.
     if frame is not None and target and target in frame.columns:
@@ -331,53 +768,33 @@ def render_assets(
         _save_figure(figure, output_dir / "data_profile.png", emit_figure)
         register_artifact(manifest, name="data_profile.png", caption=f"資料共 {len(profile_frame)} 筆；目標 {target} 各類筆數如左圖，右圖為模型最重視的前 {len(plot_features)} 個特徵分布。", alt_text="預測目標類別分布與前三大特徵分布圖")
 
-        # 0b. Correlation heatmap across numeric dimensions.
-        numeric = profile_frame.select_dtypes(include=[np.number]).columns.drop(target, errors="ignore")
-        corr_frame = profile_frame[numeric]
-        if corr_frame.shape[1] >= 2:
-            top = list(corr_frame.std().sort_values(ascending=False).index[:10])
-            corr = corr_frame[top].corr()
-            figure, axis = plt.subplots(figsize=(8.5, 7))
-            image = axis.imshow(corr.to_numpy(), cmap="coolwarm", vmin=-1, vmax=1)
-            axis.set_xticks(range(len(top)), top, rotation=45, ha="right", fontsize=9)
-            axis.set_yticks(range(len(top)), top, fontsize=9)
-            for row in range(len(top)):
-                for column in range(len(top)):
-                    axis.text(column, row, f"{corr.iloc[row, column]:.2f}", ha="center", va="center", fontsize=8,
-                              color="white" if abs(corr.iloc[row, column]) > 0.6 else "black")
-            figure.colorbar(image, ax=axis, shrink=0.8)
-            axis.set_title("哪些欄位會一起變動？（相關係數）", fontsize=15, weight="bold")
-            _save_figure(figure, output_dir / "correlation_analysis.png", emit_figure)
-            register_artifact(manifest, name="correlation_analysis.png", caption="欄位間相關係數熱圖：接近 1 代表一起升高、接近 -1 代表一升一降；高相關的欄位群在模型中會被視為同一組訊號。", alt_text="數值欄位間相關係數的熱圖")
+    if frame is not None and target and target in frame.columns:
+        render_data_story_assets(
+            manifest, output_dir, frame=frame, target=target,
+            evaluation_frame=evaluation_frame, y_true=y_true, probabilities=probabilities,
+            target_values=target_values, emit_figure=emit_figure,
+        )
 
     decision = manifest["decision"]
     results = manifest["results"]
     guards = manifest["guards"]
 
-    # 1. Per-1,000 operational outcome.
-    figure, axis = plt.subplots(figsize=(10, 2.6))
-    correct, errors = decision["correct_per_1000"], decision["errors_per_1000"]
-    axis.barh([0], [correct], color=blue, label="判斷正確")
-    axis.barh([0], [errors], left=[correct], color=orange, label="判斷錯誤")
-    axis.text(correct / 2, 0, f"判對 {correct}", ha="center", va="center", color="white", fontsize=15, weight="bold")
-    axis.text(correct + errors / 2, 0, f"判錯 {errors}", ha="center", va="center", color="black", fontsize=13, weight="bold")
-    axis.set_xlim(0, 1000); axis.set_yticks([]); axis.set_xlabel("每 1,000 筆新資料")
-    axis.set_title("每 1,000 筆會發生什麼？", loc="left", fontsize=18, weight="bold")
-    axis.legend(loc="lower center", bbox_to_anchor=(0.5, -0.55), ncol=2, frameon=False)
-    _save_figure(figure, output_dir / "per_1000_outcomes.png", emit_figure)
-    register_artifact(manifest, name="per_1000_outcomes.png", caption=manifest["plain_language"]["accuracy"], alt_text=f"每一千筆中約{correct}筆判對、{errors}筆判錯的水平堆疊圖")
-
-    # 2. Baseline vs selected error.
-    baseline_error = (1 - results["baseline"]["accuracy"]) * 100
-    selected_error = (1 - results["selected"]["accuracy"]) * 100
-    figure, axis = plt.subplots(figsize=(8, 4))
-    bars = axis.barh(["舊模型", "新模型"], [baseline_error, selected_error], color=[grey, green])
-    for bar, value in zip(bars, [baseline_error, selected_error], strict=True):
-        axis.text(value + 0.25, bar.get_y() + bar.get_height() / 2, f"{value:.2f}%", va="center", fontsize=13, weight="bold")
-    axis.set_xlim(0, max(baseline_error, selected_error) * 1.35); axis.set_xlabel("判斷錯誤率（越低越好）")
-    axis.set_title(f"每 1,000 筆比舊模型少錯約 {decision['fewer_errors_per_1000']} 筆", loc="left", fontsize=17, weight="bold")
+    # 1. Baseline vs selected outcomes per 1,000 (merged decision view).
+    baseline_errors = _round_count((1 - results["baseline"]["accuracy"]) * 1000)
+    selected_errors = decision["errors_per_1000"]
+    error_counts = [baseline_errors, selected_errors]
+    correct_counts = [1000 - value for value in error_counts]
+    figure, axis = plt.subplots(figsize=(9, 4))
+    axis.barh(["舊模型", "新模型"], correct_counts, color=[grey, green], label="判對")
+    axis.barh(["舊模型", "新模型"], error_counts, left=correct_counts, color=orange, label="判錯")
+    for row, (correct_count, error_count) in enumerate(zip(correct_counts, error_counts, strict=True)):
+        axis.text(correct_count / 2, row, f"判對 {correct_count}", ha="center", va="center", color="white", weight="bold")
+        axis.text(correct_count + error_count / 2, row, f"判錯 {error_count}", ha="center", va="center", weight="bold")
+    axis.set_xlim(0, 1000); axis.set_xlabel("每 1,000 筆新資料")
+    axis.set_title(f"新模型每 1,000 筆少錯約 {decision['fewer_errors_per_1000']} 筆", loc="left", fontsize=17, weight="bold")
+    axis.legend(frameon=False, ncol=2)
     _save_figure(figure, output_dir / "baseline_error_comparison.png", emit_figure)
-    register_artifact(manifest, name="baseline_error_comparison.png", caption=manifest["plain_language"]["improvement"], alt_text=f"舊模型錯誤率{baseline_error:.2f}%與新模型{selected_error:.2f}%的比較圖")
+    register_artifact(manifest, name="baseline_error_comparison.png", caption=f"{manifest['plain_language']['accuracy']} {manifest['plain_language']['improvement']}", alt_text=f"舊模型每千筆判錯{baseline_errors}筆，新模型判錯{selected_errors}筆的比較圖")
 
     # 3. Generalization health cards.
     figure, axis = plt.subplots(figsize=(11, 4)); axis.axis("off")
@@ -395,31 +812,6 @@ def render_assets(
     _explain(figure, "三張卡片回答：換新資料會不會變差、關鍵因素穊不穩定、資料結構有沒有改變；綠色代表通過。")
     _save_figure(figure, output_dir / "generalization_health.png", emit_figure)
     register_artifact(manifest, name="generalization_health.png", caption="模型在未見資料、不同資料分組及本次資料分布檢查皆通過。", alt_text="三張卡片顯示新資料差異、關鍵因素穩定度與資料分布差異")
-
-    # 4. Six-step process.
-    figure, axis = plt.subplots(figsize=(12, 3)); axis.axis("off")
-    steps = ["資料完整", "目標確認", "排除不當欄位", "保留未見資料", "比較 40 組設定", "新資料驗證通過"]
-    for index, step in enumerate(steps):
-        x = index / 6 + 0.01
-        axis.add_patch(plt.Rectangle((x, 0.30), 0.145, 0.42, transform=axis.transAxes, facecolor="#EAF4E8", edgecolor=green, linewidth=2))
-        axis.text(x + 0.072, 0.58, "✓", ha="center", transform=axis.transAxes, fontsize=18, color=green, weight="bold")
-        axis.text(x + 0.072, 0.39, step, ha="center", transform=axis.transAxes, fontsize=10, weight="bold")
-    axis.set_title("這個結果怎麼產生？", loc="left", fontsize=18, weight="bold")
-    _save_figure(figure, output_dir / "analysis_process.png", emit_figure)
-    register_artifact(manifest, name="analysis_process.png", caption="資料檢查、語義選欄、未見資料保留、自動比較與最後驗證均已完成。", alt_text="六步驟分析流程，每一步均以勾號標示完成")
-
-    # 5. Top trial history.
-    trials = manifest["trials"]
-    if trials:
-        figure, axis = plt.subplots(figsize=(8, 4))
-        ranks = [trial["rank"] for trial in trials]
-        scores = [trial["cv_score"] * 100 for trial in trials]
-        axis.plot(ranks, scores, marker="o", linewidth=2, color=blue)
-        for rank, score in zip(ranks, scores, strict=True): axis.text(rank, score + 0.05, f"{score:.2f}%", ha="center", fontsize=9)
-        axis.set_xticks(ranks); axis.set_xlabel("前五名方案"); axis.set_ylabel("交叉驗證答對率")
-        axis.set_title("自動比較後，前五名方案表現接近", loc="left", fontsize=16, weight="bold")
-        _save_figure(figure, output_dir / "trial_history.png", emit_figure)
-        register_artifact(manifest, name="trial_history.png", caption=f"共比較 {manifest['process']['completed_trials']} 組設定；圖中顯示前五名。", alt_text="前五名模型設定的交叉驗證答對率折線圖")
 
     # 6. Grouped ontology-property importance.
     features = manifest["features"]
@@ -709,10 +1101,13 @@ def build_plotly_figures(
     shap_values: Any = None,
     feature_names: list[str] | None = None,
     sample_values: Any = None,
+    fields_view: list[dict[str, Any]] | None = None,
+    evaluation_frame: Any = None,
+    target_values: list[int] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build bounded interactive figures for every ML asset, adapting the
-    Plotly chart type to each data shape (bar / heatmap / scatter / indicator
-    / sankey). Output is sanitized through ml_plotly_contract."""
+    Plotly chart type to each data shape (bar / heatmap / scatter / indicator).
+    Output is sanitized through ml_plotly_contract."""
     import sys
 
     import numpy as np  # type: ignore[reportMissingImports]
@@ -779,37 +1174,119 @@ def build_plotly_figures(
         layout["yaxis"] = axis(domain=[0.05, 0.9], anchor="x")
         _finish("data_profile", data, layout)
 
-    # 2. Correlation heatmap (top-10 variance numeric columns).
-    if frame is not None and target and target in frame.columns:
-        numeric = frame.select_dtypes(include=[np.number]).columns.drop(target, errors="ignore")
-        if len(numeric) >= 2:
-            top = list(frame[numeric].std().sort_values(ascending=False).index[:10])
-            correlation = frame[top].corr().round(3)
-            _finish("correlation_analysis", [{
-                "type": "heatmap",
-                "z": [[_number(cell, "correlation") for cell in row] for row in correlation.to_numpy()],
-                "x": [str(column) for column in correlation.columns],
-                "y": [str(column) for column in correlation.index],
-                "coloraxis": "coloraxis",
+    # 2-4. Ontology data atlas: field governance, shape, and semantic correlation.
+    if frame is not None:
+        import pandas as pd  # type: ignore[reportMissingImports]
+
+        atlas = build_data_atlas(frame, target=target, fields_view=fields_view)
+        atlas_fields = atlas["fields"]
+        kind_colors = {"measurement": "#4fd1c5", "treatment_candidate": "#eda06a", "categorical": "#a352cc", "temporal": "#5794f2", "identifier": "#9aaab8", "target_proxy": "#e05260", "unregistered": "#9aaab8"}
+        if atlas_fields:
+            shown_fields = atlas_fields[::-1]
+            _finish("ontology_field_map", [{
+                "type": "scatter", "mode": "markers", "name": "缺失率 %",
+                "x": [100.0 if not item["available"] else round((item["missing_rate"] or 0) * 100, 2) for item in shown_fields],
+                "y": [item["name"] for item in shown_fields],
+                "marker": {"color": ["#e05260" if item["role"] == "forbidden" else kind_colors.get(item["semantic_kind"], "#7fcaa6") for item in shown_fields]},
+                "text": ["未進入查詢" if not item["available"] else " · ".join(value for value in (item["metadata_source"], item["flag"]) if value) for item in shown_fields],
+            }], {"title": "Ontology 欄位地圖（顏色＝語義角色）", "xaxis": axis(title="缺失率 %；未進入查詢＝100", range=[0, 100])})
+
+        available = [item for item in atlas_fields if item["available"] and item["name"] in frame.columns][:12]
+        if available:
+            distribution_data: list[dict[str, Any]] = []
+            distribution_layout: dict[str, Any] = {"title": "核可欄位的分布形狀與集中性", "showlegend": False}
+            span = 1.0 / len(available)
+            for slot, item in enumerate(available):
+                series = frame[item["name"]]
+                if pd.api.types.is_numeric_dtype(series) and series.nunique(dropna=True) > 10:
+                    hist_counts, hist_edges = np.histogram(series.dropna(), bins=15)
+                    x_values = ((hist_edges[:-1] + hist_edges[1:]) / 2).round(3).tolist()
+                    y_values = [_count(value, f"{item['name']} bin") for value in hist_counts]
+                else:
+                    value_counts = series.dropna().astype(str).value_counts().head(8).sort_index()
+                    x_values = [str(value) for value in value_counts.index.tolist()]
+                    y_values = [_count(value, f"{item['name']} count") for value in value_counts.tolist()]
+                axis_id = "" if slot == 0 else str(slot + 1)
+                distribution_data.append({"type": "bar", "name": item["name"], "x": x_values, "y": y_values, "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": kind_colors.get(item["semantic_kind"], "#7fcaa6")}})
+                suffix = "" if slot == 0 else str(slot + 1)
+                distribution_layout[f"xaxis{suffix}"] = axis(title=item["name"], domain=[round(slot * span + 0.005, 4), round((slot + 1) * span - 0.005, 4)], anchor=f"y{axis_id}")
+                distribution_layout[f"yaxis{suffix}"] = axis(domain=[0.08, 0.9], anchor=f"x{axis_id}")
+            _finish("distribution_small_multiples", distribution_data, distribution_layout)
+
+        correlation = atlas["correlation"]
+        if len(correlation["columns"]) >= 2:
+            _finish("semantic_correlation", [{
+                "type": "heatmap", "z": correlation["matrix"],
+                "x": correlation["columns"], "y": correlation["columns"], "coloraxis": "coloraxis",
             }], {
-                "title": "數值欄位相關性（相關非因果）",
+                "title": "Ontology 分組的 Spearman 相關性（相關非因果）",
                 "coloraxis": {"cmin": -1.0, "cmax": 1.0, "colorscale": [[0.0, "#1f3a4d"], [0.5, "#2b6a7c"], [1.0, "#eda06a"]], "showscale": True},
-                "margin": {"l": 10, "r": 10, "t": 48, "b": 10},
             })
 
-    # 3. Per-1,000 outcomes (stacked horizontal bar).
-    correct, errors = decision["correct_per_1000"], decision["errors_per_1000"]
-    _finish("per_1000_outcomes", [
-        {"type": "bar", "name": "判對", "orientation": "h", "x": [correct], "y": ["每 1,000 筆"], "marker": {"color": "#7fcaa6"}},
-        {"type": "bar", "name": "判錯", "orientation": "h", "x": [errors], "y": ["每 1,000 筆"], "marker": {"color": "#eda06a"}},
-    ], {"title": "每 1,000 筆預測結果", "barmode": "stack", "showlegend": True, "xaxis": axis(title="筆數", range=[0, 1000]), "yaxis": axis()})
+    # 5-6. Data-to-target relationships and locked-threshold holdout error slices.
+    story_features = [str(item["name"]) for item in manifest.get("features") or []]
+    if frame is not None and target and target in frame.columns:
+        relationships = build_feature_target_relationships(
+            frame, target=target, features=story_features, target_values=target_values,
+            positive_class=objective.get("positive_class"),
+        )
+        if relationships:
+            traces: list[dict[str, Any]] = []
+            layout: dict[str, Any] = {"title": "資料本身的欄位與目標關係（描述性、非因果）", "showlegend": False}
+            for slot, relationship in enumerate(relationships):
+                axis_id = "" if slot == 0 else str(slot + 1)
+                traces.append({
+                    "type": "bar", "name": relationship["feature"],
+                    "x": [item["label"] for item in relationship["groups"]],
+                    "y": [item["positive_rate"] for item in relationship["groups"]],
+                    "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": "#4fd1c5"},
+                })
+                column = slot % 2; row = slot // 2
+                x_domain = [0.04 + column * 0.5, 0.46 + column * 0.5]
+                y_domain = [0.55, 0.95] if row == 0 else [0.08, 0.45]
+                suffix = "" if slot == 0 else str(slot + 1)
+                layout[f"xaxis{suffix}"] = axis(title=relationship["feature"], domain=x_domain, anchor=f"y{axis_id}")
+                layout[f"yaxis{suffix}"] = axis(title="正類比例", domain=y_domain, anchor=f"x{axis_id}", range=[0, 1])
+            _finish("feature_target_relationships", traces, layout)
 
-    # 4. Baseline vs selected error (bar).
-    baseline_error = round((1 - manifest["results"]["baseline"]["accuracy"]) * 100, 2)
-    selected_error = round((1 - manifest["results"]["selected"]["accuracy"]) * 100, 2)
+    if evaluation_frame is not None and y_true is not None and probabilities is not None:
+        error_slices = build_error_slices(
+            evaluation_frame, y_true=y_true, probabilities=probabilities,
+            threshold=_as_metric(objective, "threshold"), features=story_features,
+        )
+        if error_slices:
+            traces = []
+            layout = {"title": "鎖定門檻後的 Holdout 錯誤切片（非公平性結論）", "showlegend": True, "barmode": "stack"}
+            for slot, sliced in enumerate(error_slices):
+                axis_id = "" if slot == 0 else str(slot + 1)
+                labels = [item["label"] for item in sliced["groups"]]
+                traces.extend([
+                    {
+                        "type": "bar", "name": f"{sliced['feature']} FN", "x": labels,
+                        "y": [round(item["fn"] / item["count"], 4) for item in sliced["groups"]],
+                        "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": "#e05260"},
+                    },
+                    {
+                        "type": "bar", "name": f"{sliced['feature']} FP", "x": labels,
+                        "y": [round(item["fp"] / item["count"], 4) for item in sliced["groups"]],
+                        "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": "#eda06a"},
+                    },
+                ])
+                column = slot % 2; row = slot // 2
+                x_domain = [0.04 + column * 0.5, 0.46 + column * 0.5]
+                y_domain = [0.55, 0.95] if row == 0 else [0.08, 0.45]
+                suffix = "" if slot == 0 else str(slot + 1)
+                layout[f"xaxis{suffix}"] = axis(title=sliced["feature"], domain=x_domain, anchor=f"y{axis_id}")
+                layout[f"yaxis{suffix}"] = axis(title="錯誤率", domain=y_domain, anchor=f"x{axis_id}", range=[0, 1])
+            _finish("error_slice_analysis", traces, layout)
+
+    # 7. Baseline vs selected outcomes per 1,000 (merged decision view).
+    baseline_errors = _count(round((1 - manifest["results"]["baseline"]["accuracy"]) * 1000), "baseline errors")
+    selected_errors = _count(decision["errors_per_1000"], "selected errors")
     _finish("baseline_error_comparison", [
-        {"type": "bar", "name": "錯誤率 %", "x": ["簡單基準", "本模型"], "y": [baseline_error, selected_error], "text": [f"{baseline_error}%", f"{selected_error}%"], "marker": {"color": "#9aaab8"}},
-    ], {"title": f"每 1,000 筆少錯約 {decision['fewer_errors_per_1000']} 筆", "barmode": "group", "yaxis": axis(title="錯誤率 %")})
+        {"type": "bar", "name": "判對", "orientation": "h", "x": [1000 - baseline_errors, 1000 - selected_errors], "y": ["舊模型", "新模型"], "marker": {"color": "#7fcaa6"}},
+        {"type": "bar", "name": "判錯", "orientation": "h", "x": [baseline_errors, selected_errors], "y": ["舊模型", "新模型"], "marker": {"color": "#eda06a"}},
+    ], {"title": f"每 1,000 筆少錯約 {decision['fewer_errors_per_1000']} 筆", "barmode": "stack", "xaxis": axis(title="每 1,000 筆", range=[0, 1000])})
 
     # 5. Generalization health (three KPI indicators).
     health_items = [
@@ -825,23 +1302,6 @@ def build_plotly_figures(
             "domain": {"x": [slot / 3 + 0.01, (slot + 1) / 3 - 0.01], "y": [0.1, 0.85]},
         })
     _finish("generalization_health", indicator_data, {"title": f"泛化健康檢查（verdict：{guards.get('verdict', 'unknown')}）"})
-
-    # 6. Analysis process (sankey flow).
-    stages = ["資料檢查", "語意選欄", "保留未見資料", "自動比較模型", "最終驗證", "證據輸出"]
-    _finish("analysis_process", [{
-        "type": "sankey",
-        "node": {"label": stages, "pad": 12, "thickness": 18, "color": "#4fd1c5"},
-        "link": {"source": list(range(len(stages) - 1)), "target": list(range(1, len(stages))), "value": [1] * (len(stages) - 1), "color": "#2b6a7c"},
-    }], {"title": "分析流程（單向、不重跑）"})
-
-    # 7. Trial history (top-5 CV scores).
-    trials = manifest["trials"]
-    if trials:
-        _finish("trial_history", [
-            {"type": "scatter", "mode": "lines+markers", "name": "CV 分數",
-             "x": [trial["rank"] for trial in trials], "y": [round(trial["cv_score"] * 100, 2) for trial in trials],
-             "line": {"color": "#4fd1c5", "width": 3}},
-        ], {"title": f"前五名設定（共 {manifest['process']['completed_trials']} 組，train/CV）", "xaxis": axis(title="名次", tickvals=[trial["rank"] for trial in trials]), "yaxis": axis(title="CV 分數 ×100")})
 
     # 8. Feature importance (horizontal bar).
     features = manifest.get("features") or []
@@ -916,7 +1376,7 @@ def build_plotly_figures(
             fn_candidate = _count(((labels_array == 1) & (candidate_predictions == 0)).sum(), "fn")
             fp_candidate = _count(((labels_array == 0) & (candidate_predictions == 1)).sum(), "fp")
             costs.append(round((fn_candidate * fn_cost + fp_candidate * fp_cost) / len(labels_array) * 1000, 2))
-            recalls.append(round(tp_candidate / max(int((labels_array == 1).sum()), 1), 4))
+            recalls.append(round(tp_candidate / max(_count((labels_array == 1).sum(), "positives"), 1), 4))
             precisions.append(round(tp_candidate / max(tp_candidate + fp_candidate, 1), 4))
         _finish("threshold_cost_curve", [
             {"type": "scatter", "mode": "lines", "name": "加權成本/1,000", "x": [round(_number(v, "threshold"), 3) for v in thresholds], "y": costs, "line": {"color": "#eda06a", "width": 3}},
