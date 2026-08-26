@@ -1190,23 +1190,25 @@ def build_plotly_figures(
         if not top_features:
             top_features = [str(column) for column in frame.select_dtypes(include=[np.number]).columns.drop(target, errors="ignore").tolist()[:3]]
         profile_grid = responsive_subplot_grid(1 + len(top_features[:3]))
-        layout["xaxis"] = axis(title=target, domain=profile_grid[0]["x"], anchor="y")
-        layout["yaxis"] = axis(domain=profile_grid[0]["y"], anchor="x")
+        layout["xaxis"] = axis(title=target, type="category", domain=profile_grid[0]["x"], anchor="y")
+        layout["yaxis"] = axis(title="样本数", rangemode="tozero", domain=profile_grid[0]["y"], anchor="x")
         for slot, column in enumerate(top_features[:3]):
             series = frame[column]
-            if pd.api.types.is_numeric_dtype(series):
+            if pd.api.types.is_numeric_dtype(series) and series.nunique(dropna=True) > 10:
                 hist_counts, hist_edges = np.histogram(series.dropna(), bins=15)
                 x_values: list[Any] = ((hist_edges[:-1] + hist_edges[1:]) / 2).round(2).tolist()
                 y_values: list[Any] = [_count(value, f"{column} bin") for value in hist_counts]
+                axis_type = "linear"
             else:
                 feature_counts = series.astype(str).value_counts().head(8)
                 x_values = [str(value) for value in feature_counts.index.tolist()]
                 y_values = [_count(value, f"{column} count") for value in feature_counts.tolist()]
+                axis_type = "category"
             axis_id = str(slot + 2)
             data.append({"type": "bar", "name": str(column), "x": x_values, "y": y_values, "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": "#7fcaa6"}})
             domain = profile_grid[slot + 1]
-            layout[f"xaxis{axis_id}"] = axis(title=str(column), domain=domain["x"], anchor=f"y{axis_id}")
-            layout[f"yaxis{axis_id}"] = axis(domain=domain["y"], anchor=f"x{axis_id}")
+            layout[f"xaxis{axis_id}"] = axis(title=str(column), type=axis_type, domain=domain["x"], anchor=f"y{axis_id}")
+            layout[f"yaxis{axis_id}"] = axis(title="样本数", rangemode="tozero", domain=domain["y"], anchor=f"x{axis_id}")
         _finish("data_profile", data, layout)
 
     # 2-4. Ontology data atlas: field governance, shape, and semantic correlation.
@@ -1237,16 +1239,18 @@ def build_plotly_figures(
                     hist_counts, hist_edges = np.histogram(series.dropna(), bins=15)
                     x_values = ((hist_edges[:-1] + hist_edges[1:]) / 2).round(3).tolist()
                     y_values = [_count(value, f"{item['name']} bin") for value in hist_counts]
+                    axis_type = "linear"
                 else:
                     value_counts = series.dropna().astype(str).value_counts().head(8).sort_index()
                     x_values = [str(value) for value in value_counts.index.tolist()]
                     y_values = [_count(value, f"{item['name']} count") for value in value_counts.tolist()]
+                    axis_type = "category"
                 axis_id = "" if slot == 0 else str(slot + 1)
                 distribution_data.append({"type": "bar", "name": item["name"], "x": x_values, "y": y_values, "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": kind_colors.get(item["semantic_kind"], "#7fcaa6")}})
                 suffix = "" if slot == 0 else str(slot + 1)
                 domain = distribution_grid[slot]
-                distribution_layout[f"xaxis{suffix}"] = axis(title=item["name"], domain=domain["x"], anchor=f"y{axis_id}")
-                distribution_layout[f"yaxis{suffix}"] = axis(domain=domain["y"], anchor=f"x{axis_id}")
+                distribution_layout[f"xaxis{suffix}"] = axis(title=item["name"], type=axis_type, domain=domain["x"], anchor=f"y{axis_id}")
+                distribution_layout[f"yaxis{suffix}"] = axis(title="样本数", rangemode="tozero", domain=domain["y"], anchor=f"x{axis_id}")
             _finish("distribution_small_multiples", distribution_data, distribution_layout)
 
         correlation = atlas["correlation"]
@@ -1281,7 +1285,7 @@ def build_plotly_figures(
                 domain = relationship_grid[slot]
                 suffix = "" if slot == 0 else str(slot + 1)
                 layout[f"xaxis{suffix}"] = axis(title=relationship["feature"], domain=domain["x"], anchor=f"y{axis_id}")
-                layout[f"yaxis{suffix}"] = axis(title="正類比例", domain=domain["y"], anchor=f"x{axis_id}", range=[0, 1])
+                layout[f"yaxis{suffix}"] = axis(title="正類比例", tickformat=".0%", domain=domain["y"], anchor=f"x{axis_id}", range=[0, 1])
             _finish("feature_target_relationships", traces, layout)
 
     if evaluation_frame is not None and y_true is not None and probabilities is not None:
@@ -1311,7 +1315,7 @@ def build_plotly_figures(
                 domain = error_grid[slot]
                 suffix = "" if slot == 0 else str(slot + 1)
                 layout[f"xaxis{suffix}"] = axis(title=sliced["feature"], domain=domain["x"], anchor=f"y{axis_id}")
-                layout[f"yaxis{suffix}"] = axis(title="錯誤率", domain=domain["y"], anchor=f"x{axis_id}", range=[0, 1])
+                layout[f"yaxis{suffix}"] = axis(title="錯誤率", tickformat=".0%", domain=domain["y"], anchor=f"x{axis_id}", range=[0, 1])
             _finish("error_slice_analysis", traces, layout)
 
     # 7. Baseline vs selected outcomes per 1,000 (merged decision view).

@@ -104,6 +104,13 @@ def main() -> int:
         }
         missing = expected.keys() - figures.keys()
         assert not missing, f"missing plotly figures: {sorted(missing)}"
+        profile_layout = figures["data_profile"]["layout"]
+        profile_y_axes = [value for key, value in profile_layout.items() if key == "yaxis" or key.startswith("yaxis")]
+        assert profile_y_axes and all(axis.get("title") == "样本数" and axis.get("rangemode") == "tozero" for axis in profile_y_axes), profile_y_axes
+        assert profile_layout["xaxis"].get("type") == "category", profile_layout["xaxis"]
+        assert figures["feature_target_relationships"]["layout"]["yaxis"].get("tickformat") == ".0%"
+        assert figures["error_slice_analysis"]["layout"]["yaxis"].get("tickformat") == ".0%"
+
         removed = {"analysis_process", "trial_history", "per_1000_outcomes", "correlation_analysis"}
         assert not (set(figures) & removed), sorted(set(figures) & removed)
         assert len(figures) <= contract.MAX_FIGURES

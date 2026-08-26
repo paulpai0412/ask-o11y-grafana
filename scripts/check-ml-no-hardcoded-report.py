@@ -26,7 +26,7 @@ def main() -> int:
     for fixed_instruction in ("優先圖：", "Dashboard 必須包含", "面板故事順序為五幕", "data_profile.png →"):
         if fixed_instruction in skill:
             raise AssertionError(f"skill still fixes report flow/content: {fixed_instruction}")
-    for required in ("prepare_ml_report", "compose_ml_dashboard", "一次检视整份报告", "不得套用固定分析流程"):
+    for required in ("prepare_ml_report", "inspect_report_artifacts", "compose_ml_dashboard", "一次整份报告 synthesis", "不得套用固定分析流程"):
         if required not in skill:
             raise AssertionError(f"skill lacks dynamic report requirement: {required}")
 

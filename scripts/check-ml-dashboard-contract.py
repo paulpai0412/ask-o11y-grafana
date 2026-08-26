@@ -23,7 +23,7 @@ def dashboard() -> dict:
         "sections": [{
             "section_id": "custom-flow", "title": "由模型决定的主题", "purpose": "回答本次报告最重要的问题。", "collapsed": False,
             "panels": [{
-                "artifact_id": "evidence", "headline": "主要证据呈现明显结构", "observation": "本图与完整报告的事实一致。",
+                "artifact_id": "evidence", "view_ids": ["view-1"], "headline": "主要证据呈现明显结构", "observation": "本图与完整报告的事实一致。",
                 "interpretation": "此结构会改变判断重点。", "cross_chart_context": "应与其他证据和限制一起阅读。",
                 "limitation": "目前不能建立因果结论。", "next_step": "以额外资料继续验证。",
                 "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}], "priority": "primary", "preferred_width": "full",
@@ -31,7 +31,7 @@ def dashboard() -> dict:
         }],
     }
     return compositor.compose_dashboard(
-        manifest, synthesis, execution_ref="artifact://run/result", outputs={"evidence": {"png_index": 0, "plotly_index": 1}},
+        manifest, synthesis, execution_ref="artifact://run/result", outputs={"evidence": {"png_index": 0, "plotly_index": 1, "figure_spec": {"views": [{"view_id": "view-1", "title": "Evidence"}]}}},
         uid="dynamic-preview", title="Dynamic Preview",
     )
 
@@ -53,7 +53,7 @@ def main() -> int:
 
     missing_tag = copy.deepcopy(value); missing_tag["tags"] = ["ask-o11y-preview"]
     expect_reject(missing_tag)
-    missing_section = copy.deepcopy(value); missing_section["panels"][0].pop("askO11ySectionId")
+    missing_section = copy.deepcopy(value); next(item for item in missing_section["panels"] if item.get("type") == "row").pop("askO11ySectionId")
     expect_reject(missing_section)
     missing_narrative = copy.deepcopy(value); next(item for item in missing_narrative["panels"] if item.get("askO11yArtifactId")).pop("askO11yNarrative")
     expect_reject(missing_narrative)

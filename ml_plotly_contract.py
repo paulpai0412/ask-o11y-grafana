@@ -20,7 +20,7 @@ ALLOWED_LAYOUT_KEYS = {
     "paper_bgcolor", "plot_bgcolor", "coloraxis", "width", "height", "grid", "colorway",
     "uniformtext",
 } | AXIS_LAYOUT_KEYS
-ALLOWED_AXIS_KEYS = {"title", "range", "type", "tickformat", "tickvals", "ticktext", "showgrid", "zeroline", "overlaying", "side", "automargin", "dtick", "domain", "anchor"}
+ALLOWED_AXIS_KEYS = {"title", "range", "type", "tickformat", "tickvals", "ticktext", "showgrid", "zeroline", "overlaying", "side", "automargin", "dtick", "domain", "anchor", "rangemode"}
 ALLOWED_ANNOTATION_KEYS = {"text", "x", "y", "xref", "yref", "showarrow", "font", "ax", "ay"}
 ALLOWED_COLORAXIS_KEYS = {"cmin", "cmax", "colorscale", "showscale", "colorbar"}
 ALLOWED_TRACE_KEYS = {

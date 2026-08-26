@@ -125,6 +125,7 @@ def _evidence_panel(
         "title": panel["headline"],
         "gridPos": grid_pos,
         "askO11yArtifactId": artifact_id,
+        "askO11yViewIds": panel["view_ids"],
         "askO11yNarrative": narrative,
         "askO11yAssetBindings": [asset_binding],
     }
@@ -138,6 +139,8 @@ def _evidence_panel(
                 "fallbackUrl": asset_placeholder,
                 "alt": panel["headline"],
                 "narrative": narrative,
+                "selectedViewIds": panel["view_ids"],
+                "viewSpecs": [view for view in output.get("figure_spec", {}).get("views", []) if view.get("view_id") in panel["view_ids"]],
             },
             "askO11yPlotlyBindings": [{
                 "placeholder": plotly_placeholder,
@@ -164,9 +167,16 @@ def compose_dashboard(
     catalog = ml_report_contract.build_fact_catalog(manifest)
     if not isinstance(uid, str) or not uid or not isinstance(title, str) or not title:
         raise ValueError("dashboard uid and title are required")
-    panels: list[dict[str, Any]] = []
-    next_id = 1
-    y = 0
+    panels: list[dict[str, Any]] = [{
+        "id": 1,
+        "type": "text",
+        "title": validated["report_title"],
+        "askO11yReportThesis": validated["thesis"],
+        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
+        "options": {"mode": "markdown", "content": validated["thesis"]},
+    }]
+    next_id = 2
+    y = 4
     for section in validated["sections"]:
         row_panel = {
             "id": next_id, "type": "row", "title": section["title"], "collapsed": section["collapsed"],

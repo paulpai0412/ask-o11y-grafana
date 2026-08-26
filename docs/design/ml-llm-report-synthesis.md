@@ -14,14 +14,27 @@ Telco 专用 builder 只可作为 E2E fixture，production contract/compositor �
 Sandbox deterministic analysis
   → manifest + PNG + sanitized Plotly JSON
 Artifact Bridge.prepare_ml_report
-  → artifact catalog + bounded fact catalog + restrictions
-Ask O11y LLM（一次看完整报告与全部图）
+  → opaque report_context_ref + artifact catalog + bounded fact catalog + figure/view specs
+Artifact Bridge.inspect_report_artifacts
+  → PNG MCP image blocks + sanitized Plotly JSON + inspection_ref（vision 不可用时仍有完整 spec）
+Ask O11y LLM（分 bounded 批次看完完整报告与全部图）
   → ReportSynthesis JSON
 Artifact Bridge.compose_ml_dashboard
-  → validate facts/artifacts → generic dashboard with opaque bindings
+  → require report_context_ref + inspection receipts → validate facts/artifacts/views → generic dashboard with opaque bindings
 Artifact Bridge.resolve_dashboard_refs
   → Grafana writer
 ```
+
+## LLM inspection transport
+
+`prepare_ml_report` 不只列出 artifact 名称；它会持久化 bounded report context，并为每张 Plotly 图提供 deterministic `figure_spec`：trace types/count、subplot `view_id`、title、X/Y label、unit/tickformat、scale/range、point count 与 min/max。它返回 opaque `report_context_ref`，不暴露 raw rows 或 signed URL。
+
+`inspect_report_artifacts(report_context_ref, artifact_ids, mode)`：
+
+- `mode=vision`：返回 PNG 为 MCP `image` content blocks，同时返回完整 sanitized Plotly JSON 与 figure/view specs。
+- `mode=spec`：供不支持 vision 的模型使用，返回完整 Plotly JSON、aggregate values 与 view specs，不假装已视觉看图。
+- 每次 inspection 写入 opaque `inspection_ref`；可 bounded 分批，但 compose 前必须覆盖 synthesis 选择的所有 artifact/view。
+- `compose_ml_dashboard` 不再接受原始 execution/manifest 参数，只接受 `report_context_ref`、`inspection_refs` 与 synthesis；缺 inspection coverage fail closed。
 
 ## ReportSynthesis contract
 
@@ -39,6 +52,7 @@ Artifact Bridge.resolve_dashboard_refs
       "panels": [
         {
           "artifact_id": "manifest artifact stem",
+          "view_ids": ["deterministic subplot view id"],
           "headline": "本图的结论句",
           "observation": "观察到什么",
           "interpretation": "为什么重要",
@@ -116,15 +130,19 @@ Artifact Bridge.resolve_dashboard_refs
 
 RED：不同 section 形状的 valid synthesis、unknown artifact/fact、数字幻觉、HTML/URL、重复 section id、越界 sections/panels。GREEN：`ml_report_contract.py` + fact catalog；不得出现 required role/order。
 
-### B. Generic compositor + Bridge tools
+### B. Figure inspection + Bridge tools
 
-RED：classification、correlation、time-series 三个不同 fixture 经同一 compositor；production source 不含 fixture dataset/field names；opaque bindings 可 resolve。GREEN：`ml_dashboard_compositor.py`、`prepare_ml_report`、`compose_ml_dashboard` tools。
+RED：multi-subplot figure spec 的 view/title/X/Y/scale/range/point bounds；vision/spec 两模式；MCP image blocks；opaque report_context_ref/inspection_ref；未检查 artifact/view 不得 compose。GREEN：`ml_figure_inspection.py`、`prepare_ml_report`、`inspect_report_artifacts`。
 
-### C. Plotly responsive/theme
+### C. Generic compositor
+
+RED：classification、correlation、time-series 三个不同 fixture 经同一 compositor；production source 不含 fixture dataset/field names；synthesis view_ids 必须存在且被 inspection receipts 覆盖；opaque bindings 可 resolve。GREEN：`ml_dashboard_compositor.py`、`compose_ml_dashboard`。
+
+### D. Plotly responsive/theme
 
 RED：1..12 grid rows/columns/domain 不重叠；axis 最小宽高；dark/light theme pure function；ResizeObserver/fallback；Chromium screenshots。GREEN：shared grid + themed plugin。
 
-### D. Ask O11y skill / E2E
+### E. Ask O11y skill / E2E
 
 Skill 只规定安全工具边界：先取得完整 bounded report context，再由 LLM 自主规划报告 flow/content 并一次输出 synthesis，最后交 compositor/validator；不得规定分析步骤、section 角色、固定图表或固定文字。测试 fixture 可提供不同形状的 deterministic synthesis；production 不可使用 Telco builder。
 
@@ -132,11 +150,13 @@ Skill 只规定安全工具边界：先取得完整 bounded report context，再
 
 - 新增 `ml_report_contract.py`：flow-agnostic synthesis schema、bounded fact catalog、artifact/fact evidence guard、numeric hallucination 与 unsafe text fail closed。
 - 新增 `ml_dashboard_compositor.py`：忠实保留 LLM section/order/content/collapsed；不识别 dataset、字段、固定图名或 required roles；同 panel 写入结构化 narrative/evidence。
-- Artifact Bridge 新增 `prepare_ml_report` 与 `compose_ml_dashboard`，live MCP tools/list 已可见；Plotly capability 以 trace/axis 数与 chart family 自动给 full/half/min-height guard，不看 artifact 名。
+- Artifact Bridge 新增 `prepare_ml_report`、`inspect_report_artifacts` 与 `compose_ml_dashboard`；prepare 持久化 opaque context，inspect 支持 vision/spec、PNG MCP image blocks、完整 sanitized Plotly JSON、figure/view/axis/scale specs 与 receipts；compose 强制整份报告 inspection coverage。
 - Ask O11y skill 已移除固定回报模板、固定五幕、固定 chart list；要求一次阅读整份报告再 synthesis。
-- Plotly responsive grid 通过一到十二个 subplot domain/non-overlap tests；plugin 使用 Grafana `useTheme2`、transparent theme merge、ResizeObserver 与 `Plots.resize`，无 Processing Script/new Function。
+- Plotly responsive grid 通过一到十二个 subplot domain/non-overlap tests；plugin 使用 Grafana `useTheme2`、transparent theme merge、ResizeObserver 与 `Plots.resize`，无 Processing Script/new Function。Multi-view figure 在同一 Grafana panel 内拆成独立 subpanel cards，移除原 subplot domain/anchor 并保留每个 view 标题与独立 X/Y。
+- Deterministic axis policy：count/bar 从零、category/linear 明示、rate 使用 percent tickformat、figure specs 暴露 title/unit/scale/range/min/max；plugin v0.2.1 浏览器实测 X/Y title 正确。Multi-view 会移除原 subplot domain/anchor、关闭单 trace 重复 legend，并依 view spec 生成独立 subpanel。
 - 真实 LLM synthesis：读取完整 report context 与全部图，动态选择四个 section、八个 artifacts；通过 evidence validator 后写入 UID `dynamic-llm-report-e2e`。
-- Chromium 在 dark theme 与两种 viewport 通过：图表、数值 evidence、观察／解读／跨图关系／限制／下一步同 panel 可见，无 page/console error。
+- Chromium 在 dark theme 与两种 viewport 通过：图表、数值 evidence、观察／解读／跨图关系／限制／下一步同 panel 可见，无 page/console error。Compositor 显示顶层 LLM thesis；LLM 亦可动态加入无图 conclusion section。
+- Live MCP 实测：vision batch 返回 text + 八个 image blocks；spec batch 返回六图完整 JSON/spec 且不声称 vision；两份 inspection receipts 覆盖十四图后 compose 成功，缺覆盖 fail closed。
 
 ## 验收
 

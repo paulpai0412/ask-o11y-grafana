@@ -9,7 +9,7 @@
     "logos": { "small": "img/logo.svg", "large": "img/logo.svg" },
     "links": [],
     "screenshots": [],
-    "version": "0.1.0",
+    "version": "0.2.1",
     "updated": "2026-08-26"
   },
   "dependencies": {

@@ -75,21 +75,31 @@ def main() -> int:
     setattr(bridge, "ARTIFACTS", bridge.ArtifactStore(ROOT / ".analysis-artifacts/runs"))
     context = {"org_id": "1", "user_id": "dynamic-report-e2e"}
     execution_ref, manifest_index = assemble_execution(bridge, context)
-    OUTPUT.joinpath("report-runtime.json").write_text(json.dumps({"execution_ref": execution_ref, "manifest_output_index": manifest_index, "context": context}, ensure_ascii=False, indent=2))
     prepared = bridge.prepare_ml_report({"execution_ref": execution_ref, "manifest_output_index": manifest_index, "_server_context": context})
     if not prepared.get("ok"):
         raise RuntimeError(f"prepare_ml_report failed: {prepared}")
+    report_context_ref = prepared["refs"]["report_context_ref"]
+    OUTPUT.joinpath("report-runtime.json").write_text(json.dumps({"execution_ref": execution_ref, "manifest_output_index": manifest_index, "report_context_ref": report_context_ref, "context": context}, ensure_ascii=False, indent=2))
     OUTPUT.joinpath("report-context.json").write_text(json.dumps(prepared["report_context"], ensure_ascii=False, indent=2))
     if args.prepare_only:
         print(json.dumps({"ok": True, "report_context": str(OUTPUT / "report-context.json"), "artifact_count": prepared["evidence"]["artifact_count"], "fact_count": prepared["evidence"]["fact_count"]}, ensure_ascii=False))
         return 0
+
+    artifact_ids = [item["artifact_id"] for item in prepared["report_context"]["artifacts"]]
+    inspection_refs = []
+    for start in range(0, len(artifact_ids), 8):
+        inspected = bridge.inspect_report_artifacts({"report_context_ref": report_context_ref, "artifact_ids": artifact_ids[start:start + 8], "mode": "vision", "_server_context": context})
+        if not inspected.get("ok"):
+            raise RuntimeError(f"inspect_report_artifacts failed: {inspected}")
+        inspection_refs.append(inspected["refs"]["inspection_ref"])
+    OUTPUT.joinpath("inspection-refs.json").write_text(json.dumps(inspection_refs, indent=2))
 
     try:
         synthesis = json.loads(SYNTHESIS_PATH.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"LLM synthesis unavailable: {exc}; run --prepare-only and synthesize the whole report first") from exc
     composed = bridge.compose_ml_dashboard({
-        "execution_ref": execution_ref, "manifest_output_index": manifest_index, "synthesis": synthesis,
+        "report_context_ref": report_context_ref, "inspection_refs": inspection_refs, "synthesis": synthesis,
         "uid": UID, "title": synthesis["report_title"], "_server_context": context,
     })
     if not composed.get("ok"):
@@ -127,6 +137,7 @@ def main() -> int:
         "plotly_panels": sum(item.get("type") == "asko11y-plotly-panel" for item in evidence_panels),
         "resolved_assets": resolved["evidence"]["resolved_assets"],
         "resolved_plotly": resolved["evidence"]["resolved_plotly"],
+        "inspected_artifacts": len(artifact_ids),
     }
     print(json.dumps(summary, ensure_ascii=False))
     return 0

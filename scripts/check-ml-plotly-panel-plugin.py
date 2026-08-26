@@ -19,7 +19,7 @@ def main() -> int:
 
     source = (PANEL / "src/module.tsx").read_text()
     assert "Plotly.react" in source and "fallbackUrl" in source and "narrative" in source, source
-    for required in ("useTheme2", "ResizeObserver", "Plots.resize", "applyGrafanaTheme"):
+    for required in ("useTheme2", "ResizeObserver", "Plots.resize", "applyGrafanaTheme", "splitFigureViews", "selectedViewIds", "gridTemplateColumns"):
         assert required in source, f"missing Grafana-responsive behavior: {required}"
     assert "options.figure.layout, width, height" not in source, "panel must not force a fixed Plotly canvas"
     assert "eval(" not in source and "new Function" not in source, "unsafe dynamic code in panel source"
@@ -31,6 +31,14 @@ def main() -> int:
     )
     if result.returncode:
         raise AssertionError(f"render mode contract failed: {result.stderr}")
+
+    views_module = PANEL / "src/figureViews.mjs"
+    views_result = subprocess.run(
+        ["node", "--input-type=module", "-e", f"import{{splitFigureViews as s}}from'{views_module.as_uri()}';const f={{data:[{{type:'bar',name:'a',x:[1],y:[2]}},{{type:'scatter',name:'b',x:[1],y:[3],xaxis:'x2',yaxis:'y2'}}],layout:{{xaxis:{{title:'x'}},yaxis:{{title:'y'}},xaxis2:{{title:'time',domain:[0.5,1]}},yaxis2:{{title:'value',domain:[0.5,1]}}}}}};const v=s(f,['view-2'],[{{view_id:'view-1',title:'A'}},{{view_id:'view-2',title:'B'}}]);if(v.length!==1||v[0].viewId!=='view-2'||v[0].title!=='B'||v[0].figure.data.length!==1||v[0].figure.layout.xaxis.title.text!=='time'||'domain'in v[0].figure.layout.xaxis)process.exit(4)"],
+        check=False, capture_output=True, text=True,
+    )
+    if views_result.returncode:
+        raise AssertionError(f"Plotly view split contract failed: {views_result.stderr}")
 
     theme_module = PANEL / "src/theme.mjs"
     theme_result = subprocess.run(

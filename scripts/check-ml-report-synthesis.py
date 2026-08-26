@@ -44,6 +44,7 @@ def synthesis(artifact: str, sections: list[tuple[str, str]]) -> dict:
                 "collapsed": False,
                 "panels": [{
                     "artifact_id": artifact,
+                    "view_ids": ["view-1"],
                     "headline": "主要结构呈现明显差异",
                     "observation": "本图的差异与报告其他证据一致。",
                     "interpretation": "这项发现会影响后续判断重点。",

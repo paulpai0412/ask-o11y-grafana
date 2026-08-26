@@ -143,12 +143,17 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
             raise ValueError("report synthesis panel count exceeds bound")
         for panel_index, panel in enumerate(panels):
             panel_where = f"{where}.panels[{panel_index}]"
-            required = {"artifact_id", *TEXT_FIELDS, "evidence", "priority", "preferred_width"}
+            required = {"artifact_id", "view_ids", *TEXT_FIELDS, "evidence", "priority", "preferred_width"}
             if not isinstance(panel, dict) or set(panel) != required:
                 raise ValueError(f"{panel_where} shape is invalid")
             artifact_id = _safe_text(panel.get("artifact_id"), f"{panel_where}.artifact_id", identifier=True)
             if artifact_id not in artifacts:
                 raise ValueError(f"{panel_where} references unknown artifact")
+            view_ids = panel.get("view_ids")
+            if not isinstance(view_ids, list) or not 1 <= len(view_ids) <= 12 or len(set(view_ids)) != len(view_ids):
+                raise ValueError(f"{panel_where} view_ids are outside bounds")
+            for view_id in view_ids:
+                _safe_text(view_id, f"{panel_where}.view_id", identifier=True)
             for field in TEXT_FIELDS:
                 _safe_text(panel.get(field), f"{panel_where}.{field}")
             if panel.get("priority") not in PRIORITIES or panel.get("preferred_width") not in WIDTHS:

@@ -88,6 +88,10 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
     if not isinstance(top_level, list) or not top_level:
         raise ValueError("dashboard panels are required")
     _story_rows([item for item in top_level if isinstance(item, dict)])
+    thesis_panels = [item for item in top_level if isinstance(item, dict) and item.get("askO11yReportThesis") is not None]
+    if len(thesis_panels) != 1 or thesis_panels[0].get("type") != "text":
+        raise ValueError("report dashboard requires one LLM-authored thesis panel")
+    _safe_text(thesis_panels[0].get("askO11yReportThesis"), "report thesis")
     flattened = _panels([item for item in top_level if isinstance(item, dict)])
     if len(flattened) > MAX_PANELS:
         raise ValueError("dashboard panel count exceeds bound")
@@ -104,6 +108,9 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
         artifact_id = panel.get("askO11yArtifactId")
         if not isinstance(artifact_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", artifact_id):
             raise ValueError("evidence panel artifact id is invalid")
+        view_ids = panel.get("askO11yViewIds")
+        if not isinstance(view_ids, list) or not 1 <= len(view_ids) <= 12 or any(not isinstance(view_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", view_id) for view_id in view_ids):
+            raise ValueError("evidence panel view ids are invalid")
         _validate_narrative(panel)
         bindings = panel.get("askO11yAssetBindings")
         if not isinstance(bindings, list) or not bindings:
@@ -128,6 +135,11 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
             options = panel.get("options") or {}
             if not isinstance(plotly_bindings, list) or not plotly_bindings or "fallbackUrl" not in options or "narrative" not in options:
                 raise ValueError("Plotly evidence panel requires figure, fallback, and narrative bindings")
+            if options.get("selectedViewIds") != view_ids:
+                raise ValueError("Plotly selected views must match the evidence panel view ids")
+            view_specs = options.get("viewSpecs")
+            if not isinstance(view_specs, list) or {item.get("view_id") for item in view_specs if isinstance(item, dict)} != set(view_ids):
+                raise ValueError("Plotly view specs must cover the selected evidence views")
     _walk(dashboard)
 
 

@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..355736e
 --- /dev/null
 +++ b/pkg/agent/skills/ml-method-selection/SKILL.md
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,259 @@
 +---
 +name: ml-method-selection
 +description: REQUIRED for any machine-learning or statistical analysis turn. Always select for 模型訓練、自動調參、分類、迴歸、分群、異常偵測、時間序列、預測、特徵重要性、結果解釋，或要求把 ML 過程/結果做成 Grafana Dashboard；亦涵蓋智慧製造設備健康、預測性維護 predictive maintenance、異常偵測 anomaly detection、良率/不良、製程參數、SPC/Cpk/OEE、需求預測。
@@ -245,12 +245,13 @@ index 0000000..355736e
 +
 +不得套用固定分析流程、固定 section、固定圖表清單、固定順序、固定 caption 或資料集／欄位專用文字。分析計算完成後，使用下列安全工具邊界；報告 flow 與 content 由你依本次使用者目的、完整 facts 與全部 artifacts 自主決定。
 +
-+1. 呼叫 `prepare_ml_report(execution_ref, manifest_output_index)`，取得 bounded artifact catalog、fact catalog 與限制；不得读取 raw rows、path、signed URL。
-+2. 一次检视整份报告与全部相关 PNG/Plotly，不得逐图各自生成互不相干的 caption。先形成全局 thesis、跨图关系与资料限制，再决定要选哪些图、section 数量、顺序、标题、正文／折叠状态及 full/half width。
-+3. 输出一个 `ask-o11y-report-synthesis-v1`。section id/title/purpose/order 完全依本次报告动态产生，不得使用固定五幕或固定中文 row。每个选中的 artifact 都必须写：`headline`、`observation`、`interpretation`、`cross_chart_context`、`limitation`、`next_step`、`evidence`、`priority`、`preferred_width`。
-+4. narrative 字段不得自行写数字；所有数值用 `evidence: [{fact_ref, format}]` 引用 deterministic fact。未知 fact/artifact、HTML、URL、script 或未经 evidence 支持的数字会被拒绝。
-+5. 呼叫 `compose_ml_dashboard(...)`。Compositor 只忠实呈现你产生的 flow/content 与 opaque bindings，不会替你选择、重排或补写分析内容；仅在安全或最小尺寸不满足时 fail closed／要求 full width。
-+6. 再由 host 执行 `resolve_dashboard_refs` 并交唯一核准的 Grafana writer。不得自行插入 asset URL、literal Plotly data、datasource targets 或 executable script。
++1. 呼叫 `prepare_ml_report(execution_ref, manifest_output_index)`，取得 opaque `report_context_ref`、bounded artifact/fact catalog、每图 figure/view/axis/scale specs 與限制；不得读取 raw rows、path、signed URL。
++2. 以 `inspect_report_artifacts(report_context_ref, artifact_ids, mode)` 分 bounded 批次覆盖**全部** artifacts。模型支持 vision 时用 `mode=vision`，实际读取 MCP PNG image blocks 与 sanitized Plotly JSON；不支持 vision 时用 `mode=spec` 读取完整 Plotly aggregate/view specs，并明确不声称做过视觉判读。保存每批 `inspection_ref`。
++3. 所有批次完成后只做**一次整份报告 synthesis**，不得逐图各自生成互不相干的 caption。先形成全局 thesis、跨图关系與资料限制，再决定要选哪些 artifact/view、section 数量、顺序、标题、正文／折叠状态及 full/half width。
++4. 输出一个 `ask-o11y-report-synthesis-v1`。section id/title/purpose/order 完全依本次报告动态产生，不得使用固定五幕或固定中文 row。每个选中的 panel 都必须写：`artifact_id`、`view_ids`、`headline`、`observation`、`interpretation`、`cross_chart_context`、`limitation`、`next_step`、`evidence`、`priority`、`preferred_width`。
++5. narrative 字段不得自行写数字；所有数值用 `evidence: [{fact_ref, format}]` 引用 deterministic fact。未知 fact/artifact/view、HTML、URL、script 或未经 evidence 支持的数字会被拒绝。
++6. 呼叫 `compose_ml_dashboard(report_context_ref, inspection_refs, synthesis, ...)`。缺少任一整份报告 artifact inspection 或 synthesis 引用未检查 view 时会 fail closed。Compositor 只忠实呈现 flow/content 与 opaque bindings，不会替你选择、重排或补写分析内容；仅在安全或最小尺寸不满足时要求 full width。
++7. 再由 host 执行 `resolve_dashboard_refs` 并交唯一核准的 Grafana writer。不得自行插入 asset URL、literal Plotly data、datasource targets 或 executable script。
 +
 +分析原则：
 +

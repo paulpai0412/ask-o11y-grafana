@@ -32,6 +32,7 @@ def make_manifest(artifact_ids: list[str], signal: float) -> dict:
 def panel(artifact_id: str, width: str = "full") -> dict[str, Any]:
     return {
         "artifact_id": artifact_id,
+        "view_ids": ["view-1"],
         "headline": "主要证据呈现值得关注的结构",
         "observation": "本图显示的变化与整份报告一致。",
         "interpretation": "这项结构会影响后续判断重点。",
@@ -74,6 +75,7 @@ def main() -> int:
             manifest, report, execution_ref=f"artifact://run-{index}/sandbox-execution",
             outputs=outputs, uid=f"fixture-{index}", title=f"Fixture {index}",
         )
+        assert dashboard["panels"][0].get("askO11yReportThesis") == report["thesis"], dashboard["panels"][0]
         rows = [item for item in dashboard["panels"] if item.get("type") == "row"]
         if [item["askO11ySectionId"] for item in rows] != [section["section_id"] for section in report["sections"]]:
             raise AssertionError("compositor changed the LLM-authored section order")
@@ -82,6 +84,7 @@ def main() -> int:
             flattened.append(item); flattened.extend(item.get("panels") or [])
         evidence_panels = [item for item in flattened if item.get("askO11yArtifactId")]
         assert all(item.get("askO11yNarrative", {}).get("evidence") for item in evidence_panels), evidence_panels
+        assert all((item.get("options") or {}).get("selectedViewIds") == ["view-1"] for item in evidence_panels), evidence_panels
         if index == 0:
             promoted = next(item for item in evidence_panels if item["askO11yArtifactId"] == "class-view")
             assert promoted["gridPos"]["w"] == 24 and promoted["gridPos"]["h"] >= 16, promoted["gridPos"]

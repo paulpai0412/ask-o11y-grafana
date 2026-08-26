@@ -40,6 +40,7 @@ artifact_assets = load_module("artifact_assets", ROOT / "artifact_assets.py")
 ml_dashboard_contract = load_module("ml_dashboard_contract", ROOT / "ml_dashboard_contract.py")
 ml_plotly_contract = load_module("ml_plotly_contract", ROOT / "ml_plotly_contract.py")
 ml_report_contract = load_module("ml_report_contract", ROOT / "ml_report_contract.py")
+ml_figure_inspection = load_module("ml_figure_inspection", ROOT / "ml_figure_inspection.py")
 ml_dashboard_compositor = load_module("ml_dashboard_compositor", ROOT / "ml_dashboard_compositor.py")
 ArtifactAuthError = artifact_store.ArtifactAuthError
 ArtifactStore = artifact_store.ArtifactStore
@@ -56,7 +57,7 @@ try:
     PORT = int(os.environ.get("ARTIFACT_BRIDGE_MCP_PORT", "8773"))
 except ValueError:
     PORT = 8773
-SERVER_INFO = {"name": "artifact-bridge-mcp", "version": "0.2.0"}
+SERVER_INFO = {"name": "artifact-bridge-mcp", "version": "0.3.0"}
 PROTOCOL = "2025-03-26"
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
@@ -378,21 +379,24 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _plotly_capability(result: Any) -> dict[str, Any]:
+def _plotly_figure(result: Any) -> dict[str, Any]:
     try:
         payload = result["mime"]["application/json"]
         figure = json.loads(payload)
-        data = figure["data"]
-        layout = figure.get("layout") or {}
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise WorkflowContractError("Plotly output is invalid") from exc
-    if not isinstance(data, list) or not isinstance(layout, dict):
-        raise WorkflowContractError("Plotly output shape is invalid")
-    x_axes = {key for key in layout if key == "xaxis" or (key.startswith("xaxis") and key.removeprefix("xaxis").isdigit())}
-    subplot_count = max(len(x_axes), 1)
-    has_matrix = any(isinstance(trace, dict) and trace.get("type") == "heatmap" for trace in data)
-    full = subplot_count >= 3 or has_matrix or len(data) > 4
-    min_height = 18 if subplot_count >= 7 else 16 if subplot_count >= 3 else 14 if has_matrix else 12
+    try:
+        return ml_plotly_contract.sanitize_figure(figure)
+    except ValueError as exc:
+        raise WorkflowContractError(str(exc)) from exc
+
+
+def _plotly_capability(spec: dict[str, Any]) -> dict[str, Any]:
+    subplot_count = len(spec["views"])
+    has_matrix = any("heatmap" in view.get("trace_types", []) for view in spec["views"])
+    full = subplot_count >= 3 or has_matrix or spec["trace_count"] > 4
+    rows = (subplot_count + 1) // 2
+    min_height = min(40, 8 + rows * 10) if subplot_count > 1 else 16 if has_matrix else 14
     return {"recommended_width": "full" if full else "half", "min_height": min_height}
 
 
@@ -420,21 +424,26 @@ def _report_material(args: dict[str, Any]) -> tuple[dict[str, str], str, dict[st
         if isinstance(result, dict) and result.get("display_name")
     }
     artifacts: list[dict[str, Any]] = []
-    outputs: dict[str, dict[str, int]] = {}
+    outputs: dict[str, dict[str, Any]] = {}
     for item in manifest.get("artifacts") or []:
         name = item.get("name") if isinstance(item, dict) else None
         if not isinstance(name, str) or not name.endswith(".png") or name not in by_name:
             raise WorkflowContractError("manifest artifact has no matching PNG output")
         artifact_id = name.removesuffix(".png")
-        output = {"png_index": by_name[name]}
+        output: dict[str, Any] = {"png_index": by_name[name]}
         plotly_name = f"ml-plotly-{artifact_id}.json"
         if plotly_name in by_name:
             output["plotly_index"] = by_name[plotly_name]
-            output.update(_plotly_capability(results[output["plotly_index"]]))
+            figure = _plotly_figure(results[output["plotly_index"]])
+            output["figure_spec"] = ml_figure_inspection.inspect_figure(artifact_id, figure)
+            output.update(_plotly_capability(output["figure_spec"]))
+        else:
+            output["figure_spec"] = ml_figure_inspection.inspect_png_only(artifact_id, str(item.get("alt_text") or item.get("caption") or artifact_id))
         outputs[artifact_id] = output
         artifacts.append({
             "artifact_id": artifact_id,
             "png_output_index": output["png_index"],
+            "figure_spec": output["figure_spec"],
             **({
                 "plotly_output_index": output["plotly_index"],
                 "recommended_width": output["recommended_width"],
@@ -452,34 +461,144 @@ def prepare_ml_report(args: dict[str, Any]) -> dict[str, Any]:
         unexpected = sorted(set(args) - {"execution_ref", "manifest_output_index", "_server_context"})
         if unexpected:
             raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
-        _context, execution_ref, manifest, artifacts, _outputs = _report_material(args)
+        context, execution_ref, manifest, artifacts, outputs = _report_material(args)
         facts = ml_report_contract.build_fact_catalog(manifest)
+        execution_run_id, _parts = parse_artifact_ref(execution_ref)
+        report_context = {
+            "execution_ref": execution_ref,
+            "manifest": manifest,
+            "artifacts": artifacts,
+            "outputs": outputs,
+            "facts": facts,
+            "restrictions": {
+                "numeric_text": "Use evidence fact_ref + format; narrative fields contain no digits.",
+                "flow": "Choose sections, order, titles, charts, collapsed state, and narratives from this report; no fixed template.",
+                "inspection": "Inspect every artifact in bounded vision or spec batches before composing.",
+            },
+        }
+        report_context_ref = ARTIFACTS.write_json(context, execution_run_id, f"report-context-{args['manifest_output_index']}", report_context)
     except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; keep successful analysis outputs and correct only the opaque report reference.")
     return success_response(
-        step=step, run_id="run_" + uuid.uuid4().hex, refs={"execution_ref": execution_ref},
-        instruction="Inspect the entire bounded report and every artifact once, then author one flow/content synthesis without inventing numbers. Pass it to compose_ml_dashboard.",
+        step=step, run_id="run_" + uuid.uuid4().hex, refs={"execution_ref": execution_ref, "report_context_ref": report_context_ref},
+        instruction="Inspect every artifact through inspect_report_artifacts in bounded batches, then author one whole-report synthesis without inventing numbers. Pass report_context_ref and all inspection refs to compose_ml_dashboard.",
         evidence={"artifact_count": len(artifacts), "fact_count": len(facts)},
         report_context={
             "purpose": manifest.get("purpose"), "conclusion": manifest.get("conclusion"),
             "artifacts": artifacts, "facts": facts,
-            "restrictions": {"numeric_text": "Use evidence fact_ref + format; narrative fields contain no digits.", "flow": "Choose sections, order, titles, charts, collapsed state, and narratives from this report; no fixed template."},
+            "restrictions": report_context["restrictions"],
         },
     )
+
+
+def _read_report_context(args: dict[str, Any]) -> tuple[dict[str, str], str, dict[str, Any]]:
+    context = context_from_args(args)
+    report_context_ref = args.get("report_context_ref")
+    if not isinstance(report_context_ref, str) or not report_context_ref.startswith("artifact://"):
+        raise WorkflowContractError("report_context_ref is required")
+    report_context = ARTIFACTS.read_json(context, report_context_ref)
+    if not isinstance(report_context, dict) or not isinstance(report_context.get("artifacts"), list) or not isinstance(report_context.get("outputs"), dict):
+        raise WorkflowContractError("report context is invalid")
+    return context, report_context_ref, report_context
+
+
+def inspect_report_artifacts(args: dict[str, Any]) -> dict[str, Any]:
+    step = "inspect_report_artifacts"
+    try:
+        unexpected = sorted(set(args) - {"report_context_ref", "artifact_ids", "mode", "_server_context"})
+        if unexpected:
+            raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
+        context, report_context_ref, report_context = _read_report_context(args)
+        artifact_ids = args.get("artifact_ids")
+        mode = args.get("mode")
+        if not isinstance(artifact_ids, list) or not 1 <= len(artifact_ids) <= 8 or len(set(artifact_ids)) != len(artifact_ids):
+            raise WorkflowContractError("artifact_ids must contain one to eight unique ids")
+        if mode not in {"vision", "spec"}:
+            raise WorkflowContractError("inspection mode must be vision or spec")
+        available = {item["artifact_id"]: item for item in report_context["artifacts"] if isinstance(item, dict) and item.get("artifact_id")}
+        if any(not isinstance(artifact_id, str) or artifact_id not in available for artifact_id in artifact_ids):
+            raise WorkflowContractError("inspection references an unknown artifact")
+        execution = ARTIFACTS.read_json(context, report_context["execution_ref"])
+        results = execution.get("results")
+        if not isinstance(results, list):
+            raise WorkflowContractError("report execution results are invalid")
+        details = []
+        image_content = []
+        coverage: dict[str, list[str]] = {}
+        for artifact_id in artifact_ids:
+            output = report_context["outputs"][artifact_id]
+            try:
+                png_result = results[output["png_index"]]
+                png_data = png_result["mime"]["image/png"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise WorkflowContractError("artifact PNG output is unavailable") from exc
+            if not isinstance(png_data, str):
+                raise WorkflowContractError("artifact PNG output is invalid")
+            detail = {"artifact_id": artifact_id, "figure_spec": output["figure_spec"]}
+            if "plotly_index" in output:
+                detail["figure"] = _plotly_figure(results[output["plotly_index"]])
+            details.append(detail)
+            view_ids = [view["view_id"] for view in output["figure_spec"]["views"]]
+            coverage[artifact_id] = view_ids
+            if mode == "vision":
+                image_content.append({"type": "image", "data": png_data, "mimeType": "image/png"})
+        receipt_run_id = ARTIFACTS.create_run(context)
+        inspection_ref = ARTIFACTS.write_json(context, receipt_run_id, "report-inspection", {
+            "report_context_ref": report_context_ref, "mode": mode, "coverage": coverage,
+        })
+    except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=True, instruction="Revise only the bounded artifact inspection request; do not rerun analysis.")
+    output = success_response(
+        step=step, run_id=receipt_run_id, refs={"inspection_ref": inspection_ref, "report_context_ref": report_context_ref},
+        instruction="Continue inspecting bounded batches until every report artifact is covered, then synthesize once across the whole report.",
+        evidence={"artifact_count": len(details), "mode": mode},
+        inspection={"mode": mode, "artifacts": details},
+    )
+    output["_mcp_content"] = image_content
+    return output
 
 
 def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
     step = "compose_ml_dashboard"
     try:
-        unexpected = sorted(set(args) - {"execution_ref", "manifest_output_index", "synthesis", "uid", "title", "_server_context"})
+        unexpected = sorted(set(args) - {"report_context_ref", "inspection_refs", "synthesis", "uid", "title", "_server_context"})
         if unexpected:
             raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
-        _context, execution_ref, manifest, _artifacts, outputs = _report_material(args)
+        context, report_context_ref, report_context = _read_report_context(args)
+        inspection_refs = args.get("inspection_refs")
+        if not isinstance(inspection_refs, list) or not 1 <= len(inspection_refs) <= 8 or len(set(inspection_refs)) != len(inspection_refs):
+            raise WorkflowContractError("inspection_refs must contain one to eight unique refs")
+        coverage: dict[str, set[str]] = {}
+        modes = set()
+        for inspection_ref in inspection_refs:
+            if not isinstance(inspection_ref, str) or not inspection_ref.startswith("artifact://"):
+                raise WorkflowContractError("inspection ref is invalid")
+            receipt = ARTIFACTS.read_json(context, inspection_ref)
+            if not isinstance(receipt, dict) or receipt.get("report_context_ref") != report_context_ref or not isinstance(receipt.get("coverage"), dict):
+                raise WorkflowContractError("inspection receipt does not belong to this report")
+            modes.add(str(receipt.get("mode") or ""))
+            for artifact_id, view_ids in receipt["coverage"].items():
+                if not isinstance(view_ids, list):
+                    raise WorkflowContractError("inspection coverage is invalid")
+                coverage.setdefault(str(artifact_id), set()).update(str(view_id) for view_id in view_ids)
+        required_coverage = {
+            item["artifact_id"]: {view["view_id"] for view in item["figure_spec"]["views"]}
+            for item in report_context["artifacts"]
+        }
+        missing_artifacts = sorted(artifact_id for artifact_id, view_ids in required_coverage.items() if not view_ids.issubset(coverage.get(artifact_id, set())))
+        if missing_artifacts:
+            raise WorkflowContractError("whole-report inspection is incomplete: " + ", ".join(missing_artifacts))
         synthesis = args.get("synthesis")
         if not isinstance(synthesis, dict):
             raise WorkflowContractError("synthesis is required")
+        validated = ml_report_contract.validate_report_synthesis(report_context["manifest"], synthesis)
+        for section in validated["sections"]:
+            for panel in section["panels"]:
+                available_views = required_coverage.get(panel["artifact_id"], set())
+                if not set(panel["view_ids"]).issubset(available_views):
+                    raise WorkflowContractError("synthesis references an unknown or uninspected view")
         dashboard = ml_dashboard_compositor.compose_dashboard(
-            manifest, synthesis, execution_ref=execution_ref, outputs=outputs,
+            report_context["manifest"], validated, execution_ref=report_context["execution_ref"], outputs=report_context["outputs"],
             uid=str(args.get("uid") or ""), title=str(args.get("title") or ""),
         )
         ml_dashboard_contract.validate_preview_dashboard(dashboard)
@@ -488,7 +607,7 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
     return success_response(
         step=step, run_id="run_" + uuid.uuid4().hex, refs={},
         instruction="The evidence-bound opaque dashboard is ready. Resolve bindings, then dispatch only to the approved Grafana writer.",
-        evidence={"sections": len(synthesis["sections"]), "artifacts": sum(len(section["panels"]) for section in synthesis["sections"])},
+        evidence={"sections": len(synthesis["sections"]), "artifacts": sum(len(section["panels"]) for section in synthesis["sections"]), "inspection_modes": sorted(modes)},
         dashboard=dashboard,
     )
 
@@ -511,15 +630,28 @@ TOOLS = [{
         "required": ["execution_ref", "manifest_output_index"],
     },
 }, {
+    "name": "inspect_report_artifacts",
+    "description": "Inspect a bounded artifact batch as PNG MCP image blocks plus sanitized Plotly JSON and semantic view/axis/scale specs; spec mode supports non-vision models. Returns an opaque inspection receipt.",
+    "inputSchema": {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "report_context_ref": {"type": "string"},
+            "artifact_ids": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True, "items": {"type": "string"}},
+            "mode": {"type": "string", "enum": ["vision", "spec"]},
+        },
+        "required": ["report_context_ref", "artifact_ids", "mode"],
+    },
+}, {
     "name": "compose_ml_dashboard",
     "description": "Validate one whole-report LLM synthesis against deterministic facts/artifacts and compose an opaque Grafana dashboard without choosing or hardcoding its flow or content.",
     "inputSchema": {
         "type": "object", "additionalProperties": False,
         "properties": {
-            "execution_ref": {"type": "string"}, "manifest_output_index": {"type": "integer", "minimum": 0},
+            "report_context_ref": {"type": "string"},
+            "inspection_refs": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True, "items": {"type": "string"}},
             "synthesis": {"type": "object"}, "uid": {"type": "string"}, "title": {"type": "string"},
         },
-        "required": ["execution_ref", "manifest_output_index", "synthesis", "uid", "title"],
+        "required": ["report_context_ref", "inspection_refs", "synthesis", "uid", "title"],
     },
 }]
 
@@ -546,7 +678,8 @@ def handle_rpc(msg: dict[str, Any]):
         handlers = {
             "resolve_dashboard_refs": (resolve_dashboard_refs, {"dashboard", "_server_context"}),
             "prepare_ml_report": (prepare_ml_report, {"execution_ref", "manifest_output_index", "_server_context"}),
-            "compose_ml_dashboard": (compose_ml_dashboard, {"execution_ref", "manifest_output_index", "synthesis", "uid", "title", "_server_context"}),
+            "inspect_report_artifacts": (inspect_report_artifacts, {"report_context_ref", "artifact_ids", "mode", "_server_context"}),
+            "compose_ml_dashboard": (compose_ml_dashboard, {"report_context_ref", "inspection_refs", "synthesis", "uid", "title", "_server_context"}),
         }
         if name not in handlers:
             return rpc_error(rid, -32602, f"unknown tool: {name}")
@@ -556,7 +689,12 @@ def handle_rpc(msg: dict[str, Any]):
         handler, allowed = handlers[name]
         unexpected = sorted(set(arguments) - allowed)
         output = error_response(step=name, error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Pass only declared tool arguments.") if unexpected else handler(arguments)
-        return rpc_result(rid, {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}], "isError": not bool(output.get("ok"))})
+        image_content = output.get("_mcp_content") if isinstance(output, dict) else None
+        text_output = {key: value for key, value in output.items() if key != "_mcp_content"}
+        content = [{"type": "text", "text": json.dumps(text_output, ensure_ascii=False)}]
+        if isinstance(image_content, list):
+            content.extend(image_content)
+        return rpc_result(rid, {"content": content, "isError": not bool(output.get("ok"))})
     return None if rid is None else rpc_error(rid, -32601, f"method not found: {method}")
 
 
