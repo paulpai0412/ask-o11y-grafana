@@ -722,7 +722,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from ml_autoresearch import run_classification_autoresearch
-from ml_presentation import build_manifest, render_assets, render_shap_summary, recommend_spec_values
+from ml_presentation import build_manifest, render_assets, render_shap_summary, recommend_spec_values, build_plotly_figures
 import shap
 
 TARGET = {target!r}
@@ -828,6 +828,9 @@ if KIND in ("catboost", "gradient_boosting", "random_forest_shap", "xgboost"):
             shap_by_column[target_column] = shap_values[:, column_index].copy()
     render_shap_summary(manifest, shap_values, transformed_names, transformed, Path("/tmp/ml-presentation"), emit_figure=emit)
     recommend_spec_values(manifest, shap_by_column=shap_by_column, sample_frame=X_sample, top_n=3)
+    plotly_figures = build_plotly_figures(manifest, y_true=y_hold.tolist(), probabilities=probs, frame=work[FEATURES + [TARGET]], target=TARGET, shap_values=shap_values, feature_names=transformed_names, sample_values=X_sample)
+    for plotly_name, plotly_figure in plotly_figures.items():
+        emit(plotly_figure, name=f"ml-plotly-{plotly_name}.json")
     emit(manifest, name="ml-presentation.json")
 """
     return template + shap_block

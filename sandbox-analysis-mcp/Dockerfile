@@ -22,6 +22,7 @@ RUN /bin/bash -lc 'source /opt/code-interpreter/code-interpreter-env.sh python 3
     imbalanced-learn==0.14.2 \
     optuna==4.9.0 && python -c "import warnings; import matplotlib; matplotlib.use(\"Agg\"); matplotlib.rcParams[\"font.sans-serif\"]=[\"Noto Sans CJK TC\", \"DejaVu Sans\"]; import matplotlib.pyplot as plt; fig,ax=plt.subplots(); ax.set_title(\"熱耗率相關性\"); c=warnings.catch_warnings(record=True); caught=c.__enter__(); fig.canvas.draw(); c.__exit__(None,None,None); assert not any(\"Glyph\" in str(w.message) for w in caught)"'
 
+COPY ml_plotly_contract.py /opt/ask-o11y/ml_plotly_contract.py
 COPY capture.py /opt/ask-o11y/capture.py
 COPY ml_preprocessing.py /opt/ask-o11y/ml_preprocessing.py
 COPY ml_autoresearch.py /opt/ask-o11y/ml_autoresearch.py

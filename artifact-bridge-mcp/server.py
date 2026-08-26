@@ -37,6 +37,7 @@ artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 artifact_assets = load_module("artifact_assets", ROOT / "artifact_assets.py")
 ml_dashboard_contract = load_module("ml_dashboard_contract", ROOT / "ml_dashboard_contract.py")
+ml_plotly_contract = load_module("ml_plotly_contract", ROOT / "ml_plotly_contract.py")
 ArtifactAuthError = artifact_store.ArtifactAuthError
 ArtifactStore = artifact_store.ArtifactStore
 WorkflowContractError = workflow_node.WorkflowContractError
@@ -61,6 +62,7 @@ MAX_DASHBOARD_BYTES = 384 * 1024
 MAX_PANELS = 24
 MAX_TARGETS = 48
 MAX_ASSET_BINDINGS = 24
+MAX_PLOTLY_BINDINGS = 8
 ARTIFACT_PUBLIC_BASE = os.environ.get("ARTIFACT_PUBLIC_BASE", "http://127.0.0.1:8777").rstrip("/")
 QUERY_PLACEHOLDER_KEYS = {"$plan_ref", "fields", "refId", "datasource"}
 
@@ -187,6 +189,88 @@ def replace_asset_placeholder(value: Any, placeholder: str, asset_url: str) -> t
     return value, 0
 
 
+def replace_plotly_placeholder(value: Any, placeholder: str, figure: dict[str, Any]) -> tuple[Any, int]:
+    """Replace exact-match placeholder strings with a sanitized figure object."""
+    if value == placeholder:
+        return json_clone(figure), 1
+    if isinstance(value, str):
+        if placeholder in value:
+            raise WorkflowContractError("plotly placeholder must be the entire option value, not a substring")
+        return value, 0
+    if isinstance(value, list):
+        count = 0
+        output = []
+        for item in value:
+            replaced, found = replace_plotly_placeholder(item, placeholder, figure)
+            output.append(replaced)
+            count += found
+        return output, count
+    if isinstance(value, dict):
+        count = 0
+        output = {}
+        for key, item in value.items():
+            replaced, found = replace_plotly_placeholder(item, placeholder, figure)
+            output[key] = replaced
+            count += found
+        return output, count
+    return value, 0
+
+
+def resolve_plotly_bindings(context: dict[str, str], panel: dict[str, Any], counters: dict[str, int]) -> dict[str, Any]:
+    """Resolve askO11yPlotlyBindings into static, sanitized panel options."""
+    bindings = panel.pop("askO11yPlotlyBindings", [])
+    if not isinstance(bindings, list) or len(bindings) > MAX_PLOTLY_BINDINGS:
+        raise WorkflowContractError(f"panel plotly bindings must be an array with at most {MAX_PLOTLY_BINDINGS} entries")
+    counters["plotly"] += len(bindings)
+    if counters["plotly"] > MAX_PLOTLY_BINDINGS:
+        raise WorkflowContractError(f"dashboard has more than {MAX_PLOTLY_BINDINGS} plotly bindings")
+    for binding in bindings:
+        if not isinstance(binding, dict) or set(binding) != {"placeholder", "$execution_ref", "output_index", "plugin_id"}:
+            raise WorkflowContractError("plotly binding requires only placeholder, $execution_ref, output_index, and plugin_id")
+        placeholder = binding["placeholder"]
+        execution_ref = binding["$execution_ref"]
+        output_index = binding["output_index"]
+        plugin_id = binding["plugin_id"]
+        if not isinstance(placeholder, str) or not placeholder.startswith("$plotly_") or not placeholder.removeprefix("$plotly_").replace("_", "").isalnum():
+            raise WorkflowContractError("plotly placeholder must start with $plotly_ and contain only letters, digits, or underscores")
+        if plugin_id != ml_plotly_contract.PLOTLY_PLUGIN_ID:
+            raise WorkflowContractError(f"plotly binding plugin id is not the approved {ml_plotly_contract.PLOTLY_PLUGIN_ID}")
+        if not isinstance(execution_ref, str) or isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
+            raise WorkflowContractError("plotly binding requires an opaque execution ref and non-negative output index")
+        execution = ARTIFACTS.read_json(context, execution_ref)
+        try:
+            result = execution["results"][output_index]
+            mime = result.get("mime") if isinstance(result, dict) else None
+        except (KeyError, IndexError, TypeError) as exc:
+            raise WorkflowContractError("plotly output index does not exist") from exc
+        payload = None
+        for mime_type in ("application/vnd.plotly.v1+json", "application/json"):
+            if isinstance(mime, dict) and isinstance(mime.get(mime_type), str):
+                payload = mime[mime_type]
+                break
+        if payload is None:
+            raise WorkflowContractError("plotly binding requires an application/json or plotly output")
+        try:
+            figure = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise WorkflowContractError("plotly output is not valid JSON") from exc
+        sanitized = ml_plotly_contract.sanitize_figure(figure)
+        panel, replacements = replace_plotly_placeholder(panel, placeholder, sanitized)
+        if replacements == 0:
+            raise WorkflowContractError("plotly placeholder is not used by the panel")
+    if "$plotly_" in json.dumps(panel, ensure_ascii=False):
+        raise WorkflowContractError("dashboard contains an unresolved plotly placeholder")
+    serialized_options = json.dumps(panel.get("options") or {}, ensure_ascii=False).lower()
+    for forbidden in ("script", "onclick", "callback", "new function", "eval("):
+        if forbidden in serialized_options:
+            raise WorkflowContractError(f"plotly panel options must not contain {forbidden!r}")
+    if bindings:
+        fallback_url = str((panel.get("options") or {}).get("fallbackUrl") or "")
+        if not fallback_url.startswith("http"):
+            raise WorkflowContractError("plotly panel requires a resolved PNG fallbackUrl (askO11yAssetBindings)")
+    return panel
+
+
 def resolve_asset_bindings(context: dict[str, str], panel: dict[str, Any], counters: dict[str, int]) -> dict[str, Any]:
     if "/assets/" in json.dumps(panel, ensure_ascii=False):
         raise WorkflowContractError("model-authored dashboard must use opaque asset bindings, not asset URLs")
@@ -243,6 +327,7 @@ def resolve_panels(context: dict[str, str], panels: Any, counters: dict[str, int
         raw_item = json_clone(panel)
         nested_panels = raw_item.pop("panels", None)
         item = resolve_asset_bindings(context, raw_item, counters)
+        item = resolve_plotly_bindings(context, item, counters)
         targets = item.get("targets", [])
         if not isinstance(targets, list):
             raise WorkflowContractError("dashboard panel targets must be an array")
@@ -272,7 +357,7 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
         tags = output.get("tags")
         if isinstance(tags, list) and any("ml" in str(tag).lower() for tag in tags):
             ml_dashboard_contract.validate_ml_dashboard_minimum(output)
-        counters = {"panels": 0, "targets": 0, "assets": 0}
+        counters = {"panels": 0, "targets": 0, "assets": 0, "plotly": 0}
         output["panels"] = resolve_panels(context, output.get("panels", []), counters)
         if counters["assets"] and counters["targets"]:
             raise WorkflowContractError("analysis dashboards may only contain image/text panels, not Grafana data targets")
@@ -285,7 +370,7 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
         run_id="run_" + uuid.uuid4().hex,
         refs={},
         instruction="Internal host result: dispatch the resolved dashboard only to Ask O11y's built-in Grafana MCP; never expose it to the model.",
-        evidence={"resolved_panels": counters["panels"], "resolved_targets": counters["targets"], "resolved_assets": counters["assets"]},
+        evidence={"resolved_panels": counters["panels"], "resolved_targets": counters["targets"], "resolved_assets": counters["assets"], "resolved_plotly": counters["plotly"]},
         dashboard=output,
     )
 

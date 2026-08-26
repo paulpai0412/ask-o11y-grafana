@@ -693,3 +693,269 @@ def recommend_spec_values(
     manifest["spec_recommendations"] = recommendations[:top_n]
     validate_manifest(manifest)
     return manifest["spec_recommendations"]
+
+
+# ---------------------------------------------------------------------------
+# Plotly-first interactive figures (data-driven chart-type adaptation)
+# ---------------------------------------------------------------------------
+
+def build_plotly_figures(
+    manifest: dict[str, Any],
+    *,
+    y_true: list[int] | None = None,
+    probabilities: list[float] | None = None,
+    frame: Any = None,
+    target: str | None = None,
+    shap_values: Any = None,
+    feature_names: list[str] | None = None,
+    sample_values: Any = None,
+) -> dict[str, dict[str, Any]]:
+    """Build bounded interactive figures for every ML asset, adapting the
+    Plotly chart type to each data shape (bar / heatmap / scatter / indicator
+    / sankey). Output is sanitized through ml_plotly_contract."""
+    import sys
+
+    import numpy as np  # type: ignore[reportMissingImports]
+
+    try:
+        import ml_plotly_contract  # baked next to this module in the sandbox image
+    except ModuleNotFoundError:  # host-side checks load this file by path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        import ml_plotly_contract
+
+    def _number(value: Any, where: str) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"plotly figure {where} is not numeric: {value!r}") from exc
+
+    def _count(value: Any, where: str) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"plotly figure {where} is not an integer: {value!r}") from exc
+
+    figures: dict[str, dict[str, Any]] = {}
+    decision = manifest["decision"]
+    guards = manifest["guards"]
+    objective = manifest["objective"]
+
+    def _finish(name: str, data: list[dict[str, Any]], layout: dict[str, Any]) -> None:
+        figures[name] = ml_plotly_contract.sanitize_figure({"data": data, "layout": layout})
+
+    def axis(**kwargs: Any) -> dict[str, Any]:
+        return {key: value for key, value in kwargs.items() if value is not None}
+
+    # 1. Data profile: target counts + top feature distributions (bar / binned bar).
+    if frame is not None and target and target in frame.columns:
+        import pandas as pd  # type: ignore[reportMissingImports]
+
+        counts = frame[target].astype(str).value_counts()
+        data: list[dict[str, Any]] = [{
+            "type": "bar", "name": str(target), "x": [str(value) for value in counts.index.tolist()],
+            "y": [_count(value, "target count") for value in counts.tolist()],
+            "marker": {"color": "#4fd1c5"},
+        }]
+        layout: dict[str, Any] = {"title": f"資料分布：{target} 與前三大特徵", "showlegend": True, "barmode": "group"}
+        top_features = [item["name"] for item in (manifest.get("features") or [])[:3] if item["name"] in frame.columns and item["name"] != target]
+        if not top_features:
+            top_features = [str(column) for column in frame.select_dtypes(include=[np.number]).columns.drop(target, errors="ignore").tolist()[:3]]
+        span = 1.0 / (min(len(top_features[:3]), 3) + 1)
+        for slot, column in enumerate(top_features[:3]):
+            series = frame[column]
+            if pd.api.types.is_numeric_dtype(series):
+                hist_counts, hist_edges = np.histogram(series.dropna(), bins=15)
+                x_values: list[Any] = ((hist_edges[:-1] + hist_edges[1:]) / 2).round(2).tolist()
+                y_values: list[Any] = [_count(value, f"{column} bin") for value in hist_counts]
+            else:
+                feature_counts = series.astype(str).value_counts().head(8)
+                x_values = [str(value) for value in feature_counts.index.tolist()]
+                y_values = [_count(value, f"{column} count") for value in feature_counts.tolist()]
+            axis_id = str(slot + 2)
+            data.append({"type": "bar", "name": str(column), "x": x_values, "y": y_values, "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": "#7fcaa6"}})
+            layout[f"xaxis{axis_id}"] = axis(domain=[round(span * (slot + 1) + 0.01, 3), round(span * (slot + 2) - 0.01, 3)], anchor=f"y{axis_id}")
+            layout[f"yaxis{axis_id}"] = axis(domain=[0.05, 0.9], anchor=f"x{axis_id}")
+        layout["xaxis"] = axis(domain=[0.01, round(span, 3)], anchor="y")
+        layout["yaxis"] = axis(domain=[0.05, 0.9], anchor="x")
+        _finish("data_profile", data, layout)
+
+    # 2. Correlation heatmap (top-10 variance numeric columns).
+    if frame is not None and target and target in frame.columns:
+        numeric = frame.select_dtypes(include=[np.number]).columns.drop(target, errors="ignore")
+        if len(numeric) >= 2:
+            top = list(frame[numeric].std().sort_values(ascending=False).index[:10])
+            correlation = frame[top].corr().round(3)
+            _finish("correlation_analysis", [{
+                "type": "heatmap",
+                "z": [[_number(cell, "correlation") for cell in row] for row in correlation.to_numpy()],
+                "x": [str(column) for column in correlation.columns],
+                "y": [str(column) for column in correlation.index],
+                "coloraxis": "coloraxis",
+            }], {
+                "title": "數值欄位相關性（相關非因果）",
+                "coloraxis": {"cmin": -1.0, "cmax": 1.0, "colorscale": [[0.0, "#1f3a4d"], [0.5, "#2b6a7c"], [1.0, "#eda06a"]], "showscale": True},
+                "margin": {"l": 10, "r": 10, "t": 48, "b": 10},
+            })
+
+    # 3. Per-1,000 outcomes (stacked horizontal bar).
+    correct, errors = decision["correct_per_1000"], decision["errors_per_1000"]
+    _finish("per_1000_outcomes", [
+        {"type": "bar", "name": "判對", "orientation": "h", "x": [correct], "y": ["每 1,000 筆"], "marker": {"color": "#7fcaa6"}},
+        {"type": "bar", "name": "判錯", "orientation": "h", "x": [errors], "y": ["每 1,000 筆"], "marker": {"color": "#eda06a"}},
+    ], {"title": "每 1,000 筆預測結果", "barmode": "stack", "showlegend": True, "xaxis": axis(title="筆數", range=[0, 1000]), "yaxis": axis()})
+
+    # 4. Baseline vs selected error (bar).
+    baseline_error = round((1 - manifest["results"]["baseline"]["accuracy"]) * 100, 2)
+    selected_error = round((1 - manifest["results"]["selected"]["accuracy"]) * 100, 2)
+    _finish("baseline_error_comparison", [
+        {"type": "bar", "name": "錯誤率 %", "x": ["簡單基準", "本模型"], "y": [baseline_error, selected_error], "text": [f"{baseline_error}%", f"{selected_error}%"], "marker": {"color": "#9aaab8"}},
+    ], {"title": f"每 1,000 筆少錯約 {decision['fewer_errors_per_1000']} 筆", "barmode": "group", "yaxis": axis(title="錯誤率 %")})
+
+    # 5. Generalization health (three KPI indicators).
+    health_items = [
+        ("泛化差距", guards["generalization_gap"]),
+        ("因素穩定度", guards["importance_stability"]),
+        ("PSI 漂移", guards["max_psi"]),
+    ]
+    indicator_data = []
+    for slot, (title, value) in enumerate(health_items):
+        indicator_data.append({
+            "type": "indicator", "value": _number(value, f"guard {title}"), "title": {"text": title},
+            "number": {"valueformat": ".3f"},
+            "domain": {"x": [slot / 3 + 0.01, (slot + 1) / 3 - 0.01], "y": [0.1, 0.85]},
+        })
+    _finish("generalization_health", indicator_data, {"title": f"泛化健康檢查（verdict：{guards.get('verdict', 'unknown')}）"})
+
+    # 6. Analysis process (sankey flow).
+    stages = ["資料檢查", "語意選欄", "保留未見資料", "自動比較模型", "最終驗證", "證據輸出"]
+    _finish("analysis_process", [{
+        "type": "sankey",
+        "node": {"label": stages, "pad": 12, "thickness": 18, "color": "#4fd1c5"},
+        "link": {"source": list(range(len(stages) - 1)), "target": list(range(1, len(stages))), "value": [1] * (len(stages) - 1), "color": "#2b6a7c"},
+    }], {"title": "分析流程（單向、不重跑）"})
+
+    # 7. Trial history (top-5 CV scores).
+    trials = manifest["trials"]
+    if trials:
+        _finish("trial_history", [
+            {"type": "scatter", "mode": "lines+markers", "name": "CV 分數",
+             "x": [trial["rank"] for trial in trials], "y": [round(trial["cv_score"] * 100, 2) for trial in trials],
+             "line": {"color": "#4fd1c5", "width": 3}},
+        ], {"title": f"前五名設定（共 {manifest['process']['completed_trials']} 組，train/CV）", "xaxis": axis(title="名次", tickvals=[trial["rank"] for trial in trials]), "yaxis": axis(title="CV 分數 ×100")})
+
+    # 8. Feature importance (horizontal bar).
+    features = manifest.get("features") or []
+    if features:
+        shown = features[:10][::-1]
+        _finish("feature_importance", [
+            {"type": "bar", "orientation": "h", "name": "重要性",
+             "x": [round(_number(item["importance"], "importance"), 4) for item in shown],
+             "y": [str(item["name"]) for item in shown],
+             "marker": {"color": "#4fd1c5"}},
+        ], {"title": "模型主要參考欄位（關聯非因果）", "xaxis": axis(title="相對影響")})
+
+    # 9-12. Holdout evidence requires labels + calibrated probabilities.
+    if y_true is not None and probabilities is not None:
+        if len(y_true) != len(probabilities) or not y_true:
+            raise ValueError("plotly evidence requires equally-sized labels and probabilities")
+        from sklearn.calibration import calibration_curve  # type: ignore[reportMissingImports]
+        from sklearn.metrics import confusion_matrix, precision_recall_curve, roc_curve  # type: ignore[reportMissingImports]
+
+        labels_array = np.asarray(y_true, dtype=int)
+        probs_array = np.asarray(probabilities, dtype=float)
+        threshold = _as_metric(objective, "threshold")
+        predictions = (probs_array >= threshold).astype(int)
+
+        # 9. Confusion matrix heatmap.
+        matrix = confusion_matrix(labels_array, predictions, labels=[0, 1])
+        _finish("confusion_matrix", [{
+            "type": "heatmap",
+            "z": [[_count(cell, "confusion") for cell in row] for row in matrix],
+            "x": ["判為留存", "判為流失"], "y": ["實際留存", "實際流失"],
+            "coloraxis": "coloraxis",
+        }], {
+            "title": f"混淆矩陣（holdout，門檻 {threshold:.3f}）",
+            "coloraxis": {"colorscale": [[0.0, "#1f3a4d"], [1.0, "#4fd1c5"]], "showscale": False},
+        })
+
+        # 10. ROC / PR curves (two subplots).
+        fpr, tpr, _ = roc_curve(labels_array, probs_array)
+        precision, recall, _ = precision_recall_curve(labels_array, probs_array)
+        _finish("roc_pr_curves", [
+            {"type": "scatter", "mode": "lines", "name": "ROC", "x": [round(_number(v, "fpr"), 4) for v in fpr], "y": [round(_number(v, "tpr"), 4) for v in tpr], "line": {"color": "#4fd1c5", "width": 3}},
+            {"type": "scatter", "mode": "lines", "name": "隨機", "x": [0.0, 1.0], "y": [0.0, 1.0], "line": {"color": "#9aaab8", "width": 2}},
+            {"type": "scatter", "mode": "lines", "name": "PR", "x": [round(_number(v, "recall"), 4) for v in recall], "y": [round(_number(v, "precision"), 4) for v in precision], "line": {"color": "#eda06a", "width": 3}, "xaxis": "x2", "yaxis": "y2"},
+        ], {
+            "title": "ROC 與 PR 曲線（holdout）",
+            "xaxis": axis(title="誤報比例", domain=[0.06, 0.46]),
+            "yaxis": axis(title="找出比例", domain=[0.08, 0.95]),
+            "xaxis2": axis(title="找出比例", domain=[0.56, 0.96]),
+            "yaxis2": axis(title="判為流失時有多準", domain=[0.08, 0.95]),
+            "showlegend": True,
+        })
+
+        # 11. Calibration curve (binned observed vs predicted + ideal diagonal).
+        bin_count = min(10, len(labels_array))
+        observed_rate, predicted_rate = calibration_curve(labels_array, probs_array, n_bins=bin_count, strategy="quantile")
+        _finish("calibration_curve", [
+            {"type": "scatter", "mode": "lines", "name": "理想校正", "x": [0.0, 1.0], "y": [0.0, 1.0], "line": {"color": "#9aaab8", "width": 2}},
+            {"type": "scatter", "mode": "lines+markers", "name": "Holdout 校正", "x": [round(_number(v, "predicted_rate"), 4) for v in predicted_rate], "y": [round(_number(v, "observed_rate"), 4) for v in observed_rate], "line": {"color": "#4fd1c5", "width": 3}},
+        ], {"title": "機率校正（train OOF 選、holdout 評估）", "xaxis": axis(title="預測流失機率", range=[0, 1]), "yaxis": axis(title="實際流失比例", range=[0, 1])})
+
+        # 12. Threshold-cost curve (cost + recall/precision, locked threshold annotated).
+        cost_matrix = objective.get("cost_matrix") or {}
+        fn_cost = _number(cost_matrix.get("false_negative", 3.0), "fn_cost")
+        fp_cost = _number(cost_matrix.get("false_positive", 1.0), "fp_cost")
+        thresholds = np.linspace(0.0, 1.0, 101)
+        costs: list[float] = []
+        recalls: list[float] = []
+        precisions: list[float] = []
+        for candidate in thresholds:
+            candidate_predictions = (probs_array >= candidate).astype(int)
+            tp_candidate = _count(((labels_array == 1) & (candidate_predictions == 1)).sum(), "tp")
+            fn_candidate = _count(((labels_array == 1) & (candidate_predictions == 0)).sum(), "fn")
+            fp_candidate = _count(((labels_array == 0) & (candidate_predictions == 1)).sum(), "fp")
+            costs.append(round((fn_candidate * fn_cost + fp_candidate * fp_cost) / len(labels_array) * 1000, 2))
+            recalls.append(round(tp_candidate / max(int((labels_array == 1).sum()), 1), 4))
+            precisions.append(round(tp_candidate / max(tp_candidate + fp_candidate, 1), 4))
+        _finish("threshold_cost_curve", [
+            {"type": "scatter", "mode": "lines", "name": "加權成本/1,000", "x": [round(_number(v, "threshold"), 3) for v in thresholds], "y": costs, "line": {"color": "#eda06a", "width": 3}},
+            {"type": "scatter", "mode": "lines", "name": "Recall", "x": [round(_number(v, "threshold"), 3) for v in thresholds], "y": recalls, "line": {"color": "#4fd1c5"}, "yaxis": "y2"},
+            {"type": "scatter", "mode": "lines", "name": "Precision", "x": [round(_number(v, "threshold"), 3) for v in thresholds], "y": precisions, "line": {"color": "#9aaab8"}, "yaxis": "y2"},
+        ], {
+            "title": f"門檻取捨（train OOF 選 {threshold:.3f}；holdout 僅評估）",
+            "xaxis": axis(title="判斷門檻"),
+            "yaxis": axis(title="成本/1,000"),
+            "yaxis2": axis(title="Recall / Precision", overlaying="y", side="right", range=[0, 1.05]),
+            "annotations": [{"text": f"已選門檻 {threshold:.3f}", "x": round(threshold, 3), "y": 1.0, "yref": "paper", "showarrow": False}],
+            "showlegend": True,
+        })
+
+    # 13. SHAP summary (beeswarm scatter, binned color, no sample IDs).
+    if shap_values is not None and feature_names and sample_values is not None:
+        shap_array = np.asarray(shap_values, dtype=float)
+        mean_abs = np.abs(shap_array).mean(axis=0)
+        order = np.argsort(mean_abs)[::-1][:10]
+        rng = np.random.default_rng(0)
+        sample_array = np.asarray(sample_values)
+        data = []
+        for slot, column_index in enumerate(order):
+            values = shap_array[:, column_index]
+            feature_column = sample_array[:, column_index]
+            quantiles = np.quantile(feature_column, [0.2, 0.4, 0.6, 0.8])
+            color_bins = np.searchsorted(quantiles, feature_column, side="right") + 1
+            jitter = rng.uniform(-0.28, 0.28, size=values.shape[0])
+            data.append({
+                "type": "scatter", "mode": "markers", "name": str(feature_names[column_index])[:40],
+                "x": [round(_number(value, "shap"), 4) for value in values],
+                "y": [round(_number(slot + 1 + offset, "shap_y"), 4) for offset in jitter],
+                "marker": {"color": [_count(bin_index, "shap bin") for bin_index in color_bins], "colorscale": [[0.0, "#1f3a4d"], [1.0, "#4fd1c5"]], "cmin": 1, "cmax": 5, "opacity": 0.75, "size": 5},
+            })
+        _finish("shap_summary", data, {
+            "title": "SHAP 影響（顏色＝特徵值分箱；關聯非因果）",
+            "xaxis": axis(title="SHAP 值"),
+            "yaxis": axis(title="特徵（上→下依重要性）", tickvals=list(range(1, len(order) + 1)), ticktext=[str(feature_names[index])[:30] for index in order]),
+            "showlegend": False,
+        })
+
+    return figures

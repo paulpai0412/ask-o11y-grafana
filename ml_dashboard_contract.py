@@ -15,6 +15,7 @@ ROW_MEANINGS = (("決策",), ("過程", "流程"), ("結果",), ("泛化", "解�
 FORBIDDEN_KEYS = {"raw_rows", "frame", "python_code", "credentials", "physical_path", "signed_url"}
 ML_TAG = "ask-o11y-ml"
 PREVIEW_TAG = "ask-o11y-preview"
+PLOTLY_PLUGIN_ID = "asko11y-plotly-panel"
 
 
 def _panels(value: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -59,7 +60,7 @@ def validate_ml_dashboard_minimum(dashboard: dict[str, Any]) -> None:
     flattened = _panels([panel for panel in top_level if isinstance(panel, dict)])
     if any(panel.get("targets") for panel in flattened):
         raise ValueError("Sandbox analysis dashboard may contain image/text panels only")
-    allowed_types = {"row", "text"}
+    allowed_types = {"row", "text", PLOTLY_PLUGIN_ID}
     if any(panel.get("type") not in allowed_types for panel in flattened):
         raise ValueError("ML Preview contains an unsupported panel type")
     serialized_first_row = json.dumps(top_level[: max(len(top_level) // 2, 1)], ensure_ascii=False)
@@ -95,6 +96,15 @@ def validate_ml_dashboard_minimum(dashboard: dict[str, Any]) -> None:
                 technical_collapsed = True
             elif bool(panel.get("collapsed")):
                 technical_collapsed = True
+        if panel.get("type") == PLOTLY_PLUGIN_ID:
+            plotly_bindings = panel.get("askO11yPlotlyBindings")
+            if not isinstance(plotly_bindings, list) or not plotly_bindings:
+                raise ValueError("plotly panel requires askO11yPlotlyBindings")
+            if "fallbackUrl" not in (panel.get("options") or {}):
+                raise ValueError("plotly panel requires fallbackUrl for PNG fallback")
+            image_count += 1
+            if "資料分布" in title or "分布" in title:
+                data_profile_images += 1
     if image_count < 1:
         raise ValueError("ML dashboard must present at least one image evidence panel")
     if data_profile_images < 1:
@@ -150,7 +160,7 @@ def validate_preview_dashboard(dashboard: dict[str, Any], manifest: dict[str, An
     flattened = _panels([panel for panel in top_level if isinstance(panel, dict)])
     if any(panel.get("targets") for panel in flattened):
         raise ValueError("Sandbox analysis dashboard may contain image/text panels only")
-    allowed_types = {"row", "text"}
+    allowed_types = {"row", "text", PLOTLY_PLUGIN_ID}
     if any(panel.get("type") not in allowed_types for panel in flattened):
         raise ValueError("ML Preview contains an unsupported panel type")
     serialized = json.dumps(dashboard, ensure_ascii=False)
