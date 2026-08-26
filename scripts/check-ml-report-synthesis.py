@@ -45,6 +45,16 @@ def synthesis(artifact: str, sections: list[tuple[str, str]]) -> dict:
                 "panels": [{
                     "artifact_id": artifact,
                     "view_ids": ["view-1"],
+                    "view_narratives": [{
+                        "view_id": "view-1",
+                        "headline": "此视图呈现主要讯号",
+                        "data_observation": "资料模型显示群组之间存在明显差异。",
+                        "visual_observation": "图中的柱形高度呈现清楚分层。",
+                        "interpretation": "这个差异会影响报告的判断重点。",
+                        "limitation": "目前不能由此建立因果关系。",
+                        "next_step": "使用额外资料继续验证。",
+                        "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}],
+                    }],
                     "headline": "主要结构呈现明显差异",
                     "observation": "本图的差异与报告其他证据一致。",
                     "interpretation": "这项发现会影响后续判断重点。",
@@ -91,8 +101,14 @@ def main() -> int:
     expect_reject(contract, base_manifest, unknown_artifact, "artifact")
     unknown_fact = copy.deepcopy(base); unknown_fact["sections"][0]["panels"][0]["evidence"][0]["fact_ref"] = "missing.fact"
     expect_reject(contract, base_manifest, unknown_fact, "fact")
+    missing_view = copy.deepcopy(base); missing_view["sections"][0]["panels"][0]["view_narratives"] = []
+    expect_reject(contract, base_manifest, missing_view, "view_narratives")
+    duplicated_view = copy.deepcopy(base); duplicated_view["sections"][0]["panels"][0]["view_narratives"].append(copy.deepcopy(duplicated_view["sections"][0]["panels"][0]["view_narratives"][0]))
+    expect_reject(contract, base_manifest, duplicated_view, "view_narratives")
     hallucinated_number = copy.deepcopy(base); hallucinated_number["sections"][0]["panels"][0]["observation"] = "提升了 42%。"
     expect_reject(contract, base_manifest, hallucinated_number, "numeric")
+    visual_number = copy.deepcopy(base); visual_number["sections"][0]["panels"][0]["view_narratives"][0]["visual_observation"] = "图中出现 42 个点。"
+    expect_reject(contract, base_manifest, visual_number, "numeric")
     unsafe_html = copy.deepcopy(base); unsafe_html["sections"][0]["panels"][0]["next_step"] = "<script>alert(1)</script>"
     expect_reject(contract, base_manifest, unsafe_html, "unsafe")
     duplicate = copy.deepcopy(base); duplicate["sections"].append(copy.deepcopy(duplicate["sections"][0]))

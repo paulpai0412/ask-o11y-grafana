@@ -17,6 +17,7 @@ TEXT_FIELDS = ("headline", "observation", "interpretation", "cross_chart_context
 EVIDENCE_FORMATS = {"auto", "integer", "number_1", "number_2", "percent_1"}
 PRIORITIES = {"primary", "supporting", "technical"}
 WIDTHS = {"full", "half"}
+VIEW_TEXT_FIELDS = ("headline", "data_observation", "interpretation", "limitation", "next_step")
 
 
 def _safe_segment(value: Any, fallback: str) -> str:
@@ -108,6 +109,21 @@ def _artifact_ids(manifest: dict[str, Any]) -> set[str]:
     return output
 
 
+def _validate_evidence(evidence: Any, catalog: dict[str, dict[str, Any]], where: str) -> None:
+    if not isinstance(evidence, list) or not 1 <= len(evidence) <= MAX_EVIDENCE:
+        raise ValueError(f"{where} evidence is outside bounds")
+    seen_facts = set()
+    for evidence_item in evidence:
+        if not isinstance(evidence_item, dict) or set(evidence_item) != {"fact_ref", "format"}:
+            raise ValueError(f"{where} evidence shape is invalid")
+        fact_ref = evidence_item.get("fact_ref")
+        if not isinstance(fact_ref, str) or fact_ref not in catalog:
+            raise ValueError(f"{where} references unknown fact")
+        if fact_ref in seen_facts or evidence_item.get("format") not in EVIDENCE_FORMATS:
+            raise ValueError(f"{where} evidence is invalid")
+        seen_facts.add(fact_ref)
+
+
 def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any]) -> dict[str, Any]:
     """Validate LLM-authored flow/content against deterministic artifacts and facts."""
     if not isinstance(synthesis, dict) or set(synthesis) != {"format", "report_title", "thesis", "sections"}:
@@ -143,7 +159,7 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
             raise ValueError("report synthesis panel count exceeds bound")
         for panel_index, panel in enumerate(panels):
             panel_where = f"{where}.panels[{panel_index}]"
-            required = {"artifact_id", "view_ids", *TEXT_FIELDS, "evidence", "priority", "preferred_width"}
+            required = {"artifact_id", "view_ids", "view_narratives", *TEXT_FIELDS, "evidence", "priority", "preferred_width"}
             if not isinstance(panel, dict) or set(panel) != required:
                 raise ValueError(f"{panel_where} shape is invalid")
             artifact_id = _safe_text(panel.get("artifact_id"), f"{panel_where}.artifact_id", identifier=True)
@@ -154,23 +170,30 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
                 raise ValueError(f"{panel_where} view_ids are outside bounds")
             for view_id in view_ids:
                 _safe_text(view_id, f"{panel_where}.view_id", identifier=True)
+            view_narratives = panel.get("view_narratives")
+            if not isinstance(view_narratives, list) or len(view_narratives) != len(view_ids):
+                raise ValueError(f"{panel_where} view_narratives must cover every selected view")
+            narrative_ids = []
+            for narrative_index, view_narrative in enumerate(view_narratives):
+                narrative_where = f"{panel_where}.view_narratives[{narrative_index}]"
+                required_view = {"view_id", *VIEW_TEXT_FIELDS, "visual_observation", "evidence"}
+                if not isinstance(view_narrative, dict) or set(view_narrative) != required_view:
+                    raise ValueError(f"{narrative_where} shape is invalid")
+                narrative_id = _safe_text(view_narrative.get("view_id"), f"{narrative_where}.view_id", identifier=True)
+                narrative_ids.append(narrative_id)
+                for field in VIEW_TEXT_FIELDS:
+                    _safe_text(view_narrative.get(field), f"{narrative_where}.{field}")
+                visual_observation = view_narrative.get("visual_observation")
+                if visual_observation is not None:
+                    _safe_text(visual_observation, f"{narrative_where}.visual_observation")
+                _validate_evidence(view_narrative.get("evidence"), catalog, narrative_where)
+            if len(set(narrative_ids)) != len(narrative_ids) or set(narrative_ids) != set(view_ids):
+                raise ValueError(f"{panel_where} view_narratives do not match selected view_ids")
             for field in TEXT_FIELDS:
                 _safe_text(panel.get(field), f"{panel_where}.{field}")
             if panel.get("priority") not in PRIORITIES or panel.get("preferred_width") not in WIDTHS:
                 raise ValueError(f"{panel_where} presentation hints are invalid")
-            evidence = panel.get("evidence")
-            if not isinstance(evidence, list) or not 1 <= len(evidence) <= MAX_EVIDENCE:
-                raise ValueError(f"{panel_where} evidence is outside bounds")
-            seen_facts = set()
-            for evidence_item in evidence:
-                if not isinstance(evidence_item, dict) or set(evidence_item) != {"fact_ref", "format"}:
-                    raise ValueError(f"{panel_where} evidence shape is invalid")
-                fact_ref = evidence_item.get("fact_ref")
-                if not isinstance(fact_ref, str) or fact_ref not in catalog:
-                    raise ValueError(f"{panel_where} references unknown fact")
-                if fact_ref in seen_facts or evidence_item.get("format") not in EVIDENCE_FORMATS:
-                    raise ValueError(f"{panel_where} evidence is invalid")
-                seen_facts.add(fact_ref)
+            _validate_evidence(panel.get("evidence"), catalog, panel_where)
     if total_panels < 1:
         raise ValueError("report synthesis requires at least one evidence panel")
     return copy.deepcopy(synthesis)

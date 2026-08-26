@@ -29,7 +29,14 @@ def synthesis() -> dict:
     return {
         "format": "ask-o11y-report-synthesis-v1", "report_title": "动态报告", "thesis": "完整证据支持当前解释，但行动前仍需验证。",
         "sections": [{"section_id": "model-choice", "title": "本次重点", "purpose": "根据完整报告说明最重要的判断。", "collapsed": False, "panels": [{
-            "artifact_id": "chart", "view_ids": ["view-1", "view-2", "view-3", "view-4"], "headline": "主要证据呈现明显结构", "observation": "本图与完整报告事实一致。",
+            "artifact_id": "chart", "view_ids": ["view-1", "view-2", "view-3", "view-4"],
+            "view_narratives": [{
+                "view_id": view_id, "headline": "此视图呈现主要证据", "data_observation": "资料模型显示明确结构。",
+                "visual_observation": "图形呈现清楚分层。", "interpretation": "这会影响判断重点。",
+                "limitation": "目前不能建立因果结论。", "next_step": "使用额外资料验证。",
+                "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}],
+            } for view_id in ("view-1", "view-2", "view-3", "view-4")],
+            "headline": "主要证据呈现明显结构", "observation": "本图与完整报告事实一致。",
             "interpretation": "此结构会影响判断重点。", "cross_chart_context": "应与其他证据和限制共同阅读。",
             "limitation": "目前不能建立因果结论。", "next_step": "使用额外资料继续验证。",
             "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}], "priority": "primary", "preferred_width": "full",
@@ -89,6 +96,23 @@ def main() -> int:
             "uid": "partial", "title": "Partial", "_server_context": context,
         })
         assert not partial["ok"] and "incomplete" in partial["error"], partial
+
+        spec_claim = synthesis()
+        spec_panel = spec_claim["sections"][0]["panels"][0]
+        spec_panel["artifact_id"] = "static"
+        spec_panel["view_ids"] = ["image"]
+        spec_panel["view_narratives"] = [{**spec_panel["view_narratives"][0], "view_id": "image"}]
+        false_visual = bridge.compose_ml_dashboard({
+            "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": spec_claim,
+            "uid": "false-visual", "title": "False Visual", "_server_context": context,
+        })
+        assert not false_visual["ok"] and "spec-only" in false_visual["error"], false_visual
+        spec_panel["view_narratives"][0]["visual_observation"] = None
+        spec_composed = bridge.compose_ml_dashboard({
+            "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": spec_claim,
+            "uid": "spec-report", "title": "Spec Report", "_server_context": context,
+        })
+        assert spec_composed["ok"], spec_composed
 
         composed = bridge.compose_ml_dashboard({
             "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": synthesis(),

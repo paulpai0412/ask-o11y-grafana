@@ -65,6 +65,27 @@ def _validate_narrative(panel: dict[str, Any]) -> None:
             _safe_text(str(item.get(key) or ""), f"narrative.evidence.{key}")
 
 
+def _validate_view_narratives(panel: dict[str, Any], view_ids: list[str]) -> None:
+    narratives = panel.get("askO11yViewNarratives")
+    if not isinstance(narratives, list) or len(narratives) != len(view_ids):
+        raise ValueError("evidence panel requires one narrative per selected view")
+    narrative_ids = []
+    required = {"view_id", "headline", "data_observation", "visual_observation", "interpretation", "limitation", "next_step", "evidence"}
+    for narrative in narratives:
+        if not isinstance(narrative, dict) or set(narrative) != required:
+            raise ValueError("view narrative shape is invalid")
+        narrative_ids.append(narrative.get("view_id"))
+        for key in required - {"view_id", "visual_observation", "evidence"}:
+            _safe_text(narrative.get(key), f"view narrative {key}")
+        if narrative.get("visual_observation") is not None:
+            _safe_text(narrative["visual_observation"], "view narrative visual observation")
+        evidence = narrative.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError("view narrative evidence is required")
+    if set(narrative_ids) != set(view_ids) or len(set(narrative_ids)) != len(narrative_ids):
+        raise ValueError("view narratives do not match selected view ids")
+
+
 def _walk(value: Any, key: str = "") -> None:
     if key in FORBIDDEN_KEYS or key.endswith("_path") or key.endswith("_url"):
         raise ValueError(f"forbidden dashboard key: {key}")
@@ -112,6 +133,7 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
         if not isinstance(view_ids, list) or not 1 <= len(view_ids) <= 12 or any(not isinstance(view_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", view_id) for view_id in view_ids):
             raise ValueError("evidence panel view ids are invalid")
         _validate_narrative(panel)
+        _validate_view_narratives(panel, view_ids)
         bindings = panel.get("askO11yAssetBindings")
         if not isinstance(bindings, list) or not bindings:
             raise ValueError("evidence panel requires an opaque PNG binding")
@@ -135,8 +157,8 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
             options = panel.get("options") or {}
             if not isinstance(plotly_bindings, list) or not plotly_bindings or "fallbackUrl" not in options or "narrative" not in options:
                 raise ValueError("Plotly evidence panel requires figure, fallback, and narrative bindings")
-            if options.get("selectedViewIds") != view_ids:
-                raise ValueError("Plotly selected views must match the evidence panel view ids")
+            if options.get("selectedViewIds") != view_ids or options.get("viewNarratives") != panel.get("askO11yViewNarratives"):
+                raise ValueError("Plotly selected views and narratives must match the evidence panel metadata")
             view_specs = options.get("viewSpecs")
             if not isinstance(view_specs, list) or {item.get("view_id") for item in view_specs if isinstance(item, dict)} != set(view_ids):
                 raise ValueError("Plotly view specs must cover the selected evidence views")

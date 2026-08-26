@@ -569,6 +569,7 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(inspection_refs, list) or not 1 <= len(inspection_refs) <= 8 or len(set(inspection_refs)) != len(inspection_refs):
             raise WorkflowContractError("inspection_refs must contain one to eight unique refs")
         coverage: dict[str, set[str]] = {}
+        view_modes: dict[tuple[str, str], set[str]] = {}
         modes = set()
         for inspection_ref in inspection_refs:
             if not isinstance(inspection_ref, str) or not inspection_ref.startswith("artifact://"):
@@ -576,11 +577,17 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
             receipt = ARTIFACTS.read_json(context, inspection_ref)
             if not isinstance(receipt, dict) or receipt.get("report_context_ref") != report_context_ref or not isinstance(receipt.get("coverage"), dict):
                 raise WorkflowContractError("inspection receipt does not belong to this report")
-            modes.add(str(receipt.get("mode") or ""))
+            receipt_mode = str(receipt.get("mode") or "")
+            if receipt_mode not in {"vision", "spec"}:
+                raise WorkflowContractError("inspection receipt mode is invalid")
+            modes.add(receipt_mode)
             for artifact_id, view_ids in receipt["coverage"].items():
                 if not isinstance(view_ids, list):
                     raise WorkflowContractError("inspection coverage is invalid")
-                coverage.setdefault(str(artifact_id), set()).update(str(view_id) for view_id in view_ids)
+                artifact_key = str(artifact_id)
+                coverage.setdefault(artifact_key, set()).update(str(view_id) for view_id in view_ids)
+                for view_id in view_ids:
+                    view_modes.setdefault((artifact_key, str(view_id)), set()).add(receipt_mode)
         required_coverage = {
             item["artifact_id"]: {view["view_id"] for view in item["figure_spec"]["views"]}
             for item in report_context["artifacts"]
@@ -597,6 +604,14 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
                 available_views = required_coverage.get(panel["artifact_id"], set())
                 if not set(panel["view_ids"]).issubset(available_views):
                     raise WorkflowContractError("synthesis references an unknown or uninspected view")
+                narratives = {item["view_id"]: item for item in panel["view_narratives"]}
+                for view_id in panel["view_ids"]:
+                    visual_observation = narratives[view_id]["visual_observation"]
+                    inspected_modes = view_modes.get((panel["artifact_id"], view_id), set())
+                    if "vision" in inspected_modes and not isinstance(visual_observation, str):
+                        raise WorkflowContractError("vision-inspected view requires a visual observation")
+                    if "vision" not in inspected_modes and visual_observation is not None:
+                        raise WorkflowContractError("spec-only view cannot claim a visual observation")
         dashboard = ml_dashboard_compositor.compose_dashboard(
             report_context["manifest"], validated, execution_ref=report_context["execution_ref"], outputs=report_context["outputs"],
             uid=str(args.get("uid") or ""), title=str(args.get("title") or ""),

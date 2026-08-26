@@ -56,6 +56,23 @@ def _narrative(panel: dict[str, Any], catalog: dict[str, dict[str, Any]]) -> dic
     }
 
 
+def _view_narratives(panel: dict[str, Any], catalog: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for item in panel["view_narratives"]:
+        output.append({
+            **{key: item[key] for key in ("view_id", "headline", "data_observation", "visual_observation", "interpretation", "limitation", "next_step")},
+            "evidence": [
+                {
+                    "fact_ref": evidence["fact_ref"],
+                    "label": catalog[evidence["fact_ref"]]["label"],
+                    "display": format_fact(catalog[evidence["fact_ref"]], evidence["format"]),
+                }
+                for evidence in item["evidence"]
+            ],
+        })
+    return output
+
+
 def _narrative_html(narrative: dict[str, Any]) -> str:
     facts = "".join(
         f'<span style="display:inline-block;margin:4px 8px 4px 0;padding:4px 8px;border:1px solid currentColor;border-radius:4px">{html.escape(item["label"])}: <strong>{html.escape(item["display"])}</strong></span>'
@@ -67,6 +84,21 @@ def _narrative_html(narrative: dict[str, Any]) -> str:
     )
     body = "".join(f'<div style="margin-top:8px"><strong>{label}：</strong>{html.escape(narrative[key])}</div>' for label, key in fields)
     return f'<div style="padding:8px 12px"><h3>{html.escape(narrative["headline"])}</h3><div>{facts}</div>{body}</div>'
+
+
+def _view_narratives_html(view_narratives: list[dict[str, Any]]) -> str:
+    sections = []
+    for narrative in view_narratives:
+        visual = f'<div><strong>视觉：</strong>{html.escape(narrative["visual_observation"])}</div>' if narrative["visual_observation"] else ""
+        evidence = "".join(f'<span style="margin-right:8px">{html.escape(item["label"])}: <strong>{html.escape(item["display"])}</strong></span>' for item in narrative["evidence"])
+        sections.append(
+            f'<section style="margin-top:12px"><h4>{html.escape(narrative["headline"])}</h4>'
+            f'<div>{evidence}</div><div><strong>资料：</strong>{html.escape(narrative["data_observation"])}</div>{visual}'
+            f'<div><strong>解读：</strong>{html.escape(narrative["interpretation"])}</div>'
+            f'<div><strong>限制：</strong>{html.escape(narrative["limitation"])}</div>'
+            f'<div><strong>下一步：</strong>{html.escape(narrative["next_step"])}</div></section>'
+        )
+    return "".join(sections)
 
 
 def _panel_height(width: str) -> int:
@@ -113,6 +145,7 @@ def _evidence_panel(
     panel_id: int,
     panel: dict[str, Any],
     narrative: dict[str, Any],
+    view_narratives: list[dict[str, Any]],
     execution_ref: str,
     output: dict[str, Any],
     grid_pos: dict[str, int],
@@ -127,6 +160,7 @@ def _evidence_panel(
         "askO11yArtifactId": artifact_id,
         "askO11yViewIds": panel["view_ids"],
         "askO11yNarrative": narrative,
+        "askO11yViewNarratives": view_narratives,
         "askO11yAssetBindings": [asset_binding],
     }
     if "plotly_index" in output:
@@ -141,6 +175,7 @@ def _evidence_panel(
                 "narrative": narrative,
                 "selectedViewIds": panel["view_ids"],
                 "viewSpecs": [view for view in output.get("figure_spec", {}).get("views", []) if view.get("view_id") in panel["view_ids"]],
+                "viewNarratives": view_narratives,
             },
             "askO11yPlotlyBindings": [{
                 "placeholder": plotly_placeholder,
@@ -150,7 +185,7 @@ def _evidence_panel(
             }],
         }
     image = f'<img src="{asset_placeholder}" alt="{html.escape(panel["headline"])}" style="width:100%;max-height:65%;object-fit:contain">'
-    return {**base, "type": "text", "options": {"mode": "html", "content": image + _narrative_html(narrative)}}
+    return {**base, "type": "text", "options": {"mode": "html", "content": image + _view_narratives_html(view_narratives) + _narrative_html(narrative)}}
 
 
 def compose_dashboard(
@@ -195,7 +230,7 @@ def compose_dashboard(
             artifact_id = item["artifact_id"]
             if artifact_id not in outputs or "png_index" not in outputs[artifact_id]:
                 raise ValueError("dashboard output mapping is incomplete")
-            section_panels.append(_evidence_panel(next_id, item, _narrative(item, catalog), execution_ref, outputs[artifact_id], grid_pos))
+            section_panels.append(_evidence_panel(next_id, item, _narrative(item, catalog), _view_narratives(item, catalog), execution_ref, outputs[artifact_id], grid_pos))
             next_id += 1
         if section["collapsed"]:
             row_panel["panels"] = section_panels

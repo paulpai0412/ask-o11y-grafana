@@ -19,7 +19,7 @@ def main() -> int:
 
     source = (PANEL / "src/module.tsx").read_text()
     assert "Plotly.react" in source and "fallbackUrl" in source and "narrative" in source, source
-    for required in ("useTheme2", "ResizeObserver", "Plots.resize", "applyGrafanaTheme", "splitFigureViews", "selectedViewIds", "gridTemplateColumns"):
+    for required in ("useTheme2", "ResizeObserver", "Plots.resize", "applyGrafanaTheme", "splitFigureViews", "selectedViewIds", "viewNarratives", "data_observation", "visual_observation", "gridTemplateColumns"):
         assert required in source, f"missing Grafana-responsive behavior: {required}"
     assert "options.figure.layout, width, height" not in source, "panel must not force a fixed Plotly canvas"
     assert "eval(" not in source and "new Function" not in source, "unsafe dynamic code in panel source"

@@ -33,6 +33,12 @@ def panel(artifact_id: str, width: str = "full") -> dict[str, Any]:
     return {
         "artifact_id": artifact_id,
         "view_ids": ["view-1"],
+        "view_narratives": [{
+            "view_id": "view-1", "headline": "此视图呈现主要差异",
+            "data_observation": "资料模型显示群组之间存在明显差异。", "visual_observation": "图中的形状呈现清楚分层。",
+            "interpretation": "此差异会影响判断重点。", "limitation": "目前不能建立因果结论。",
+            "next_step": "使用额外资料继续验证。", "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}],
+        }],
         "headline": "主要证据呈现值得关注的结构",
         "observation": "本图显示的变化与整份报告一致。",
         "interpretation": "这项结构会影响后续判断重点。",
@@ -85,6 +91,7 @@ def main() -> int:
         evidence_panels = [item for item in flattened if item.get("askO11yArtifactId")]
         assert all(item.get("askO11yNarrative", {}).get("evidence") for item in evidence_panels), evidence_panels
         assert all((item.get("options") or {}).get("selectedViewIds") == ["view-1"] for item in evidence_panels), evidence_panels
+        assert all((item.get("options") or {}).get("viewNarratives", [{}])[0].get("data_observation") == "资料模型显示群组之间存在明显差异。" for item in evidence_panels), evidence_panels
         if index == 0:
             promoted = next(item for item in evidence_panels if item["askO11yArtifactId"] == "class-view")
             assert promoted["gridPos"]["w"] == 24 and promoted["gridPos"]["h"] >= 16, promoted["gridPos"]
