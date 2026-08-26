@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Resolve opaque analysis refs inside model-authored Grafana dashboards.
+"""Prepare facts, compose evidence-bound report panels, and resolve opaque refs.
 
-This service never chooses a panel type and never writes Grafana. Ask O11y's
-built-in Grafana MCP remains the only dashboard writer.
+The host LLM chooses report flow/content from the complete bounded report; this
+service only validates and renders that synthesis. It never analyzes data or
+writes Grafana. Ask O11y's built-in Grafana MCP remains the only writer.
 """
 from __future__ import annotations
 
@@ -38,6 +39,8 @@ mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 artifact_assets = load_module("artifact_assets", ROOT / "artifact_assets.py")
 ml_dashboard_contract = load_module("ml_dashboard_contract", ROOT / "ml_dashboard_contract.py")
 ml_plotly_contract = load_module("ml_plotly_contract", ROOT / "ml_plotly_contract.py")
+ml_report_contract = load_module("ml_report_contract", ROOT / "ml_report_contract.py")
+ml_dashboard_compositor = load_module("ml_dashboard_compositor", ROOT / "ml_dashboard_compositor.py")
 ArtifactAuthError = artifact_store.ArtifactAuthError
 ArtifactStore = artifact_store.ArtifactStore
 WorkflowContractError = workflow_node.WorkflowContractError
@@ -53,7 +56,7 @@ try:
     PORT = int(os.environ.get("ARTIFACT_BRIDGE_MCP_PORT", "8773"))
 except ValueError:
     PORT = 8773
-SERVER_INFO = {"name": "artifact-bridge-mcp", "version": "0.1.0"}
+SERVER_INFO = {"name": "artifact-bridge-mcp", "version": "0.2.0"}
 PROTOCOL = "2025-03-26"
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
@@ -355,7 +358,7 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
             raise WorkflowContractError("dashboard exceeds resolver size limit")
         output = json_clone(dashboard)
         tags = output.get("tags")
-        if isinstance(tags, list) and any("ml" in str(tag).lower() for tag in tags):
+        if isinstance(tags, list) and (ml_dashboard_contract.REPORT_TAG in tags or any("ml" in str(tag).lower() for tag in tags)):
             ml_dashboard_contract.validate_ml_dashboard_minimum(output)
         counters = {"panels": 0, "targets": 0, "assets": 0, "plotly": 0}
         output["panels"] = resolve_panels(context, output.get("panels", []), counters)
@@ -375,6 +378,121 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _plotly_capability(result: Any) -> dict[str, Any]:
+    try:
+        payload = result["mime"]["application/json"]
+        figure = json.loads(payload)
+        data = figure["data"]
+        layout = figure.get("layout") or {}
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise WorkflowContractError("Plotly output is invalid") from exc
+    if not isinstance(data, list) or not isinstance(layout, dict):
+        raise WorkflowContractError("Plotly output shape is invalid")
+    x_axes = {key for key in layout if key == "xaxis" or (key.startswith("xaxis") and key.removeprefix("xaxis").isdigit())}
+    subplot_count = max(len(x_axes), 1)
+    has_matrix = any(isinstance(trace, dict) and trace.get("type") == "heatmap" for trace in data)
+    full = subplot_count >= 3 or has_matrix or len(data) > 4
+    min_height = 18 if subplot_count >= 7 else 16 if subplot_count >= 3 else 14 if has_matrix else 12
+    return {"recommended_width": "full" if full else "half", "min_height": min_height}
+
+
+def _report_material(args: dict[str, Any]) -> tuple[dict[str, str], str, dict[str, Any], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    context = context_from_args(args)
+    execution_ref = args.get("execution_ref")
+    manifest_index = args.get("manifest_output_index")
+    if not isinstance(execution_ref, str) or not execution_ref.startswith("artifact://"):
+        raise WorkflowContractError("execution_ref is required")
+    if isinstance(manifest_index, bool) or not isinstance(manifest_index, int) or manifest_index < 0:
+        raise WorkflowContractError("manifest_output_index must be non-negative")
+    execution = ARTIFACTS.read_json(context, execution_ref)
+    try:
+        results = execution["results"]
+        manifest_result = results[manifest_index]
+        manifest_payload = manifest_result["mime"]["application/json"]
+        manifest = json.loads(manifest_payload)
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise WorkflowContractError("manifest output is unavailable or invalid") from exc
+    if not isinstance(manifest, dict):
+        raise WorkflowContractError("manifest output must be an object")
+    by_name = {
+        str(result.get("display_name")): index
+        for index, result in enumerate(results)
+        if isinstance(result, dict) and result.get("display_name")
+    }
+    artifacts: list[dict[str, Any]] = []
+    outputs: dict[str, dict[str, int]] = {}
+    for item in manifest.get("artifacts") or []:
+        name = item.get("name") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not name.endswith(".png") or name not in by_name:
+            raise WorkflowContractError("manifest artifact has no matching PNG output")
+        artifact_id = name.removesuffix(".png")
+        output = {"png_index": by_name[name]}
+        plotly_name = f"ml-plotly-{artifact_id}.json"
+        if plotly_name in by_name:
+            output["plotly_index"] = by_name[plotly_name]
+            output.update(_plotly_capability(results[output["plotly_index"]]))
+        outputs[artifact_id] = output
+        artifacts.append({
+            "artifact_id": artifact_id,
+            "png_output_index": output["png_index"],
+            **({
+                "plotly_output_index": output["plotly_index"],
+                "recommended_width": output["recommended_width"],
+                "min_height": output["min_height"],
+            } if "plotly_index" in output else {}),
+        })
+    if not artifacts:
+        raise WorkflowContractError("manifest contains no renderable artifacts")
+    return context, execution_ref, manifest, artifacts, outputs
+
+
+def prepare_ml_report(args: dict[str, Any]) -> dict[str, Any]:
+    step = "prepare_ml_report"
+    try:
+        unexpected = sorted(set(args) - {"execution_ref", "manifest_output_index", "_server_context"})
+        if unexpected:
+            raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
+        _context, execution_ref, manifest, artifacts, _outputs = _report_material(args)
+        facts = ml_report_contract.build_fact_catalog(manifest)
+    except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; keep successful analysis outputs and correct only the opaque report reference.")
+    return success_response(
+        step=step, run_id="run_" + uuid.uuid4().hex, refs={"execution_ref": execution_ref},
+        instruction="Inspect the entire bounded report and every artifact once, then author one flow/content synthesis without inventing numbers. Pass it to compose_ml_dashboard.",
+        evidence={"artifact_count": len(artifacts), "fact_count": len(facts)},
+        report_context={
+            "purpose": manifest.get("purpose"), "conclusion": manifest.get("conclusion"),
+            "artifacts": artifacts, "facts": facts,
+            "restrictions": {"numeric_text": "Use evidence fact_ref + format; narrative fields contain no digits.", "flow": "Choose sections, order, titles, charts, collapsed state, and narratives from this report; no fixed template."},
+        },
+    )
+
+
+def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
+    step = "compose_ml_dashboard"
+    try:
+        unexpected = sorted(set(args) - {"execution_ref", "manifest_output_index", "synthesis", "uid", "title", "_server_context"})
+        if unexpected:
+            raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
+        _context, execution_ref, manifest, _artifacts, outputs = _report_material(args)
+        synthesis = args.get("synthesis")
+        if not isinstance(synthesis, dict):
+            raise WorkflowContractError("synthesis is required")
+        dashboard = ml_dashboard_compositor.compose_dashboard(
+            manifest, synthesis, execution_ref=execution_ref, outputs=outputs,
+            uid=str(args.get("uid") or ""), title=str(args.get("title") or ""),
+        )
+        ml_dashboard_contract.validate_preview_dashboard(dashboard)
+    except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=True, instruction="Revise only the LLM report synthesis; do not rerun query or analysis.")
+    return success_response(
+        step=step, run_id="run_" + uuid.uuid4().hex, refs={},
+        instruction="The evidence-bound opaque dashboard is ready. Resolve bindings, then dispatch only to the approved Grafana writer.",
+        evidence={"sections": len(synthesis["sections"]), "artifacts": sum(len(section["panels"]) for section in synthesis["sections"])},
+        dashboard=dashboard,
+    )
+
+
 TOOLS = [{
     "name": "resolve_dashboard_refs",
     "description": "Internal-only: resolve authorized opaque query/analysis refs inside a dashboard before dispatch to Ask O11y's built-in Grafana MCP. It never chooses panels or writes Grafana.",
@@ -383,6 +501,25 @@ TOOLS = [{
         "additionalProperties": False,
         "properties": {"dashboard": {"type": "object"}},
         "required": ["dashboard"],
+    },
+}, {
+    "name": "prepare_ml_report",
+    "description": "Return a bounded artifact and deterministic fact catalog for one complete report so the host LLM can synthesize flow and per-chart narratives without raw rows or signed URLs.",
+    "inputSchema": {
+        "type": "object", "additionalProperties": False,
+        "properties": {"execution_ref": {"type": "string"}, "manifest_output_index": {"type": "integer", "minimum": 0}},
+        "required": ["execution_ref", "manifest_output_index"],
+    },
+}, {
+    "name": "compose_ml_dashboard",
+    "description": "Validate one whole-report LLM synthesis against deterministic facts/artifacts and compose an opaque Grafana dashboard without choosing or hardcoding its flow or content.",
+    "inputSchema": {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "execution_ref": {"type": "string"}, "manifest_output_index": {"type": "integer", "minimum": 0},
+            "synthesis": {"type": "object"}, "uid": {"type": "string"}, "title": {"type": "string"},
+        },
+        "required": ["execution_ref", "manifest_output_index", "synthesis", "uid", "title"],
     },
 }]
 
@@ -406,13 +543,19 @@ def handle_rpc(msg: dict[str, Any]):
     if method == "tools/call":
         params = msg.get("params", {})
         name = params.get("name")
-        if name != "resolve_dashboard_refs":
+        handlers = {
+            "resolve_dashboard_refs": (resolve_dashboard_refs, {"dashboard", "_server_context"}),
+            "prepare_ml_report": (prepare_ml_report, {"execution_ref", "manifest_output_index", "_server_context"}),
+            "compose_ml_dashboard": (compose_ml_dashboard, {"execution_ref", "manifest_output_index", "synthesis", "uid", "title", "_server_context"}),
+        }
+        if name not in handlers:
             return rpc_error(rid, -32602, f"unknown tool: {name}")
         arguments = params.get("arguments", {}) or {}
         if not isinstance(arguments, dict):
             return rpc_error(rid, -32602, "tool arguments must be an object")
-        unexpected = sorted(set(arguments) - {"dashboard", "_server_context"})
-        output = error_response(step=name, error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Pass only declared tool arguments.") if unexpected else resolve_dashboard_refs(arguments)
+        handler, allowed = handlers[name]
+        unexpected = sorted(set(arguments) - allowed)
+        output = error_response(step=name, error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Pass only declared tool arguments.") if unexpected else handler(arguments)
         return rpc_result(rid, {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}], "isError": not bool(output.get("ok"))})
     return None if rid is None else rpc_error(rid, -32601, f"method not found: {method}")
 

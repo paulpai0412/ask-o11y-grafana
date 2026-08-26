@@ -1091,6 +1091,40 @@ def recommend_spec_values(
 # Plotly-first interactive figures (data-driven chart-type adaptation)
 # ---------------------------------------------------------------------------
 
+def responsive_subplot_grid(count: int) -> list[dict[str, Any]]:
+    """Return non-overlapping top-to-bottom subplot domains for one to twelve views."""
+    if not 1 <= count <= 12:
+        raise ValueError("responsive subplot grid supports one to twelve views")
+    if count == 1:
+        rows, columns = 1, 1
+    elif count == 2:
+        rows, columns = 1, 2
+    elif count <= 4:
+        rows, columns = 2, 2
+    elif count <= 6:
+        rows, columns = 2, 3
+    elif count <= 9:
+        rows, columns = 3, 3
+    else:
+        rows, columns = 3, 4
+    left, right, bottom, top = 0.04, 0.98, 0.08, 0.94
+    x_gap = 0.035 if columns > 1 else 0.0
+    y_gap = 0.10 if rows > 1 else 0.0
+    cell_width = (right - left - x_gap * (columns - 1)) / columns
+    cell_height = (top - bottom - y_gap * (rows - 1)) / rows
+    output = []
+    for index in range(count):
+        row, column = divmod(index, columns)
+        x_start = left + column * (cell_width + x_gap)
+        y_end = top - row * (cell_height + y_gap)
+        output.append({
+            "row": row, "column": column,
+            "x": [round(x_start, 4), round(x_start + cell_width, 4)],
+            "y": [round(y_end - cell_height, 4), round(y_end, 4)],
+        })
+    return output
+
+
 def build_plotly_figures(
     manifest: dict[str, Any],
     *,
@@ -1155,7 +1189,9 @@ def build_plotly_figures(
         top_features = [item["name"] for item in (manifest.get("features") or [])[:3] if item["name"] in frame.columns and item["name"] != target]
         if not top_features:
             top_features = [str(column) for column in frame.select_dtypes(include=[np.number]).columns.drop(target, errors="ignore").tolist()[:3]]
-        span = 1.0 / (min(len(top_features[:3]), 3) + 1)
+        profile_grid = responsive_subplot_grid(1 + len(top_features[:3]))
+        layout["xaxis"] = axis(title=target, domain=profile_grid[0]["x"], anchor="y")
+        layout["yaxis"] = axis(domain=profile_grid[0]["y"], anchor="x")
         for slot, column in enumerate(top_features[:3]):
             series = frame[column]
             if pd.api.types.is_numeric_dtype(series):
@@ -1168,10 +1204,9 @@ def build_plotly_figures(
                 y_values = [_count(value, f"{column} count") for value in feature_counts.tolist()]
             axis_id = str(slot + 2)
             data.append({"type": "bar", "name": str(column), "x": x_values, "y": y_values, "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": "#7fcaa6"}})
-            layout[f"xaxis{axis_id}"] = axis(domain=[round(span * (slot + 1) + 0.01, 3), round(span * (slot + 2) - 0.01, 3)], anchor=f"y{axis_id}")
-            layout[f"yaxis{axis_id}"] = axis(domain=[0.05, 0.9], anchor=f"x{axis_id}")
-        layout["xaxis"] = axis(domain=[0.01, round(span, 3)], anchor="y")
-        layout["yaxis"] = axis(domain=[0.05, 0.9], anchor="x")
+            domain = profile_grid[slot + 1]
+            layout[f"xaxis{axis_id}"] = axis(title=str(column), domain=domain["x"], anchor=f"y{axis_id}")
+            layout[f"yaxis{axis_id}"] = axis(domain=domain["y"], anchor=f"x{axis_id}")
         _finish("data_profile", data, layout)
 
     # 2-4. Ontology data atlas: field governance, shape, and semantic correlation.
@@ -1195,7 +1230,7 @@ def build_plotly_figures(
         if available:
             distribution_data: list[dict[str, Any]] = []
             distribution_layout: dict[str, Any] = {"title": "核可欄位的分布形狀與集中性", "showlegend": False}
-            span = 1.0 / len(available)
+            distribution_grid = responsive_subplot_grid(len(available))
             for slot, item in enumerate(available):
                 series = frame[item["name"]]
                 if pd.api.types.is_numeric_dtype(series) and series.nunique(dropna=True) > 10:
@@ -1209,8 +1244,9 @@ def build_plotly_figures(
                 axis_id = "" if slot == 0 else str(slot + 1)
                 distribution_data.append({"type": "bar", "name": item["name"], "x": x_values, "y": y_values, "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": kind_colors.get(item["semantic_kind"], "#7fcaa6")}})
                 suffix = "" if slot == 0 else str(slot + 1)
-                distribution_layout[f"xaxis{suffix}"] = axis(title=item["name"], domain=[round(slot * span + 0.005, 4), round((slot + 1) * span - 0.005, 4)], anchor=f"y{axis_id}")
-                distribution_layout[f"yaxis{suffix}"] = axis(domain=[0.08, 0.9], anchor=f"x{axis_id}")
+                domain = distribution_grid[slot]
+                distribution_layout[f"xaxis{suffix}"] = axis(title=item["name"], domain=domain["x"], anchor=f"y{axis_id}")
+                distribution_layout[f"yaxis{suffix}"] = axis(domain=domain["y"], anchor=f"x{axis_id}")
             _finish("distribution_small_multiples", distribution_data, distribution_layout)
 
         correlation = atlas["correlation"]
@@ -1233,6 +1269,7 @@ def build_plotly_figures(
         if relationships:
             traces: list[dict[str, Any]] = []
             layout: dict[str, Any] = {"title": "資料本身的欄位與目標關係（描述性、非因果）", "showlegend": False}
+            relationship_grid = responsive_subplot_grid(len(relationships))
             for slot, relationship in enumerate(relationships):
                 axis_id = "" if slot == 0 else str(slot + 1)
                 traces.append({
@@ -1241,12 +1278,10 @@ def build_plotly_figures(
                     "y": [item["positive_rate"] for item in relationship["groups"]],
                     "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": "#4fd1c5"},
                 })
-                column = slot % 2; row = slot // 2
-                x_domain = [0.04 + column * 0.5, 0.46 + column * 0.5]
-                y_domain = [0.55, 0.95] if row == 0 else [0.08, 0.45]
+                domain = relationship_grid[slot]
                 suffix = "" if slot == 0 else str(slot + 1)
-                layout[f"xaxis{suffix}"] = axis(title=relationship["feature"], domain=x_domain, anchor=f"y{axis_id}")
-                layout[f"yaxis{suffix}"] = axis(title="正類比例", domain=y_domain, anchor=f"x{axis_id}", range=[0, 1])
+                layout[f"xaxis{suffix}"] = axis(title=relationship["feature"], domain=domain["x"], anchor=f"y{axis_id}")
+                layout[f"yaxis{suffix}"] = axis(title="正類比例", domain=domain["y"], anchor=f"x{axis_id}", range=[0, 1])
             _finish("feature_target_relationships", traces, layout)
 
     if evaluation_frame is not None and y_true is not None and probabilities is not None:
@@ -1257,6 +1292,7 @@ def build_plotly_figures(
         if error_slices:
             traces = []
             layout = {"title": "鎖定門檻後的 Holdout 錯誤切片（非公平性結論）", "showlegend": True, "barmode": "stack"}
+            error_grid = responsive_subplot_grid(len(error_slices))
             for slot, sliced in enumerate(error_slices):
                 axis_id = "" if slot == 0 else str(slot + 1)
                 labels = [item["label"] for item in sliced["groups"]]
@@ -1272,12 +1308,10 @@ def build_plotly_figures(
                         "xaxis": f"x{axis_id}", "yaxis": f"y{axis_id}", "marker": {"color": "#eda06a"},
                     },
                 ])
-                column = slot % 2; row = slot // 2
-                x_domain = [0.04 + column * 0.5, 0.46 + column * 0.5]
-                y_domain = [0.55, 0.95] if row == 0 else [0.08, 0.45]
+                domain = error_grid[slot]
                 suffix = "" if slot == 0 else str(slot + 1)
-                layout[f"xaxis{suffix}"] = axis(title=sliced["feature"], domain=x_domain, anchor=f"y{axis_id}")
-                layout[f"yaxis{suffix}"] = axis(title="錯誤率", domain=y_domain, anchor=f"x{axis_id}", range=[0, 1])
+                layout[f"xaxis{suffix}"] = axis(title=sliced["feature"], domain=domain["x"], anchor=f"y{axis_id}")
+                layout[f"yaxis{suffix}"] = axis(title="錯誤率", domain=domain["y"], anchor=f"x{axis_id}", range=[0, 1])
             _finish("error_slice_analysis", traces, layout)
 
     # 7. Baseline vs selected outcomes per 1,000 (merged decision view).

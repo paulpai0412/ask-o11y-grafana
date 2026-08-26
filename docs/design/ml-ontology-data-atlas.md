@@ -1,6 +1,8 @@
 # ML Ontology Data Atlas — 先看資料，再看模型
 
-狀態：implemented（TDD + Telco E2E 綠燈）
+狀態：implemented（artifact 層）；報告編排已由 [Generic LLM Report Synthesis](./ml-llm-report-synthesis.md) 取代
+
+> 本文中的固定五幕與 Telco Dashboard 僅記錄早期 E2E 演進，不是 production 報告流程。Production 由 LLM 根據完整 facts/artifacts 動態決定 sections、順序、圖表與內容。
 
 ## 背景與問題
 

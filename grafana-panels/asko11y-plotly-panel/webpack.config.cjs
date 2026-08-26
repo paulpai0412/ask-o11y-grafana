@@ -14,6 +14,7 @@ module.exports = {
   externals: {
     react: 'react',
     '@grafana/data': '@grafana/data',
+    '@grafana/ui': '@grafana/ui',
   },
   module: {
     rules: [{

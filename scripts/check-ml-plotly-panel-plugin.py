@@ -18,7 +18,10 @@ def main() -> int:
     assert plugin["id"] == "asko11y-plotly-panel" and plugin["type"] == "panel", plugin
 
     source = (PANEL / "src/module.tsx").read_text()
-    assert "Plotly.react" in source and "fallbackUrl" in source and "caption" in source, source
+    assert "Plotly.react" in source and "fallbackUrl" in source and "narrative" in source, source
+    for required in ("useTheme2", "ResizeObserver", "Plots.resize", "applyGrafanaTheme"):
+        assert required in source, f"missing Grafana-responsive behavior: {required}"
+    assert "options.figure.layout, width, height" not in source, "panel must not force a fixed Plotly canvas"
     assert "eval(" not in source and "new Function" not in source, "unsafe dynamic code in panel source"
 
     render_mode = PANEL / "src/renderMode.mjs"
@@ -28,6 +31,14 @@ def main() -> int:
     )
     if result.returncode:
         raise AssertionError(f"render mode contract failed: {result.stderr}")
+
+    theme_module = PANEL / "src/theme.mjs"
+    theme_result = subprocess.run(
+        ["node", "--input-type=module", "-e", f"import{{applyGrafanaTheme as a}}from'{theme_module.as_uri()}';const t={{colors:{{text:{{primary:'#eee'}},border:{{weak:'#333'}},background:{{primary:'#111'}}}},typography:{{fontFamily:'Grafana Sans'}}}};const x=a({{xaxis:{{title:'x'}},yaxis2:{{title:'y'}}}},t);if(x.paper_bgcolor!=='rgba(0,0,0,0)'||x.plot_bgcolor!=='rgba(0,0,0,0)'||x.font.color!=='#eee'||x.xaxis.gridcolor!=='#333'||x.yaxis2.gridcolor!=='#333'||x.autosize!==true)process.exit(3)"],
+        check=False, capture_output=True, text=True,
+    )
+    if theme_result.returncode:
+        raise AssertionError(f"Grafana theme contract failed: {theme_result.stderr}")
 
     dist = PANEL / "dist/module.js"
     if not dist.exists():

@@ -19,8 +19,10 @@ MAX_SKILL_CONTEXT_BYTES = 32 * 1024  # skill_registry.go maxSkillContextBytes
 # contract). The reporting template must stay framed as a template, not steps.
 FORBIDDEN_PATTERNS = (
     "you must first",
-    "next_step",
     "step 1:",
+    "固定回報模板",
+    "章節可留白但不得刪除標題",
+    "面板故事順序為五幕",
 )
 
 
@@ -79,11 +81,12 @@ def main() -> int:
         assert pattern not in lowered, f"forbidden fixed-flow wording: {pattern}"
     assert "advisory knowledge" in body, "must declare advisory status"
 
-    # Requested coverage: equipment health index, value-level thresholds, fixed template.
+    # Requested coverage: equipment health index, value-level thresholds, dynamic report synthesis.
     for section in ("健康度 HI", "Cpk≥1.33", "PSI<0.1".replace("<", "<"), "PR-AUC", "TimeSeriesSplit"):
         assert section in body, f"required content missing: {section}"
-    assert "## 問題與分型" in body and "## 實際值分析" in body, "fixed report template incomplete"
-    for required in ("calibration_curve.png", "threshold_cost_curve.png", "calibrated_probabilities", "CatBoost", "受控 challenger"):
+    for required in ("prepare_ml_report", "compose_ml_dashboard", "ask-o11y-report-synthesis-v1", "不得套用固定分析流程", "一次检视整份报告"):
+        assert required in body, f"dynamic report synthesis advisory missing: {required}"
+    for required in ("calibrated_probabilities", "CatBoost", "受控 challenger"):
         assert required in body, f"P0/P1 advisory missing: {required}"
 
     print(f"ok: {path} ({size} bytes, frontmatter ok, advisory ok, template ok)")

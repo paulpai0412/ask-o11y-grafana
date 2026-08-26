@@ -119,10 +119,10 @@ def main() -> int:
     (OUTPUT / "ml-presentation.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     validate_manifest(manifest)
 
-    png_names = {path.name for path in OUTPUT.glob("*.png")}
+    png_names = {item["name"] for item in manifest["artifacts"]}
     expected = {"ontology_field_map.png", "distribution_small_multiples.png", "semantic_correlation.png", "data_profile.png", "feature_target_relationships.png", "error_slice_analysis.png", "baseline_error_comparison.png", "generalization_health.png", "feature_importance.png", "confusion_matrix.png", "roc_pr_curves.png", "calibration_curve.png", "threshold_cost_curve.png", "shap_summary.png"}
     removed = {"analysis_process.png", "trial_history.png", "per_1000_outcomes.png", "correlation_analysis.png"}
-    if expected != png_names:
+    if expected != png_names or any(not OUTPUT.joinpath(name).exists() for name in expected):
         raise RuntimeError(f"Telco PNG set mismatch: missing={sorted(expected - png_names)}, extra={sorted(png_names - expected)}")
     if png_names & removed:
         raise RuntimeError(f"deleted Telco assets returned: {sorted(png_names & removed)}")

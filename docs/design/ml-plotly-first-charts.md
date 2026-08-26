@@ -1,7 +1,9 @@
 # Plotly-first ML 圖表 + PNG Fallback 設計
 
 日期：2026-08-26　狀態：implemented（TDD + Grafana/Chromium E2E）
-依據：[Plotly plugin 研究](./ml-grafana-plotly-plugin-research.md)
+依據：[Plotly plugin 研究](./ml-grafana-plotly-plugin-research.md)；報告編排見 [Generic LLM Report Synthesis](./ml-llm-report-synthesis.md)
+
+> Sandbox 可產生 bounded Plotly capabilities；最終選擇哪些圖、順序、寬度與 narrative 由整份報告 LLM synthesis 決定，不固定十四圖 Dashboard。
 
 ## 目標
 
@@ -53,8 +55,11 @@ mcp-grafana（唯一 writer）→ Preview → 同 UID publish
 
 ## Grafana panel（grafana-panels/asko11y-plotly-panel）
 
-- React + plotly.js-dist-min（bundle 進 module.js；React 與 `@grafana/data` 為 externals）。
-- `resolveRenderMode()`：figure 無效或 render 丟例外 → fallback `<img>`。
+- React + plotly.js-dist-min（bundle 進 module.js；React、`@grafana/data`、`@grafana/ui` 為 externals）。
+- 復用 nLine panel 已驗證的 `useTheme2`／theme merge／resize 思路，但不引入其 Processing Script、event script 或 `new Function`。
+- `resolveRenderMode()`：figure 無效或 render 丟例外 → fallback `<img>`；正常模式以 transparent background、Grafana font/grid/text tokens 渲染。
+- `ResizeObserver` + `Plotly.Plots.resize()`；figure 不寫死 width/height。多子圖使用一到十二格 responsive x/y domains。
+- 同 panel 呈現 LLM 的 observation、interpretation、cross-chart context、limitation、next step 與 deterministic evidence chips。
 - 禁止 `new Function`／eval／datasource target／動態 script（CI grep 斷言）。
 - 本地以 unsigned allowlist 安裝；production 需簽章。
 

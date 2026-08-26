@@ -11,6 +11,13 @@ declare module '@grafana/data' {
   }
 }
 
+declare module '@grafana/ui' {
+  export function useTheme2(): {
+    colors: { text: { primary: string }; border: { weak: string }; background: { primary: string } };
+    typography: { fontFamily: string };
+  };
+}
+
 declare module 'plotly.js-dist-min' {
   type FigureData = Array<Record<string, unknown>>;
   type FigureLayout = Record<string, unknown>;
@@ -18,6 +25,7 @@ declare module 'plotly.js-dist-min' {
   const Plotly: {
     react(element: HTMLElement, data: FigureData, layout: FigureLayout, config: FigureConfig): Promise<unknown>;
     purge(element: HTMLElement): void;
+    Plots: { resize(element: HTMLElement): void };
   };
   export default Plotly;
 }

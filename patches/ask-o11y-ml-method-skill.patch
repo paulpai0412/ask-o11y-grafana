@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..355736e
 --- /dev/null
 +++ b/pkg/agent/skills/ml-method-selection/SKILL.md
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,258 @@
 +---
 +name: ml-method-selection
 +description: REQUIRED for any machine-learning or statistical analysis turn. Always select for 模型訓練、自動調參、分類、迴歸、分群、異常偵測、時間序列、預測、特徵重要性、結果解釋，或要求把 ML 過程/結果做成 Grafana Dashboard；亦涵蓋智慧製造設備健康、預測性維護 predictive maintenance、異常偵測 anomaly detection、良率/不良、製程參數、SPC/Cpk/OEE、需求預測。
@@ -235,71 +235,30 @@ index 0000000..355736e
 +SHAP 三原則：(1) 只談相關與相對重要性；(2) 高相關特徵成組解讀；
 +(3) 平均值之外必須展示個案分布——「平均 SHAP 最高」可能由少數極端批次驅動。
 +
-+## 7. 固定回報模板
++## 7. 回報判斷維度（不是固定流程或模板）
 +
-+每次分析結果以此骨架呈現（章節可留白但不得刪除標題）：
++依使用者問題與本次證據，自主決定是否、何時、以何種順序說明：決策用途、資料範圍與粒度、資料限制、方法選擇理由、切分與防 leakage、不確定性、具體定位、不能宣稱的事及下一步。沒有證據或與決策無關的維度可以省略；不得保留空章節、固定標題或套用預設故事順序。
 +
-+```
-+## 問題與分型
-+- 問題：<使用者問題的一句話重述>
-+- 分型：預測 / 推論 / 描述 / 異常偵測
-+- 決策用途：這個結果將被用來做什麼決定
++若本次能力包含機率分類，校正器與營運門檻只能用 train OOF 選擇，holdout 僅評估；所有 threshold/cost/error evidence 必須使用 `calibrated_probabilities`，不得把 raw probability 套用 calibrated threshold。成本矩陣存在不代表已獲業務核准，部署狀態只能讀 deterministic contract。
 +
-+## 資料與限制
-+- 範圍：<期間/機台/批號>
-+- 筆數與粒度：n=<...>，每列代表<一筆/一班/一批>
-+- 限制清單：<不平衡比、自相關、設限、量測能力未知…逐項列出，無則寫「未發現」>
++## 8. 使用者要求 Grafana Dashboard 時：整份報告 LLM synthesis
 +
-+## 方法與理由
-+- 方法：<具體到函式庫/模型>
-+- 為何選它：<一句話，引用 §2–§5 的準則>
-+- 切分方式：<TimeSeriesSplit / GroupKFold(by=…) / …>
++不得套用固定分析流程、固定 section、固定圖表清單、固定順序、固定 caption 或資料集／欄位專用文字。分析計算完成後，使用下列安全工具邊界；報告 flow 與 content 由你依本次使用者目的、完整 facts 與全部 artifacts 自主決定。
 +
-+## 實際值分析
-+- 關鍵數值：<指標+數值+門檻對照，如 PR-AUC 0.31（不良率基線 0.06，約 5 倍基線）>
-+- 不確定性：<CI / 區間覆蓋率>
-+- 具體定位：<哪個機台/參數/時間窗，偏差多少個 σ>
++1. 呼叫 `prepare_ml_report(execution_ref, manifest_output_index)`，取得 bounded artifact catalog、fact catalog 與限制；不得读取 raw rows、path、signed URL。
++2. 一次检视整份报告与全部相关 PNG/Plotly，不得逐图各自生成互不相干的 caption。先形成全局 thesis、跨图关系与资料限制，再决定要选哪些图、section 数量、顺序、标题、正文／折叠状态及 full/half width。
++3. 输出一个 `ask-o11y-report-synthesis-v1`。section id/title/purpose/order 完全依本次报告动态产生，不得使用固定五幕或固定中文 row。每个选中的 artifact 都必须写：`headline`、`observation`、`interpretation`、`cross_chart_context`、`limitation`、`next_step`、`evidence`、`priority`、`preferred_width`。
++4. narrative 字段不得自行写数字；所有数值用 `evidence: [{fact_ref, format}]` 引用 deterministic fact。未知 fact/artifact、HTML、URL、script 或未经 evidence 支持的数字会被拒绝。
++5. 呼叫 `compose_ml_dashboard(...)`。Compositor 只忠实呈现你产生的 flow/content 与 opaque bindings，不会替你选择、重排或补写分析内容；仅在安全或最小尺寸不满足时 fail closed／要求 full width。
++6. 再由 host 执行 `resolve_dashboard_refs` 并交唯一核准的 Grafana writer。不得自行插入 asset URL、literal Plotly data、datasource targets 或 executable script。
 +
-+## 限制與下一步
-+- 本分析不能宣稱的事：<因果、外推範圍、未驗證項>
-+- 建議下一步：<實驗設計 / 收集何種資料 / 監控部署>
-+```
++分析原则：
 +
-+## 8. 使用者要求 Grafana Dashboard 時的呈現規則
++- 必须把每张图放回整份报告脉络，说明它如何支持、修正或冲突于其他证据。
++- 不能只写「相关非因果」「重要度非因果」等免责声明；要说明本图实际观察、为何重要、限制与下一步。
++- 可省略对使用者决策没有贡献的图，也可把技术证据折叠；选择必须来自本次报告，不得来自固定 chart profile。
++- 部署状态、权限、成本是否核准与 deterministic metrics 不得由 LLM 改写。
++- 有 approved ontology 时使用系统投影；没有时只能称为 inferred，不得冒充 approved ontology。
++- Plotly panel 自动继承 Grafana light/dark theme 与 responsive grid；不要为特定图硬写尺寸。
 +
-+Dashboard 的第一個讀者是假設不懂 ML 的現場主管。先講實際影響，工程術語收合：
-+
-+1. 每個百分比都換算成「每 1,000 件/筆會發生幾次」。
-+2. 新舊模型用錯誤數比較：每 1,000 筆少錯幾筆、錯誤量相對降低多少。
-+3. 分開顯示：
-+   - `模型驗證`：holdout/泛化是否通過；
-+   - `營運使用`：成本、門檻、subgroup 尚未核准時一律寫「尚待確認」，不得直接寫可部署。
-+4. 第一視窗只回答：能不能用、比舊模型好多少、每 1,000 筆會怎樣、下一步做什麼。
-+5. ROC-AUC、PR-AUC、SHAP、hash、參數只放收合的工程細節；若放圖，caption 必須解釋漏判/誤報的實際取捨。
-+6. 優先圖：ontology 欄位地圖、核可欄位分布、語義相關熱圖、特徵×目標實際關係、新舊模型每千筆 outcome 合併比較、holdout 錯誤切片、依 ontology property 聚合的重要因素、SHAP、混淆矩陣、calibration 與 threshold-cost。不得把分析流程 checklist 或 top-trial history 畫成圖。
-+7. 語言要求：analysis contract 的 `purpose` 與 `conclusion` 必須用繁體中文撰寫——它們會直接出現在 Dashboard 與敘事報告的第一句。
-+
-+8. Dashboard 必須包含：
-+   - 「分析目的」與「結論」文字面板（不用術語，結論必須回應分析目的）；
-+   - 模型結果前先放「資料地圖」列：ontology_field_map.png → data_profile.png → distribution_small_multiples.png → semantic_correlation.png → feature_target_relationships.png；先解釋欄位語義角色、缺失/低變異與被排除欄位，再談分布形狀、集中性、一起變動的欄位群，以及資料本身可見的目標比例差異；特徵×目標關係必須標示描述性、非因果且未用來重選模型/門檻；
-+   - 「特徵重要性」圖（feature_importance.png，依 ontology property 聚合）放在 SHAP 摘要圖（shap_summary.png）之前——先看整體欄位重要性，再看 SHAP 個體歸因；接「前三大規格建議」面板（manifest 的 spec_recommendations，逐條列出欄位、門檻值與建議）；
-+   - 「分析報告敘事」面板：完整引用 manifest 的 narrative 欄位（已由系統從數值組合的敘事，不得改寫數字）；
-+   - 「指標解讀指引」面板：引用 manifest 的 metric_guidance（primary_metric_reason、watch_first、trade_off_explanation、per_metric 白話對照），讓主管知道該先看哪個數字、怎麼取捨；
-+   - 有 holdout labels/probabilities 時，必須加入 `error_slice_analysis.png`、`calibration_curve.png` 與 `threshold_cost_curve.png`：錯誤切片只指出調查方向，不得宣稱公平性或因果；校正圖解釋 Brier/機率可信度；成本圖明示 train-OOF 選出的門檻、成本與 holdout recall/precision；不得從 holdout 圖重選門檻；
-+   - 每張圖的下方必須緊接該圖的白話說明文字——你必須親自閱讀 PNG 圖表的實際內容（數值、趨勢、分布形狀），用你自己的話寫出此圖想傳達的發現；不要照抄 manifest caption，也不要用固定句式；
-+   - SHAP 圖：解讀顏色與左右位置的實際含義（例如「Contract 為 Month-to-Month 的紅色點明顯靠右，代表月約客戶被模型推向流失預測」）；
-+   - 語義相關熱圖：按 semantic kind / unit 解讀群內與跨群相關，指出最高與最低相關欄位對，以及是否有 ontology 預期外的強相關；
-+   - 敘事報告（narrative）：不要照抄 manifest 的 deterministic narrative，而是以你對圖表與數據的理解，用敘事方式重新撰寫完整分析故事，包含你觀察到的具體數值與趨勢；
-+   - 指標解讀指引（metric_guidance）：保留 deterministic 骨架（先看什麼/怎麼取捨），但加入你對本次分析為何適合這個指標的具體說明；
-+   - 技術細節以 `<details>` 收合。
-+
-+面板故事順序為五幕：決策摘要 → 資料地圖 → 模型歸因（feature importance、SHAP、spec 建議）→ 收合的模型證據 → 部署決策。不得先用模型指標圖壓過資料限制。
-+
-+Sandbox 已提供 `ml_presentation`。分析完成且使用者確認需要 Grafana 時：
-+
-+- 用 `build_manifest(...)` 產 bounded `ask-o11y-ml-presentation-v1`；不得自行添加 raw rows、path、URL 或超出 top5 trials/top20 features。
-+- 用 `render_assets(manifest, output_dir, y_true=..., probabilities=result["calibrated_probabilities"], emit_figure=emit, frame=df, target=..., fields_view=FIELDS_VIEW, evaluation_frame=X_hold, target_values=y.tolist())` 產圖（含 ontology_field_map.png、distribution_small_multiples.png、semantic_correlation.png、feature_target_relationships.png、error_slice_analysis.png、calibration_curve.png、threshold_cost_curve.png）；不得把 raw probabilities 套用 calibrated threshold。再 `emit(manifest, name="ml-presentation.json")`。manifest 必須帶 `purpose`、`conclusion`。有 approved ontology 時只能使用系統投影 fields_view；沒有時 deterministic inference 必須在 caption 標成 inferred，不得冒充 approved ontology。
-+- 沒有 holdout probabilities 時，不得假造混淆矩陣或 ROC/PR；明說缺少證據。
-+- Dashboard 版面由 selected dashboarding Skill 根據使用者意圖決定，不硬編固定 JSON；但需依序有決策摘要、資料地圖、模型歸因、收合模型證據、部署決策五個語意區塊。
-+- 分析 Dashboard 只能使用 image/text panels + opaque Sandbox bindings，不能將 Sandbox 結果偽裝為 native datasource targets。
-+- 製造分類沒有 threshold/cost evidence 時，最高狀態只能是「模型驗證通過，營運門檻待確認」。
++Sandbox 的 deterministic `ml_presentation` 只负责 facts/artifacts，不负责最终报告故事。测试 fixture 的专用 builder 不得用于 production。
