@@ -71,6 +71,17 @@ def main() -> int:
     assert calibration["bins"] == 8, calibration
     assert math.isclose(calibration["brier_score"], 0.1521875, rel_tol=0, abs_tol=1e-8), calibration
 
+    summary = manifest["operational_summary"]
+    assert summary == {
+        "normalization_denominator": 1000,
+        "actual_positive": 500.0,
+        "true_positive": 250.0,
+        "false_negative": 250.0,
+        "false_positive": 0.0,
+        "true_negative": 500.0,
+        "predicted_positive": 250.0,
+    }, summary
+
     cost = evidence["threshold_cost"]
     assert cost["selected_on"] == "train_oof", cost
     assert cost["evaluated_on"] == "holdout", cost

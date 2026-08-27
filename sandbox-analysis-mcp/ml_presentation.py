@@ -199,7 +199,7 @@ def _walk(value: Any, key: str = "") -> None:
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    known_sections = REQUIRED_SECTIONS | {"purpose", "conclusion", "operating_scenarios", "spec_recommendations", "narrative", "metric_guidance", "model_comparison", "evaluation_evidence", "data_atlas", "feature_target_relationships", "error_slices"}
+    known_sections = REQUIRED_SECTIONS | {"purpose", "conclusion", "operating_scenarios", "spec_recommendations", "narrative", "metric_guidance", "model_comparison", "evaluation_evidence", "data_atlas", "feature_target_relationships", "error_slices", "operational_summary"}
     unknown = set(manifest) - known_sections
     if unknown or not REQUIRED_SECTIONS <= set(manifest):
         raise ValueError(f"manifest sections are incomplete or unsupported: {sorted(unknown)}")
@@ -233,6 +233,18 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
                 raise ValueError(f"manifest {section} is outside presentation bounds")
             if any(not isinstance(item, dict) or not item.get("feature") or not isinstance(item.get("groups"), list) or len(item["groups"]) > 8 for item in items):
                 raise ValueError(f"manifest {section} groups are invalid")
+    operational = manifest.get("operational_summary")
+    if operational is not None:
+        required_operational = {"normalization_denominator", "actual_positive", "true_positive", "false_negative", "false_positive", "true_negative", "predicted_positive"}
+        if not isinstance(operational, dict) or set(operational) != required_operational:
+            raise ValueError("manifest operational_summary shape is invalid")
+        try:
+            values = {key: float(operational[key]) for key in required_operational}
+        except (TypeError, ValueError) as exc:
+            raise ValueError("manifest operational_summary values are invalid") from exc
+        denominator = values["normalization_denominator"]
+        if not all(math.isfinite(value) and value >= 0 for value in values.values()) or abs(values["true_positive"] + values["false_negative"] + values["false_positive"] + values["true_negative"] - denominator) > 0.2 or abs(values["predicted_positive"] - values["true_positive"] - values["false_positive"]) > 0.2:
+            raise ValueError("manifest operational_summary is inconsistent")
     evidence = manifest.get("evaluation_evidence")
     if evidence is not None:
         if not isinstance(evidence, dict) or not all(isinstance(evidence.get(name), dict) for name in ("calibration", "threshold_cost")):
@@ -899,9 +911,26 @@ def render_assets(
             tp_selected = int(((labels == 1) & (predicted == 1)).sum())
             fn_selected = int(((labels == 1) & (predicted == 0)).sum())
             fp_selected = int(((labels == 0) & (predicted == 1)).sum())
+            tn_selected = int(((labels == 0) & (predicted == 0)).sum())
         except (TypeError, ValueError) as exc:
             raise ValueError("selected threshold evidence is invalid") from exc
         cost_selected = (fn_selected * fn_cost + fp_selected * fp_cost) / len(labels) * 1000
+        try:
+            normalization_denominator = int(manifest["objective"].get("normalization_denominator", 1000))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("objective normalization_denominator is invalid") from exc
+        if not 1 <= normalization_denominator <= 1_000_000:
+            raise ValueError("objective normalization_denominator is outside bounds")
+        scale = normalization_denominator / len(labels)
+        manifest["operational_summary"] = {
+            "normalization_denominator": normalization_denominator,
+            "actual_positive": round((tp_selected + fn_selected) * scale, 1),
+            "true_positive": round(tp_selected * scale, 1),
+            "false_negative": round(fn_selected * scale, 1),
+            "false_positive": round(fp_selected * scale, 1),
+            "true_negative": round(tn_selected * scale, 1),
+            "predicted_positive": round((tp_selected + fp_selected) * scale, 1),
+        }
         manifest["evaluation_evidence"] = {
             "calibration": {
                 "selected_on": "train_oof", "evaluated_on": "holdout",

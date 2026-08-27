@@ -54,8 +54,9 @@ def synthesis(sections: list[tuple[str, str, bool, list[dict[str, Any]]]]) -> di
     return {
         "format": "ask-o11y-report-synthesis-v1", "report_title": "动态分析报告",
         "thesis": "整份证据支持当前解释，但行动前仍需验证。",
+        "thesis_evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}],
         "sections": [
-            {"section_id": section_id, "title": title, "purpose": "回答本次报告在此处提出的问题。", "collapsed": collapsed, "panels": panels}
+            {"section_id": section_id, "title": title, "purpose": "回答本次报告在此处提出的问题。", "collapsed": collapsed, "narrative_blocks": [], "panels": panels}
             for section_id, title, collapsed, panels in sections
         ],
     }
@@ -68,6 +69,10 @@ def main() -> int:
         (make_manifest(["matrix"], 0.99), synthesis([("redundancy", "重复讯号", False, [panel("matrix")])])),
         (make_manifest(["history", "future"], 0.18), synthesis([("past", "历史", False, [panel("history")]), ("range", "未来区间", False, [panel("future")]), ("risk", "风险", True, [])])),
     ]
+    fixtures[2][1]["sections"][2]["narrative_blocks"] = [{
+        "block_id": "closing", "title": "综合判断", "body": "现有证据支持受控验证，行动前仍需确认关键假设。",
+        "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}], "priority": "primary",
+    }]
     shapes = []
     for index, (manifest, report) in enumerate(fixtures):
         outputs = {}
@@ -86,6 +91,8 @@ def main() -> int:
         rows = [item for item in dashboard["panels"] if item.get("type") == "row"]
         if [item["askO11ySectionId"] for item in rows] != [section["section_id"] for section in report["sections"]]:
             raise AssertionError("compositor changed the LLM-authored section order")
+        assert all(row.get("askO11ySectionPurpose") for row in rows), rows
+        assert not any(item.get("type") == "text" and item.get("title") in {section["title"] for section in report["sections"]} and not item.get("askO11yReportThesis") and not item.get("askO11yNarrativeBlock") for item in dashboard["panels"]), "section purpose was duplicated as a text panel"
         flattened = []
         for item in dashboard["panels"]:
             flattened.append(item); flattened.extend(item.get("panels") or [])
@@ -94,6 +101,9 @@ def main() -> int:
         plotly_panels = [item for item in evidence_panels if item.get("type") == "asko11y-plotly-panel"]
         assert all((item.get("options") or {}).get("selectedViewIds") == ["view-1"] for item in plotly_panels), plotly_panels
         assert all(item.get("askO11yViewNarratives", [{}])[0].get("data_observation") == "资料模型显示群组之间存在明显差异。" for item in evidence_panels), evidence_panels
+        if index == 2:
+            block = next(item for item in flattened if item.get("askO11yNarrativeBlock"))
+            assert "现有证据支持受控验证" in block["options"]["content"] and block["askO11yNarrativeBlock"]["evidence"][0]["display"] == "18.0%", block
         if index == 0:
             promoted = next(item for item in evidence_panels if item["askO11yArtifactId"] == "class-view")
             assert promoted["gridPos"]["w"] == 24 and promoted["gridPos"]["h"] >= 16, promoted["gridPos"]

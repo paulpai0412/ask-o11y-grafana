@@ -20,8 +20,9 @@ def dashboard() -> dict:
     }
     synthesis = {
         "format": "ask-o11y-report-synthesis-v1", "report_title": "动态报告", "thesis": "证据支持当前解释，行动前仍需验证。",
+        "thesis_evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}],
         "sections": [{
-            "section_id": "custom-flow", "title": "由模型决定的主题", "purpose": "回答本次报告最重要的问题。", "collapsed": False,
+            "section_id": "custom-flow", "title": "由模型决定的主题", "purpose": "回答本次报告最重要的问题。", "collapsed": False, "narrative_blocks": [],
             "panels": [{
                 "artifact_id": "evidence", "view_ids": ["view-1"],
                 "view_narratives": [{"view_id": "view-1", "headline": "此视图呈现主要证据", "data_observation": "资料模型显示明确结构。", "visual_observation": "图形呈现清楚分层。", "interpretation": "这会影响判断重点。", "limitation": "目前不能建立因果结论。", "next_step": "使用额外资料验证。", "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}]}],

@@ -28,7 +28,8 @@ def load_bridge():
 def synthesis() -> dict:
     return {
         "format": "ask-o11y-report-synthesis-v1", "report_title": "动态报告", "thesis": "完整证据支持当前解释，但行动前仍需验证。",
-        "sections": [{"section_id": "model-choice", "title": "本次重点", "purpose": "根据完整报告说明最重要的判断。", "collapsed": False, "panels": [{
+        "thesis_evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}],
+        "sections": [{"section_id": "model-choice", "title": "本次重点", "purpose": "根据完整报告说明最重要的判断。", "collapsed": False, "narrative_blocks": [], "panels": [{
             "artifact_id": "chart", "view_ids": ["view-1", "view-2", "view-3", "view-4"],
             "view_narratives": [{
                 "view_id": view_id, "headline": "此视图呈现主要证据", "data_observation": "资料模型显示明确结构。",

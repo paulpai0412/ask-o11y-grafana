@@ -36,12 +36,14 @@ def synthesis(artifact: str, sections: list[tuple[str, str]]) -> dict:
         "format": "ask-o11y-report-synthesis-v1",
         "report_title": "本次分析报告",
         "thesis": "证据显示主要讯号集中在少数结构，仍需验证行动效果。",
+        "thesis_evidence": [{"fact_ref": "metrics.signal", "format": "percent_1", "label": "核心讯号"}],
         "sections": [
             {
                 "section_id": section_id,
                 "title": title,
                 "purpose": "根据整份报告回答此处最重要的问题。",
                 "collapsed": False,
+                "narrative_blocks": [],
                 "panels": [{
                     "artifact_id": artifact,
                     "view_ids": ["view-1"],
@@ -97,6 +99,11 @@ def main() -> int:
     assert section_shapes == [2, 1, 4], section_shapes
 
     base_manifest, base = fixtures[0]
+    with_block = copy.deepcopy(base)
+    with_block["sections"][0]["narrative_blocks"] = [{"block_id": "closing", "title": "综合判断", "body": "现有证据支持受控验证，行动前仍需核准关键假设。", "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}], "priority": "primary"}]
+    contract.validate_report_synthesis(base_manifest, with_block)
+    bad_thesis = copy.deepcopy(base); bad_thesis["thesis_evidence"][0]["fact_ref"] = "missing"
+    expect_reject(contract, base_manifest, bad_thesis, "fact")
     unknown_artifact = copy.deepcopy(base); unknown_artifact["sections"][0]["panels"][0]["artifact_id"] = "missing"
     expect_reject(contract, base_manifest, unknown_artifact, "artifact")
     unknown_fact = copy.deepcopy(base); unknown_fact["sections"][0]["panels"][0]["evidence"][0]["fact_ref"] = "missing.fact"

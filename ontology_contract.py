@@ -137,7 +137,7 @@ def validate_analysis_contract(snapshot: dict[str, Any], contract: dict[str, Any
     mismatch = verify_snapshot_ref(snapshot, snapshot_ref or contract.get("ontology_snapshot_sha256"))
     if mismatch:
         reject(mismatch, "snapshot.pin")
-    allowed = {"kind", "dataset_id", "target", "features", "as_of", "split", "seed", "ontology_snapshot_sha256", "quality_filter", "positive_class", "purpose", "conclusion", "autotune", "objective", "objective_minimum", "search_budget", "class_imbalance_strategy", "cost_matrix", "minimum_recall"}
+    allowed = {"kind", "dataset_id", "target", "features", "as_of", "split", "seed", "ontology_snapshot_sha256", "quality_filter", "positive_class", "purpose", "conclusion", "autotune", "objective", "objective_minimum", "search_budget", "class_imbalance_strategy", "cost_matrix", "cost_matrix_approved", "reporting_denominator", "minimum_recall"}
     if not isinstance(contract, dict) or set(contract) - allowed:
         reject("ANALYSIS_CONTRACT_INVALID", "contract.shape")
         contract = contract if isinstance(contract, dict) else {}

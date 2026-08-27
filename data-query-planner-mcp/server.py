@@ -593,6 +593,16 @@ TOOLS = [
                             "false_positive"
                         ]
                     },
+                    "cost_matrix_approved": {
+                        "type": "boolean",
+                        "default": False
+                    },
+                    "reporting_denominator": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000000,
+                        "default": 1000
+                    },
                     "minimum_recall": {
                         "type": "number",
                         "minimum": 0,

@@ -38,6 +38,7 @@ def _story_rows(top_level: list[dict[str, Any]]) -> list[dict[str, Any]]:
         section_ids.add(section_id)
         if not isinstance(row.get("collapsed"), bool):
             raise ValueError("report row collapsed state is required")
+        _safe_text(row.get("askO11ySectionPurpose"), "report section purpose")
     return rows
 
 
@@ -47,6 +48,16 @@ def _safe_text(value: Any, where: str) -> None:
     lowered = value.lower()
     if any(token in lowered for token in ("<", ">", "javascript:", "http://", "https://")):
         raise ValueError(f"{where} contains unsafe text")
+
+
+def _validate_display_evidence(evidence: Any, where: str) -> None:
+    if not isinstance(evidence, list) or not evidence:
+        raise ValueError(f"{where} evidence is required")
+    for item in evidence:
+        if not isinstance(item, dict) or set(item) != {"fact_ref", "label", "display"}:
+            raise ValueError(f"{where} evidence shape is invalid")
+        for key in ("fact_ref", "label", "display"):
+            _safe_text(str(item.get(key) or ""), f"{where}.{key}")
 
 
 def _validate_narrative(panel: dict[str, Any]) -> None:
@@ -113,6 +124,7 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
     if len(thesis_panels) != 1 or thesis_panels[0].get("type") != "text":
         raise ValueError("report dashboard requires one LLM-authored thesis panel")
     _safe_text(thesis_panels[0].get("askO11yReportThesis"), "report thesis")
+    _validate_display_evidence(thesis_panels[0].get("askO11yThesisEvidence"), "report thesis")
     flattened = _panels([item for item in top_level if isinstance(item, dict)])
     if len(flattened) > MAX_PANELS:
         raise ValueError("dashboard panel count exceeds bound")
@@ -121,6 +133,14 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
     if any(panel.get("type") not in {"row", "text", PLOTLY_PLUGIN_ID} for panel in flattened):
         raise ValueError("report dashboard contains an unsupported panel type")
 
+    narrative_blocks = [panel for panel in flattened if panel.get("askO11yNarrativeBlock") is not None]
+    for panel in narrative_blocks:
+        block = panel["askO11yNarrativeBlock"]
+        if not isinstance(block, dict) or set(block) != {"block_id", "title", "body", "evidence", "priority"}:
+            raise ValueError("narrative block shape is invalid")
+        _safe_text(block.get("title"), "narrative block title")
+        _safe_text(block.get("body"), "narrative block body")
+        _validate_display_evidence(block.get("evidence"), "narrative block")
     evidence_panels = [panel for panel in flattened if panel.get("askO11yArtifactId") is not None]
     if not evidence_panels:
         raise ValueError("report dashboard requires at least one evidence panel")

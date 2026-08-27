@@ -84,7 +84,7 @@ def main() -> int:
     # Requested coverage: equipment health index, value-level thresholds, dynamic report synthesis.
     for section in ("健康度 HI", "Cpk≥1.33", "PSI<0.1".replace("<", "<"), "PR-AUC", "TimeSeriesSplit"):
         assert section in body, f"required content missing: {section}"
-    for required in ("prepare_ml_report", "inspect_report_artifacts", "compose_ml_dashboard", "inspection_ref", "view_ids", "view_narratives", "data_observation", "visual_observation", "ask-o11y-report-synthesis-v1", "不得套用固定分析流程", "一次整份报告 synthesis"):
+    for required in ("prepare_ml_report", "inspect_report_artifacts", "compose_ml_dashboard", "inspection_ref", "view_ids", "view_narratives", "data_observation", "visual_observation", "thesis_evidence", "narrative_blocks", "normalized operational summary", "ask-o11y-report-synthesis-v1", "不得套用固定分析流程", "一次整份报告 synthesis"):
         assert required in body, f"dynamic report synthesis advisory missing: {required}"
     for required in ("calibrated_probabilities", "CatBoost", "受控 challenger"):
         assert required in body, f"P0/P1 advisory missing: {required}"

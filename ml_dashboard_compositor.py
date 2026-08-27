@@ -36,11 +36,29 @@ def format_fact(fact: dict[str, Any], value_format: str) -> str:
     raise ValueError("unsupported evidence format")
 
 
+def _format_evidence(items: list[dict[str, Any]], catalog: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {
+            "fact_ref": item["fact_ref"],
+            "label": item.get("label") or catalog[item["fact_ref"]]["label"],
+            "display": format_fact(catalog[item["fact_ref"]], item["format"]),
+        }
+        for item in items
+    ]
+
+
+def _evidence_html(evidence: list[dict[str, str]]) -> str:
+    return "".join(
+        f'<span style="display:inline-block;margin:4px 8px 4px 0;padding:4px 8px;border:1px solid currentColor;border-radius:4px">{html.escape(item["label"])}: <strong>{html.escape(item["display"])}</strong></span>'
+        for item in evidence
+    )
+
+
 def _narrative(panel: dict[str, Any], catalog: dict[str, dict[str, Any]]) -> dict[str, Any]:
     evidence = [
         {
             "fact_ref": item["fact_ref"],
-            "label": catalog[item["fact_ref"]]["label"],
+            "label": item.get("label") or catalog[item["fact_ref"]]["label"],
             "display": format_fact(catalog[item["fact_ref"]], item["format"]),
         }
         for item in panel["evidence"]
@@ -64,7 +82,7 @@ def _view_narratives(panel: dict[str, Any], catalog: dict[str, dict[str, Any]]) 
             "evidence": [
                 {
                     "fact_ref": evidence["fact_ref"],
-                    "label": catalog[evidence["fact_ref"]]["label"],
+                    "label": evidence.get("label") or catalog[evidence["fact_ref"]]["label"],
                     "display": format_fact(catalog[evidence["fact_ref"]], evidence["format"]),
                 }
                 for evidence in item["evidence"]
@@ -203,30 +221,39 @@ def compose_dashboard(
     catalog = ml_report_contract.build_fact_catalog(manifest)
     if not isinstance(uid, str) or not uid or not isinstance(title, str) or not title:
         raise ValueError("dashboard uid and title are required")
+    thesis_evidence = _format_evidence(validated["thesis_evidence"], catalog)
     panels: list[dict[str, Any]] = [{
         "id": 1,
         "type": "text",
         "title": validated["report_title"],
         "askO11yReportThesis": validated["thesis"],
-        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
-        "options": {"mode": "markdown", "content": validated["thesis"]},
+        "askO11yThesisEvidence": thesis_evidence,
+        "gridPos": {"h": 7, "w": 24, "x": 0, "y": 0},
+        "options": {"mode": "html", "content": f'<div style="padding:8px 12px"><h2>{html.escape(validated["report_title"])}</h2><p>{html.escape(validated["thesis"])}</p><div>{_evidence_html(thesis_evidence)}</div></div>'},
     }]
     next_id = 2
-    y = 4
+    y = 7
     for section in validated["sections"]:
         row_panel = {
             "id": next_id, "type": "row", "title": section["title"], "collapsed": section["collapsed"],
-            "askO11ySectionId": section["section_id"], "gridPos": {"h": 1, "w": 24, "x": 0, "y": y},
+            "askO11ySectionId": section["section_id"], "askO11ySectionPurpose": section["purpose"],
+            "gridPos": {"h": 1, "w": 24, "x": 0, "y": y},
         }
         next_id += 1
         y += 1
-        section_panels: list[dict[str, Any]] = [{
-            "id": next_id, "type": "text", "title": section["title"],
-            "gridPos": {"h": 3, "w": 24, "x": 0, "y": 0 if section["collapsed"] else y},
-            "options": {"mode": "markdown", "content": section["purpose"]},
-        }]
-        next_id += 1
-        evidence_layouts, section_end = _layouts(section["panels"], outputs, 3 if section["collapsed"] else y + 3)
+        section_panels: list[dict[str, Any]] = []
+        block_start = 0 if section["collapsed"] else y
+        for block in section["narrative_blocks"]:
+            block_evidence = _format_evidence(block["evidence"], catalog)
+            section_panels.append({
+                "id": next_id, "type": "text", "title": block["title"],
+                "askO11yNarrativeBlock": {**block, "evidence": block_evidence},
+                "gridPos": {"h": 4, "w": 24, "x": 0, "y": block_start},
+                "options": {"mode": "html", "content": f'<div style="padding:8px 12px"><h3>{html.escape(block["title"])}</h3><p>{html.escape(block["body"])}</p><div>{_evidence_html(block_evidence)}</div></div>'},
+            })
+            next_id += 1
+            block_start += 4
+        evidence_layouts, section_end = _layouts(section["panels"], outputs, block_start)
         for item, grid_pos in zip(section["panels"], evidence_layouts, strict=True):
             artifact_id = item["artifact_id"]
             if artifact_id not in outputs or "png_index" not in outputs[artifact_id]:
@@ -248,5 +275,6 @@ def compose_dashboard(
         "schemaVersion": 41,
         "version": 0,
         "refresh": "",
+        "timepicker": {"hidden": True},
         "panels": panels,
     }

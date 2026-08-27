@@ -727,6 +727,15 @@ def compose_ml_template(plan: dict[str, Any], contract: dict[str, Any], seed: in
         raise WorkflowContractError("split test_fraction is invalid") from exc
     imbalance = contract.get("class_imbalance_strategy")
     cost_matrix = contract.get("cost_matrix")
+    cost_approved = contract.get("cost_matrix_approved", False)
+    if not isinstance(cost_approved, bool) or (cost_approved and not isinstance(cost_matrix, dict)):
+        raise WorkflowContractError("cost_matrix_approved requires an explicit cost matrix")
+    try:
+        reporting_denominator = int(contract.get("reporting_denominator", 1000))
+    except (TypeError, ValueError) as exc:
+        raise WorkflowContractError("reporting_denominator is invalid") from exc
+    if not 1 <= reporting_denominator <= 1_000_000:
+        raise WorkflowContractError("reporting_denominator is outside bounds")
     minimum_recall = contract.get("minimum_recall")
     template = f'''import json
 from pathlib import Path
@@ -752,6 +761,8 @@ SNAPSHOT_ID = {str(ontology.get("snapshot_id") or "")!r}
 PLAN_SHA = {str(plan.get("plan_sha256") or "")!r}
 MINIMUM = {minimum!r}
 COST_MATRIX = {cost_matrix!r}
+COST_APPROVED = {cost_approved!r}
+REPORTING_DENOMINATOR = {reporting_denominator}
 MIN_RECALL = {minimum_recall!r}
 PURPOSE = {purpose!r}
 CONCLUSION = {conclusion!r}
@@ -798,15 +809,15 @@ manifest = build_manifest(
     purpose=PURPOSE,
     conclusion=CONCLUSION,
     identity={{"run_id": "ml-contract", "dataset_id": DATASET_ID, "ontology_snapshot_id": SNAPSHOT_ID, "ontology_sha256": SNAPSHOT_SHA, "contract_sha256": PLAN_SHA, "seed": SEED}},
-    objective={{"target": TARGET, "task_kind": "binary_classification", "primary_metric": OBJECTIVE, "positive_class": POSITIVE, "threshold": result["operating_threshold"], "threshold_cost_approved": bool(COST_MATRIX), "cost_matrix": COST_MATRIX}},
-    data={{"rows": int(len(work)), "features": len(FEATURES), "train_rows": int(len(X_train)), "holdout_rows": int(len(X_hold)), "split_kind": "stratified_holdout", "excluded_fields": [{{"name": name, "reason": "未納入模型特徵"}} for name in df.columns if name not in FEATURES and name != TARGET]}},
+    objective={{"target": TARGET, "task_kind": "binary_classification", "primary_metric": OBJECTIVE, "positive_class": POSITIVE, "threshold": result["operating_threshold"], "threshold_cost_approved": COST_APPROVED, "cost_matrix": COST_MATRIX, "normalization_denominator": REPORTING_DENOMINATOR}},
+    data={{"rows": int(len(work)), "features": len(FEATURES), "train_rows": int(len(X_train)), "holdout_rows": int(len(X_hold)), "split_kind": "stratified_holdout", "minority_rate": positive_rate, "excluded_fields": [{{"name": name, "reason": "未納入模型特徵"}} for name in df.columns if name not in FEATURES and name != TARGET]}},
     process={{"model_family": KIND, "search_budget": BUDGET, "completed_trials": BUDGET, "cv_folds": 5, "preprocessing_fit_scope": "training_only", "calibration_method": "isotonic", "best_params": result["best_params"]}},
     baseline_metrics={{"accuracy": baseline_accuracy}},
     selected_metrics=result["metrics"],
     guards={{**result["guards"], "verdict": result["verdict"]}},
     trials=result["trials"],
     features=[{{"name": item["name"], "importance": item["importance"], "explanation": item["name"] + " 是模型參考的資料；重要不代表因果"}} for item in result["top_features"]],
-    limitations=["觀察性資料，不能解讀為因果。", "營運門檻尚未核准，不能直接部署。"],
+    limitations=["觀察性資料，不能解讀為因果。"] + ([] if COST_APPROVED else ["成本矩陣與營運門檻尚未獲業務核准，不能直接部署。"]),
 )
 manifest["operating_scenarios"] = result["operating_scenarios"]
 render_assets(manifest, Path("/tmp/ml-presentation"), y_true=y_hold.tolist(), probabilities=probs, emit_figure=emit, frame=work[FEATURES + [TARGET]], target=TARGET, fields_view=FIELDS_VIEW, evaluation_frame=X_hold, target_values=y.tolist())

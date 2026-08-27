@@ -73,7 +73,7 @@ def main() -> int:
         purpose="預測 Telco 客戶流失；先由 ontology 檢視資料形狀、集中性與相關性。",
         conclusion="資料地圖與模型驗證均已產出；營運前仍須確認 3:1 漏判成本假設。",
         identity={"run_id": "telco-data-atlas-e2e", "dataset_id": "telco", "ontology_snapshot_id": "telco-e2e", "ontology_sha256": "a" * 64, "contract_sha256": "b" * 64, "seed": SEED},
-        objective={"target": target, "task_kind": "binary_classification", "primary_metric": "pr_auc", "positive_class": 1, "threshold": result["operating_threshold"], "threshold_cost_approved": True, "cost_matrix": {"false_negative": 3.0, "false_positive": 1.0}},
+        objective={"target": target, "task_kind": "binary_classification", "primary_metric": "pr_auc", "positive_class": 1, "threshold": result["operating_threshold"], "threshold_cost_approved": False, "cost_matrix": {"false_negative": 3.0, "false_positive": 1.0}, "normalization_denominator": 1000},
         data={"rows": len(data), "features": len(features), "train_rows": len(x_train), "holdout_rows": len(x_hold), "split_kind": "stratified_holdout", "minority_rate": round(number(y.mean(), "minority rate"), 4), "excluded_fields": [{"name": name, "reason": "ontology forbidden"} for name in sorted(excluded - {target})]},
         process={"model_family": "xgboost", "search_budget": 2, "completed_trials": 2, "cv_folds": 3, "preprocessing_fit_scope": "training_only", "calibration_method": "isotonic", "best_params": result["best_params"]},
         baseline_metrics={"accuracy": baseline_accuracy},

@@ -30,7 +30,8 @@ def fixture(execution_ref: str) -> dict:
     manifest = {"format": "fixture", "metrics": {"signal": 0.42}, "artifacts": [{"name": "chart.png", "caption": "x", "alt_text": "x"}]}
     synthesis = {
         "format": "ask-o11y-report-synthesis-v1", "report_title": "动态报告", "thesis": "证据支持当前解释，行动前仍需验证。",
-        "sections": [{"section_id": "arbitrary", "title": "动态结构", "purpose": "回答本次资料提出的问题。", "collapsed": False, "panels": [{
+        "thesis_evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}],
+        "sections": [{"section_id": "arbitrary", "title": "动态结构", "purpose": "回答本次资料提出的问题。", "collapsed": False, "narrative_blocks": [], "panels": [{
             "artifact_id": "chart", "view_ids": ["view-1"],
             "view_narratives": [{"view_id": "view-1", "headline": "此视图呈现主要证据", "data_observation": "资料模型显示明确结构。", "visual_observation": "图形呈现清楚分层。", "interpretation": "这会影响判断重点。", "limitation": "目前不能建立因果结论。", "next_step": "使用额外资料验证。", "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}]}],
             "headline": "主要证据呈现明显结构", "observation": "本图与完整报告事实一致。",

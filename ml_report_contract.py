@@ -114,8 +114,10 @@ def _validate_evidence(evidence: Any, catalog: dict[str, dict[str, Any]], where:
         raise ValueError(f"{where} evidence is outside bounds")
     seen_facts = set()
     for evidence_item in evidence:
-        if not isinstance(evidence_item, dict) or set(evidence_item) != {"fact_ref", "format"}:
+        if not isinstance(evidence_item, dict) or set(evidence_item) not in ({"fact_ref", "format"}, {"fact_ref", "format", "label"}):
             raise ValueError(f"{where} evidence shape is invalid")
+        if "label" in evidence_item:
+            _safe_text(evidence_item["label"], f"{where} evidence label")
         fact_ref = evidence_item.get("fact_ref")
         if not isinstance(fact_ref, str) or fact_ref not in catalog:
             raise ValueError(f"{where} references unknown fact")
@@ -126,22 +128,23 @@ def _validate_evidence(evidence: Any, catalog: dict[str, dict[str, Any]], where:
 
 def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any]) -> dict[str, Any]:
     """Validate LLM-authored flow/content against deterministic artifacts and facts."""
-    if not isinstance(synthesis, dict) or set(synthesis) != {"format", "report_title", "thesis", "sections"}:
+    if not isinstance(synthesis, dict) or set(synthesis) != {"format", "report_title", "thesis", "thesis_evidence", "sections"}:
         raise ValueError("report synthesis shape is invalid")
     if synthesis.get("format") != REPORT_FORMAT:
         raise ValueError("report synthesis format is invalid")
     _safe_text(synthesis.get("report_title"), "report_title")
     _safe_text(synthesis.get("thesis"), "thesis")
+    catalog = build_fact_catalog(manifest)
+    _validate_evidence(synthesis.get("thesis_evidence"), catalog, "thesis")
     sections = synthesis.get("sections")
     if not isinstance(sections, list) or not 1 <= len(sections) <= MAX_SECTIONS:
         raise ValueError("report synthesis sections are outside bounds")
-    catalog = build_fact_catalog(manifest)
     artifacts = _artifact_ids(manifest)
     section_ids: set[str] = set()
     total_panels = 0
     for section_index, section in enumerate(sections):
         where = f"sections[{section_index}]"
-        if not isinstance(section, dict) or set(section) != {"section_id", "title", "purpose", "collapsed", "panels"}:
+        if not isinstance(section, dict) or set(section) != {"section_id", "title", "purpose", "collapsed", "narrative_blocks", "panels"}:
             raise ValueError(f"{where} shape is invalid")
         section_id = _safe_text(section.get("section_id"), f"{where}.section_id", identifier=True)
         if section_id in section_ids:
@@ -151,6 +154,23 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
         _safe_text(section.get("purpose"), f"{where}.purpose")
         if not isinstance(section.get("collapsed"), bool):
             raise ValueError(f"{where}.collapsed must be boolean")
+        narrative_blocks = section.get("narrative_blocks")
+        if not isinstance(narrative_blocks, list) or len(narrative_blocks) > 8:
+            raise ValueError(f"{where}.narrative_blocks are outside bounds")
+        block_ids = set()
+        for block_index, block in enumerate(narrative_blocks):
+            block_where = f"{where}.narrative_blocks[{block_index}]"
+            if not isinstance(block, dict) or set(block) != {"block_id", "title", "body", "evidence", "priority"}:
+                raise ValueError(f"{block_where} shape is invalid")
+            block_id = _safe_text(block.get("block_id"), f"{block_where}.block_id", identifier=True)
+            if block_id in block_ids:
+                raise ValueError(f"{where} narrative block ids must be unique")
+            block_ids.add(block_id)
+            _safe_text(block.get("title"), f"{block_where}.title")
+            _safe_text(block.get("body"), f"{block_where}.body")
+            _validate_evidence(block.get("evidence"), catalog, block_where)
+            if block.get("priority") not in PRIORITIES:
+                raise ValueError(f"{block_where}.priority is invalid")
         panels = section.get("panels")
         if not isinstance(panels, list):
             raise ValueError(f"{where}.panels must be an array")

@@ -177,6 +177,9 @@ Skill 只规定安全工具边界：先取得完整 bounded report context，再
 - Model-first per-view synthesis 已验证：当前真实报告的八个 artifacts／十七个 selected views 各自有独立 data observation、visual observation、interpretation、limitation、next step 与专属 evidence；不再以一份 artifact caption 复用所有 subpanels。Bridge 依 inspection mode 验证：vision view 必须有 visual observation，spec-only 必须为 null。
 - Single-view 去重：只有一个 selected view 时，UI 只显示 view narrative，不重复渲染 panel-level summary；多 view 时才显示跨-view panel 总结。静态 PNG 与 Plotly plugin 使用相同规则。
 - Live MCP 实测：vision batch 返回 text + 八个 image blocks；spec batch 返回六图完整 JSON/spec 且不声称 vision；两份 inspection receipts 覆盖十四图后 compose 成功，缺覆盖 fail closed。
+- Executive/closing evidence：synthesis 新增 `thesis_evidence` 与任意 evidence-bound `narrative_blocks`；当前顶部以每单位 actual/TP/FN/FP/TN/action workload 与基准改善说明执行结果，最终 adoption judgement 绑定 recall/precision/错误量/泛化/营运状态。
+- Deterministic classification manifest 新增 `operational_summary`（可配置 normalization denominator）；成本矩阵 provided 与 business approved 分离，默认未核准，当前状态正确显示营运采用待确认。
+- 当前 LLM 将正文精简为决策相关 views，并动态加入默认 collapsed technical evidence section（资料切分、模型／调参、校正／门槛、稳定性、完整诊断图）；production 不固定该 section 或图清单。
 
 ## 验收
 
