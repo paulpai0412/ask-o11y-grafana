@@ -19,14 +19,14 @@ def main() -> int:
 
     source = (PANEL / "src/module.tsx").read_text()
     assert "Plotly.react" in source and "fallbackUrl" in source and "narrative" in source, source
-    for required in ("useTheme2", "ResizeObserver", "Plots.resize", "applyGrafanaTheme", "splitFigureViews", "selectedViewIds", "viewNarratives", "data_observation", "visual_observation", "gridTemplateColumns"):
+    for required in ("useTheme2", "ResizeObserver", "Plots.resize", "applyGrafanaTheme", "splitFigureViews", "selectedViewIds", "viewNarratives", "data_observation", "visual_observation", "gridTemplateColumns", "shouldShowPanelNarrative"):
         assert required in source, f"missing Grafana-responsive behavior: {required}"
     assert "options.figure.layout, width, height" not in source, "panel must not force a fixed Plotly canvas"
     assert "eval(" not in source and "new Function" not in source, "unsafe dynamic code in panel source"
 
     render_mode = PANEL / "src/renderMode.mjs"
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", f"import{{resolveRenderMode as r}}from'{render_mode.as_uri()}';if(r({{figure:{{data:[],layout:{{}}}}}})!=='plotly'||r({{fallbackUrl:'x'}})!=='fallback')process.exit(2)"],
+        ["node", "--input-type=module", "-e", f"import{{resolveRenderMode as r,shouldShowPanelNarrative as n}}from'{render_mode.as_uri()}';if(r({{figure:{{data:[],layout:{{}}}}}})!=='plotly'||r({{fallbackUrl:'x'}})!=='fallback'||n(1)!==false||n(2)!==true)process.exit(2)"],
         check=False, capture_output=True, text=True,
     )
     if result.returncode:

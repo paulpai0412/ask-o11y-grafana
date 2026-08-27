@@ -3,4 +3,8 @@ export type RenderModeOptions = {
   fallbackUrl?: string;
 };
 
-export function resolveRenderMode(options: RenderModeOptions): 'plotly' | 'fallback';
+export function shouldShowPanelNarrative(viewCount: number): boolean;
+
+export function resolveRenderMode(
+  options: RenderModeOptions,
+): "plotly" | "fallback";

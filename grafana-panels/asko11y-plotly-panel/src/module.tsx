@@ -7,7 +7,7 @@ import {
   type PlotlyView,
   type PlotlyViewSpec,
 } from "./figureViews.mjs";
-import { resolveRenderMode } from "./renderMode.mjs";
+import { resolveRenderMode, shouldShowPanelNarrative } from "./renderMode.mjs";
 import { applyGrafanaTheme } from "./theme.mjs";
 
 type PlotlyFigure = {
@@ -105,16 +105,51 @@ function ViewNarrativeBlock({ narrative }: { narrative?: ViewNarrative }) {
     return null;
   }
   return (
-    <div style={{ borderTop: '1px solid currentColor', marginTop: 8, paddingTop: 8, lineHeight: 1.4 }}>
+    <div
+      style={{
+        borderTop: "1px solid currentColor",
+        marginTop: 8,
+        paddingTop: 8,
+        lineHeight: 1.4,
+      }}
+    >
       <strong>{narrative.headline}</strong>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
-        {narrative.evidence.map((item) => <span key={item.fact_ref} style={{ border: '1px solid currentColor', borderRadius: 4, padding: '2px 6px' }}>{item.label}: <b>{item.display}</b></span>)}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+        {narrative.evidence.map((item) => (
+          <span
+            key={item.fact_ref}
+            style={{
+              border: "1px solid currentColor",
+              borderRadius: 4,
+              padding: "2px 6px",
+            }}
+          >
+            {item.label}: <b>{item.display}</b>
+          </span>
+        ))}
       </div>
-      <div style={{ marginTop: 6 }}><b>资料：</b>{narrative.data_observation}</div>
-      {narrative.visual_observation ? <div style={{ marginTop: 4 }}><b>视觉：</b>{narrative.visual_observation}</div> : null}
-      <div style={{ marginTop: 4 }}><b>解读：</b>{narrative.interpretation}</div>
-      <div style={{ marginTop: 4 }}><b>限制：</b>{narrative.limitation}</div>
-      <div style={{ marginTop: 4 }}><b>下一步：</b>{narrative.next_step}</div>
+      <div style={{ marginTop: 6 }}>
+        <b>资料：</b>
+        {narrative.data_observation}
+      </div>
+      {narrative.visual_observation ? (
+        <div style={{ marginTop: 4 }}>
+          <b>视觉：</b>
+          {narrative.visual_observation}
+        </div>
+      ) : null}
+      <div style={{ marginTop: 4 }}>
+        <b>解读：</b>
+        {narrative.interpretation}
+      </div>
+      <div style={{ marginTop: 4 }}>
+        <b>限制：</b>
+        {narrative.limitation}
+      </div>
+      <div style={{ marginTop: 4 }}>
+        <b>下一步：</b>
+        {narrative.next_step}
+      </div>
     </div>
   );
 }
@@ -125,13 +160,14 @@ function Fallback({ options }: { options: Options }) {
       <div style={{ padding: 16 }}>互动图无法显示，且没有 PNG fallback。</div>
     );
   }
+  const showPanelNarrative = shouldShowPanelNarrative(options.selectedViewIds?.length ?? options.viewSpecs?.length ?? 1);
   return (
     <figure
       style={{
         margin: 0,
         height: "100%",
         display: "grid",
-        gridTemplateRows: options.narrative
+        gridTemplateRows: showPanelNarrative && options.narrative
           ? "minmax(220px, 3fr) minmax(140px, 2fr)"
           : "1fr",
         overflow: "hidden",
@@ -142,7 +178,7 @@ function Fallback({ options }: { options: Options }) {
         alt={options.alt || "分析图表"}
         style={{ width: "100%", height: "100%", objectFit: "contain" }}
       />
-      <NarrativeBlock narrative={options.narrative} />
+      {showPanelNarrative ? <NarrativeBlock narrative={options.narrative} /> : null}
     </figure>
   );
 }
@@ -221,12 +257,13 @@ function PlotlyPanel({ options }: { options: Options }) {
   if (mode === "fallback" || views.length === 0) {
     return <Fallback options={options} />;
   }
+  const showPanelNarrative = shouldShowPanelNarrative(views.length);
   return (
     <div
       style={{
         height: "100%",
         display: "grid",
-        gridTemplateRows: options.narrative
+        gridTemplateRows: showPanelNarrative && options.narrative
           ? "minmax(260px, 3fr) minmax(140px, 2fr)"
           : "1fr",
         overflow: "hidden",
@@ -265,7 +302,7 @@ function PlotlyPanel({ options }: { options: Options }) {
           </section>
         ))}
       </div>
-      <NarrativeBlock narrative={options.narrative} />
+      {showPanelNarrative ? <NarrativeBlock narrative={options.narrative} /> : null}
     </div>
   );
 }

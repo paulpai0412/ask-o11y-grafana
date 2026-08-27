@@ -185,7 +185,8 @@ def _evidence_panel(
             }],
         }
     image = f'<img src="{asset_placeholder}" alt="{html.escape(panel["headline"])}" style="width:100%;max-height:65%;object-fit:contain">'
-    return {**base, "type": "text", "options": {"mode": "html", "content": image + _view_narratives_html(view_narratives) + _narrative_html(narrative)}}
+    panel_summary = _narrative_html(narrative) if len(view_narratives) > 1 else ""
+    return {**base, "type": "text", "options": {"mode": "html", "content": image + _view_narratives_html(view_narratives) + panel_summary}}
 
 
 def compose_dashboard(

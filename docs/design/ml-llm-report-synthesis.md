@@ -175,6 +175,7 @@ Skill 只规定安全工具边界：先取得完整 bounded report context，再
 - 真实 LLM synthesis：读取完整 report context 与全部图，动态选择四个 section、八个 artifacts；通过 evidence validator 后写入 UID `dynamic-llm-report-e2e`。
 - Chromium 在 dark theme 与两种 viewport 通过：图表、数值 evidence、观察／解读／跨图关系／限制／下一步同 panel 可见，无 page/console error。Compositor 显示顶层 LLM thesis；LLM 亦可动态加入无图 conclusion section。
 - Model-first per-view synthesis 已验证：当前真实报告的八个 artifacts／十七个 selected views 各自有独立 data observation、visual observation、interpretation、limitation、next step 与专属 evidence；不再以一份 artifact caption 复用所有 subpanels。Bridge 依 inspection mode 验证：vision view 必须有 visual observation，spec-only 必须为 null。
+- Single-view 去重：只有一个 selected view 时，UI 只显示 view narrative，不重复渲染 panel-level summary；多 view 时才显示跨-view panel 总结。静态 PNG 与 Plotly plugin 使用相同规则。
 - Live MCP 实测：vision batch 返回 text + 八个 image blocks；spec batch 返回六图完整 JSON/spec 且不声称 vision；两份 inspection receipts 覆盖十四图后 compose 成功，缺覆盖 fail closed。
 
 ## 验收

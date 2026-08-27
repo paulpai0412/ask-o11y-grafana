@@ -70,13 +70,14 @@ def main() -> int:
     ]
     shapes = []
     for index, (manifest, report) in enumerate(fixtures):
-        outputs = {
-            artifact_id: {
-                "png_index": slot * 2, "plotly_index": slot * 2 + 1,
-                **({"recommended_width": "full", "min_height": 16} if index == 0 and slot == 0 else {}),
-            }
-            for slot, artifact_id in enumerate(item["name"].removesuffix(".png") for item in manifest["artifacts"])
-        }
+        outputs = {}
+        for slot, artifact_id in enumerate(item["name"].removesuffix(".png") for item in manifest["artifacts"]):
+            output: dict[str, Any] = {"png_index": slot * 2}
+            if index != 1:
+                output["plotly_index"] = slot * 2 + 1
+            if index == 0 and slot == 0:
+                output.update({"recommended_width": "full", "min_height": 16})
+            outputs[artifact_id] = output
         dashboard = compositor.compose_dashboard(
             manifest, report, execution_ref=f"artifact://run-{index}/sandbox-execution",
             outputs=outputs, uid=f"fixture-{index}", title=f"Fixture {index}",
@@ -90,12 +91,19 @@ def main() -> int:
             flattened.append(item); flattened.extend(item.get("panels") or [])
         evidence_panels = [item for item in flattened if item.get("askO11yArtifactId")]
         assert all(item.get("askO11yNarrative", {}).get("evidence") for item in evidence_panels), evidence_panels
-        assert all((item.get("options") or {}).get("selectedViewIds") == ["view-1"] for item in evidence_panels), evidence_panels
-        assert all((item.get("options") or {}).get("viewNarratives", [{}])[0].get("data_observation") == "资料模型显示群组之间存在明显差异。" for item in evidence_panels), evidence_panels
+        plotly_panels = [item for item in evidence_panels if item.get("type") == "asko11y-plotly-panel"]
+        assert all((item.get("options") or {}).get("selectedViewIds") == ["view-1"] for item in plotly_panels), plotly_panels
+        assert all(item.get("askO11yViewNarratives", [{}])[0].get("data_observation") == "资料模型显示群组之间存在明显差异。" for item in evidence_panels), evidence_panels
         if index == 0:
             promoted = next(item for item in evidence_panels if item["askO11yArtifactId"] == "class-view")
             assert promoted["gridPos"]["w"] == 24 and promoted["gridPos"]["h"] >= 16, promoted["gridPos"]
-        assert "$asset_url_" in str(dashboard) and "$plotly_" in str(dashboard), dashboard
+        if index == 1:
+            content = evidence_panels[0]["options"]["content"]
+            assert "资料模型显示群组之间存在明显差异。" in content, content
+            assert "应与其他证据和资料限制一起阅读。" not in content, "single-view panel repeated the panel-level narrative"
+        assert "$asset_url_" in str(dashboard), dashboard
+        if any("plotly_index" in output for output in outputs.values()):
+            assert "$plotly_" in str(dashboard), dashboard
         shapes.append((len(rows), len(evidence_panels)))
     if shapes != [(2, 2), (1, 1), (3, 2)]:
         raise AssertionError(f"unexpected dynamic dashboard shapes: {shapes}")
