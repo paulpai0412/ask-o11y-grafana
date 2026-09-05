@@ -3,5 +3,8 @@
 !capture.py
 !ml_preprocessing.py
 !ml_autoresearch.py
+!ml_execution.py
+!ml_regression.py
 !ml_presentation.py
 !ml_plotly_contract.py
+!data_profile.py

@@ -13,8 +13,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from ontology_contract import optimization_direction
+
 ROOT = Path(__file__).resolve().parent
-MAX_SAMPLE_ROWS = 1000
 MISSING_TOKENS = {"", "?", "na", "n/a", "null", "none"}
 LEAKAGE_NAME_TOKENS = ("satisfaction", "churn reason", "churn category", "churn score", "reason", "feedback", "rating", "survey", "cancellation")
 SENSITIVE_NAME_TOKENS = ("gender", "sex", "race", "ethnic", "religion", "disab")
@@ -49,60 +50,35 @@ def _column_samples(csv_path: Path) -> tuple[list[str], list[list[str]], int]:
         rows_read = 0
         for row in reader:
             if len(row) != len(headers):
-                continue
+                raise ValueError("uploaded CSV has inconsistent row width")
             for index, value in enumerate(row):
                 samples[index].append(value)
             rows_read += 1
-            if rows_read >= MAX_SAMPLE_ROWS:
-                break
     return headers, samples, rows_read
 
 
 def _analysis_roles(headers: list[str], samples: list[list[str]], rows_read: int) -> list[str]:
-    """Deterministic roles: identifier / temporal / target_candidate / constant / feature."""
+    """Observed types and conservative risk flags; never choose a target by column order."""
     builder = _load_builder()
-    n = max(rows_read, 1)
     roles: list[str] = []
-    categorical_candidates: list[int] = []
     for header, values in zip(headers, samples, strict=True):
         present = [value for value in values if not _is_missing(value)]
         distinct = len(set(present))
         scalar_type = builder.infer_scalar(present)
-        base_kind = builder.semantic_kind(header, scalar_type)
         lowered = header.casefold()
         if any(token in lowered for token in LEAKAGE_NAME_TOKENS):
             roles.append("leakage_risk")  # post-outcome signals; deterministic exclusion
             continue
+        if not present or distinct <= 1:
+            roles.append("constant")
+            continue
         if any(token in lowered for token in SENSITIVE_NAME_TOKENS):
             roles.append("sensitive")  # protected attributes; governance approval required
             continue
-        if base_kind == "temporal":
+        if scalar_type in {"date", "datetime"}:
             roles.append("temporal")
             continue
-        if lowered == "id" or lowered.endswith("_id"):
-            roles.append("identifier")
-            continue
-        if any(token in lowered for token in ("weight", "wgt")):
-            roles.append("identifier")  # sampling/frequency weights are not predictive features
-            continue
-        if scalar_type in {"integer", "number"} and present:
-            # ponytail: magnitude heuristic — all-unique large-magnitude numerics are
-            # ids/weights/serials; small-valued measures (age, temp) stay features.
-            # Revisit with column-name embedding if false positives appear.
-            try:
-                magnitudes = [abs(float(value)) for value in present]
-            except ValueError:
-                magnitudes = []
-            if magnitudes and len(set(present)) / max(len(present), 1) >= 0.95 and max(magnitudes) >= 1000:
-                roles.append("identifier")
-                continue
-        if distinct <= 20:
-            categorical_candidates.append(len(roles))
-            roles.append("feature")  # provisional; last one below becomes target_candidate
-            continue
         roles.append("feature")
-    if categorical_candidates:
-        roles[categorical_candidates[-1]] = "target_candidate"
     return roles
 
 
@@ -118,14 +94,25 @@ def build_hints(csv_path: Path, dataset_id: str, org_id: str, user_id: str) -> d
     for header, values, role in zip(headers, samples, roles, strict=True):
         present = [value.strip() for value in values if not _is_missing(value)]
         missing = len(values) - len(present)
+        data_type = builder.infer_scalar(present)
         field = {
             "physical_name": header,
             "analysis_role": role,
+            "data_type": data_type,
+            "distinct_count": len(set(present)),
             "missing_rate": round(missing / max(len(values), 1), 4),
             "sampled_rows": len(values),
         }
+        if data_type in {"integer", "number"} and present:
+            try:
+                numeric = [float(value) for value in present]
+                field.update({"observed_min": min(numeric), "observed_max": max(numeric)})
+            except ValueError:
+                pass
         counts = Counter(present)
-        if role == "target_candidate" and len(counts) == 2:
+        if data_type not in {"integer", "number", "date", "datetime"}:
+            field["observed_values"] = sorted(counts)[:32]
+        if len(counts) == 2:
             field["minority_rate"] = round(min(counts.values()) / max(sum(counts.values()), 1), 4)
         fields.append(field)
     return {
@@ -151,15 +138,177 @@ def annotate_upload(upload_dir: Path, dataset_id: str, org_id: str, user_id: str
         return None
 
 
+def _validate_regression_contract(hints: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    codes: list[str] = []
+    fields = {field["physical_name"]: field for field in hints.get("fields", [])}
+    target_name = contract.get("target")
+    target = fields.get(target_name)
+    if target is None:
+        codes.append("TARGET_NOT_APPROVED")
+    elif _as_float(target.get("missing_rate"), 0.0) >= 1.0:
+        codes.append("TARGET_ALL_MISSING")
+    elif _as_float(target.get("distinct_count"), 0.0) < 2:
+        codes.append("TARGET_CONSTANT")
+    elif target.get("data_type") not in {"integer", "number"}:
+        codes.append("TARGET_NOT_CONTINUOUS")
+
+    def field_list(name: str) -> list[str]:
+        value = contract.get(name)
+        if not isinstance(value, list) or len(set(map(str, value))) != len(value):
+            codes.append("ANALYSIS_CONTRACT_INVALID")
+            return []
+        result = [str(item) for item in value]
+        if any(item not in fields for item in result):
+            codes.append("UNKNOWN_FIELD")
+        return result
+
+    features = field_list("features")
+    controllable = field_list("controllable_fields")
+    context = field_list("context_fields")
+    forbidden = field_list("forbidden_fields")
+    raw_split = contract.get("split")
+    split_contract: dict[str, Any] = raw_split if isinstance(raw_split, dict) else {}
+    raw_population_filter = contract.get("population_filter") or {}
+    population_filter: dict[str, Any] = raw_population_filter if isinstance(raw_population_filter, dict) else {}
+    population_filter_names = set(population_filter)
+    if not isinstance(raw_population_filter, dict) or any(name not in fields for name in population_filter_names):
+        codes.append("POPULATION_FILTER_INVALID")
+    if str(target_name) in population_filter_names:
+        codes.append("POPULATION_FILTER_INVALID")
+    for name, value in population_filter.items():
+        field = fields.get(name)
+        observed_values = field.get("observed_values") if isinstance(field, dict) else None
+        if isinstance(observed_values, list) and value not in observed_values:
+            codes.append("POPULATION_FILTER_VALUE_UNSEEN")
+    filter_roles_invalid = any(fields.get(name, {}).get("analysis_role") in {"identifier", "constant", "leakage_risk", "sensitive"} for name in population_filter_names)
+    if filter_roles_invalid:
+        codes.append("POPULATION_FILTER_INVALID")
+    split_only = {name for name in (split_contract.get("time_field"), split_contract.get("group_field")) if isinstance(name, str)}
+    model_context = set(context) - split_only - population_filter_names
+    if not features or set(controllable) & set(context) or set(features) != set(controllable) | model_context:
+        codes.append("FIELD_ROLE_FORBIDDEN")
+    if target_name in features or (set(features) & set(forbidden) - population_filter_names):
+        codes.append("TARGET_PROXY_LEAKAGE")
+
+    included: list[str] = []
+    for name in features:
+        field = fields.get(name)
+        if field is None:
+            continue
+        role = field.get("analysis_role")
+        if role == "leakage_risk":
+            codes.append("LEAKAGE_FIELD_FORBIDDEN")
+        elif role == "sensitive":
+            codes.append("SENSITIVE_FIELD_FORBIDDEN")
+        elif role in {"identifier", "constant"}:
+            codes.append("FIELD_ROLE_FORBIDDEN")
+        else:
+            included.append(name)
+    for name in controllable:
+        field = fields.get(name)
+        if field is not None and (field.get("analysis_role") not in {"feature", "target_candidate"} or field.get("data_type") not in {"integer", "number"} or _as_float(field.get("distinct_count"), 0.0) < 2):
+            codes.append("CONTROLLABLE_FIELD_FORBIDDEN")
+    if any(name in features for name, field in fields.items() if field.get("analysis_role") == "leakage_risk"):
+        codes.append("LEAKAGE_FIELD_FORBIDDEN")
+
+    split = split_contract
+    if split.get("preprocessing_fit_scope") != "training_only" or split.get("kind") not in {"chronological_holdout", "grouped_holdout"}:
+        codes.append("SPLIT_POLICY_VIOLATION")
+    elif split.get("kind") == "chronological_holdout":
+        time_field = fields.get(split.get("time_field"))
+        if time_field is None or time_field.get("analysis_role") != "temporal":
+            codes.append("SPLIT_POLICY_VIOLATION")
+    else:
+        group_name = split.get("group_field")
+        if group_name not in fields or group_name == target_name or group_name in features:
+            codes.append("SPLIT_POLICY_VIOLATION")
+
+    algorithms = contract.get("algorithms")
+    supported = {"dummy", "ridge", "random_forest", "extra_trees", "hist_gradient_boosting", "catboost", "xgboost"}
+    if not isinstance(algorithms, list) or not algorithms or any(item not in supported for item in algorithms):
+        codes.append("ANALYSIS_CONTRACT_INVALID")
+    try:
+        optimization_direction(contract)
+    except ValueError:
+        codes.append("ANALYSIS_CONTRACT_INVALID")
+    if contract.get("autotune") and contract.get("objective", "mae") != "mae":
+        codes.append("ANALYSIS_CONTRACT_INVALID")
+    feature_set_count = 0
+    feature_set_ids: list[str] = []
+    raw_feature_sets = contract.get("feature_sets")
+    if raw_feature_sets is not None:
+        if not isinstance(raw_feature_sets, list) or not 1 <= len(raw_feature_sets) <= 6:
+            codes.append("ANALYSIS_CONTRACT_INVALID")
+        else:
+            seen_ids: set[str] = set()
+            for item in raw_feature_sets:
+                if not isinstance(item, dict):
+                    codes.append("ANALYSIS_CONTRACT_INVALID")
+                    continue
+                set_id = item.get("id")
+                set_features = item.get("features")
+                set_controllable = item.get("controllable_fields", [])
+                set_context = item.get("context_fields", [])
+                if not isinstance(set_id, str) or not set_id or set_id in seen_ids or not isinstance(set_features, list) or not set_features or not isinstance(set_controllable, list) or not isinstance(set_context, list):
+                    codes.append("ANALYSIS_CONTRACT_INVALID")
+                    continue
+                seen_ids.add(set_id)
+                feature_set_ids.append(set_id)
+                set_feature_names = {str(name) for name in set_features}
+                set_controllable_names = {str(name) for name in set_controllable}
+                set_context_names = {str(name) for name in set_context}
+                expected_set_features = (set_controllable_names | set_context_names) - split_only - population_filter_names
+                if len(set_feature_names) != len(set_features) or not set_feature_names <= set(features) or set_feature_names != expected_set_features or set_controllable_names & set_context_names:
+                    codes.append("FIELD_ROLE_FORBIDDEN")
+            feature_set_count = len(feature_set_ids)
+    constrained = contract.get("constrained_search")
+    if constrained is not None:
+        bounds = constrained.get("bounds") if isinstance(constrained, dict) else None
+        support_groups = constrained.get("support_group_fields", []) if isinstance(constrained, dict) else []
+        if not isinstance(constrained, dict) or not isinstance(bounds, dict) or any(name not in controllable for name in bounds) or not isinstance(support_groups, list) or any(name not in context for name in support_groups):
+            codes.append("CONSTRAINED_SEARCH_INVALID")
+        elif any(not isinstance(value, list) or len(value) != 2 or any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in value) or value[0] > value[1] for value in bounds.values()):
+            codes.append("CONSTRAINED_SEARCH_INVALID")
+        else:
+            for name, value in bounds.items():
+                field = fields[name]
+                observed_min, observed_max = field.get("observed_min"), field.get("observed_max")
+                if not isinstance(observed_min, (int, float)) or not isinstance(observed_max, (int, float)) or value[0] < observed_min or value[1] > observed_max:
+                    codes.append("CONSTRAINED_BOUNDS_OUTSIDE_SUPPORT")
+
+    excluded_roles = {"identifier", "constant", "leakage_risk", "sensitive"}
+    excluded = list(dict.fromkeys([*forbidden, *(name for name, field in fields.items() if field.get("analysis_role") in excluded_roles)]))
+    unique_codes = list(dict.fromkeys(codes))
+    target_resolution = None if target is None else {"field": target_name, "analysis_role": "target", "source": "contract", "data_type": target.get("data_type")}
+    return {
+        "conforms": not unique_codes,
+        "rejection_codes": unique_codes,
+        "failed_rules": unique_codes,
+        "included_fields": included,
+        "excluded_fields": excluded,
+        "limitations": [],
+        "field_views": list(fields.values()),
+        "target_resolution": target_resolution,
+        "population_filter": population_filter,
+        "feature_set_count": feature_set_count,
+        "feature_set_ids": feature_set_ids,
+        "snapshot": {"snapshot_id": f"candidate:{hints.get('dataset_id')}", "status": "observed"},
+    }
+
+
 def validate_analysis_contract(hints: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
     """Validate one upload ML contract against declared roles and quality policy."""
+    if contract.get("task_kind") == "regression":
+        return _validate_regression_contract(hints, contract)
     codes: list[str] = []
     fields = {field["physical_name"]: field for field in hints.get("fields", [])}
     policy = hints.get("quality_policy") or {}
     target_name = contract.get("target")
     target = fields.get(target_name)
-    if target is None or target.get("analysis_role") != "target_candidate":
+    if target is None or target.get("analysis_role") in {"sensitive", "leakage_risk", "constant"}:
         codes.append("TARGET_NOT_APPROVED")
+    elif target.get("distinct_count") != 2 or _as_float(target.get("missing_rate"), 0.0) > 0:
+        codes.append("TARGET_NOT_BINARY_OR_MISSING")
     features = contract.get("features")
     if not isinstance(features, list) or not features or len(set(features)) != len(features):
         codes.append("ANALYSIS_CONTRACT_INVALID")
@@ -171,16 +320,18 @@ def validate_analysis_contract(hints: dict[str, Any], contract: dict[str, Any]) 
             codes.append("UNKNOWN_FIELD")
             continue
         role = field.get("analysis_role")
-        if role == "leakage_risk":
+        if name == target_name:
+            codes.append("TARGET_USED_AS_FEATURE")
+        elif role == "leakage_risk":
             codes.append("LEAKAGE_FIELD_FORBIDDEN")
         elif role == "sensitive":
             codes.append("SENSITIVE_FIELD_FORBIDDEN")
-        elif role not in {"feature", "temporal"}:
+        elif role not in {"feature"}:
             codes.append("FIELD_ROLE_FORBIDDEN")
         else:
             included.append(name)
     split = contract.get("split")
-    if not isinstance(split, dict) or split.get("preprocessing_fit_scope") != "training_only":
+    if not isinstance(split, dict) or split.get("preprocessing_fit_scope") != "training_only" or split.get("kind") != "stratified_holdout" or split.get("time_field") or split.get("group_field"):
         codes.append("SPLIT_POLICY_VIOLATION")
     if contract.get("kind") not in {"catboost", "random_forest_shap", "gradient_boosting", "logistic_regression", "xgboost"}:
         codes.append("ANALYSIS_CONTRACT_INVALID")
@@ -218,7 +369,5 @@ def feature_allowlist(hints: dict[str, Any]) -> list[str]:
 
 
 def primary_target(hints: dict[str, Any]) -> str | None:
-    for field in hints["fields"]:
-        if field["analysis_role"] == "target_candidate":
-            return field["physical_name"]
+    """Observed data does not establish the user's prediction target."""
     return None

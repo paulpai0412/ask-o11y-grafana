@@ -88,6 +88,8 @@ def main() -> int:
         assert required in body, f"dynamic report synthesis advisory missing: {required}"
     for required in ("calibrated_probabilities", "CatBoost", "受控 challenger"):
         assert required in body, f"P0/P1 advisory missing: {required}"
+    for required in ("task_kind: regression", "Dummy baseline", "candidate_settings", "constrained search", "不得改寫 deterministic", "target + model features + split field", "support_group_fields must be context_fields", "bounds: {}", "user-declared continuous target", "features = controllable_fields", "nested feature sets", "same split and budget"):
+        assert required in body, f"regression advisory missing: {required}"
 
     print(f"ok: {path} ({size} bytes, frontmatter ok, advisory ok, template ok)")
     return 0

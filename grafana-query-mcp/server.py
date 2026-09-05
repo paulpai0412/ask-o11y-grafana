@@ -12,11 +12,12 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -74,7 +75,11 @@ def context_from_headers(headers) -> dict[str, str] | None:
     org = headers.get("X-Grafana-Org-Id") or headers.get("X-Org-Id")
     user = headers.get("X-Grafana-Actor-User-Id") or headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
     if org and user:
-        return {"org_id": str(org), "user_id": str(user)}
+        context = {"org_id": str(org), "user_id": str(user)}
+        session_id = headers.get("X-Grafana-Session-Id")
+        if session_id:
+            context["session_id"] = str(session_id)
+        return context
     return None
 
 def inject_header_context(msg: dict[str, Any], headers) -> dict[str, Any]:
@@ -90,9 +95,12 @@ def inject_header_context(msg: dict[str, Any], headers) -> dict[str, Any]:
     # only server-side env or transport headers may establish artifact identity.
     args.pop("context", None)
     args.pop("_server_context", None)
+    args.pop("_server_session_id", None)
     context = context_from_headers(headers)
     if context is not None:
         args["_server_context"] = context
+        if context.get("session_id"):
+            args["_server_session_id"] = context["session_id"]
     return msg
 
 def context_from_args(args: dict[str, Any]) -> dict[str, str]:
@@ -117,7 +125,7 @@ def post_grafana(path: str, body: dict[str, Any], maximum_bytes: int = MAX_RESPO
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=3600) as resp:
             raw = resp.read(maximum_bytes + 1)
             if len(raw) > maximum_bytes:
                 raise RuntimeError(f"Grafana response exceeds maximum {maximum_bytes} bytes")
@@ -135,7 +143,7 @@ def get_grafana(path: str) -> Any:
     token = base64.b64encode(f"{GRAFANA_USER}:{GRAFANA_PASSWORD}".encode()).decode()
     request = urllib.request.Request(GRAFANA_URL + path, headers={"Authorization": f"Basic {token}"})
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=3600) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:500]
@@ -211,7 +219,7 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
             fields = [{"name": field["name"], "type": field["type"], "display_name": field["name"]} for field in upload["fields"]]
             query_columns = [{"selector": field["name"], "text": field["name"], "type": "timestamp" if field["type"] == "date" else field["type"]} for field in upload["fields"]]
             query_template = {"refId": "A", "datasource": {"uid": uid, "type": live.get("type")}, "type": "csv", "source": "url", "url": signed_url, "parser": "backend", "format": "table", "url_options": {"method": "GET", "data": ""}, "csv_options": {"delimiter": ",", "skip_empty_lines": True}, "columns": query_columns}
-            metadata_artifact = {"dataset_id": dataset_id, "title": upload["filename"], "description": "Session-owned uploaded dataset", "domain_hints": ["uploaded", "csv", "excel"], "datasource_uid": uid, "datasource_type": live.get("type"), "query_kind": query_kind, "session_id": upload["session_id"], "source_format": upload.get("source_format"), "fields": fields, "minimum_rows": 1, "row_count_hint": upload["rows"], "date_range": {"all_from": "2000-01-01", "all_to": "2000-12-31"}, "query_template": query_template}
+            metadata_artifact = {"dataset_id": dataset_id, "title": upload["filename"], "description": "Session-owned uploaded dataset", "domain_hints": ["uploaded", "csv", "excel"], "datasource_uid": uid, "datasource_type": live.get("type"), "query_kind": query_kind, "session_id": upload["session_id"], "source_format": upload.get("source_format"), "fields": fields, "minimum_rows": 1, "row_count_hint": upload["rows"], "date_range": upload.get("date_range") or {"kind": "unbounded"}, "query_template": query_template}
         elif query_kind == "wferp_llm_sql" and configured is not None:
             schema_bundle = load_json(ROOT / "data-query-planner-mcp" / "metadata" / "wferp" / "schema_bundle.json")
             metadata_artifact = {
@@ -259,10 +267,12 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_frame(response: dict[str, Any], contract: dict[str, Any], ref_id: str = "A") -> dict[str, Any]:
-    result = response.get("results", {}).get(ref_id) or next(iter(response.get("results", {}).values()), None)
+    result = response.get("results", {}).get(ref_id)
     if not result:
         return {"ok": False, "errors": ["missing Grafana query result"], "frames": []}
     frames = result.get("frames") or []
+    if len(frames) > 1:
+        return {"ok": False, "errors": ["expected one complete frame, not multiple unmerged frames"], "frames": []}
     if result.get("status") != 200 or not frames:
         return {"ok": False, "errors": [f"bad Grafana result: {result.get('status')} {result.get('error')}"], "frames": frames}
     fields = [field.get("name") for field in frames[0].get("schema", {}).get("fields", [])]
@@ -278,6 +288,8 @@ def validate_frame(response: dict[str, Any], contract: dict[str, Any], ref_id: s
     if not fields or not isinstance(values, list) or len(values) != len(fields):
         errors.append("Grafana DataFrame must contain one values column per field")
         return {"ok": False, "errors": errors, "field_names": fields, "row_count": 0, "minimum_rows": 0, "frames": frames}
+    if any(not isinstance(column, list) for column in values):
+        return {"ok": False, "errors": ["frame columns must be arrays"], "frames": []}
     lengths = [len(column) for column in values]
     if len(set(lengths)) != 1:
         errors.append("Grafana DataFrame value columns must have equal lengths")
@@ -287,6 +299,9 @@ def validate_frame(response: dict[str, Any], contract: dict[str, Any], ref_id: s
         errors.append(f"field_count {len(fields)} exceeds maximum_fields {maximum_fields}")
     if row_count > maximum_rows:
         errors.append(f"row_count {row_count} exceeds maximum_rows {maximum_rows}")
+    expected_rows = contract.get("expected_rows")
+    if expected_rows is not None and (isinstance(expected_rows, bool) or not isinstance(expected_rows, int) or row_count != expected_rows):
+        errors.append(f"row_count {row_count} does not match complete source rows {expected_rows}")
     missing = [field for field in contract.get("required_fields", []) if field not in fields]
     if missing:
         errors.append(f"missing required fields: {missing}")
@@ -313,6 +328,23 @@ def verify_authorized_plan(context: dict[str, str], plan: dict[str, Any]) -> Non
     actual = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if claimed != actual or ontology.get("sha256") != metadata["source_sha256"] or ontology.get("snapshot_id") != f"candidate:{dataset_id}":
         raise ValueError("CONTRACT_HASH_MISMATCH")
+
+
+_RELATIVE_TIME_RANGE = re.compile(r"^now-(?P<amount>[1-9]\\d*)(?P<unit>[smhdw])$")
+
+
+def parse_time_bound(value: str) -> datetime:
+    if value == "now":
+        return datetime.now(timezone.utc)
+    match = _RELATIVE_TIME_RANGE.fullmatch(value)
+    if not match:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    try:
+        amount = int(match.group("amount"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("relative time range amount is invalid") from exc
+    delta = {"s": timedelta(seconds=amount), "m": timedelta(minutes=amount), "h": timedelta(hours=amount), "d": timedelta(days=amount), "w": timedelta(weeks=amount)}[match.group("unit")]
+    return datetime.now(timezone.utc) - delta
 
 
 def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
@@ -346,8 +378,8 @@ def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(time_range, dict) or not isinstance(time_range.get("from"), str) or not isinstance(time_range.get("to"), str):
         return error_response(step="execute_planned_query", error="plan artifact must contain a bounded time_range", recoverable=False, instruction="Stop; invalid plan artifact.")
     try:
-        start = datetime.fromisoformat(time_range["from"].replace("Z", "+00:00"))
-        end = datetime.fromisoformat(time_range["to"].replace("Z", "+00:00"))
+        start = parse_time_bound(time_range["from"])
+        end = parse_time_bound(time_range["to"])
         maximum_bytes = int(contract.get("maximum_response_bytes", MAX_RESPONSE_BYTES))
     except (ValueError, TypeError):
         return error_response(step="execute_planned_query", error="plan bounds are invalid", recoverable=False, instruction="Stop; invalid plan artifact.")

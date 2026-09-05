@@ -66,9 +66,10 @@ def main() -> int:
         assert result["ok"], result
         code = captured["code"]
         ast.parse(code)  # template must be syntactically valid Python
-        for needle in ("run_classification_autoresearch", "build_manifest", "render_assets", "emit(manifest", "'accuracy'", "'>50K'", "BUDGET = 2", "n_iter=BUDGET", "COST_MATRIX = {'false_negative': 3.0, 'false_positive': 1.0}", "MIN_RECALL = 0.7", "operating_scenarios", "render_shap_summary", "recommend_spec_values", "shap.TreeExplainer"):
+        for needle in ("run_multi_model_comparison", "build_manifest", "render_assets", "emit(manifest", "'accuracy'", "'>50K'", "BUDGET = 2", "n_iter=BUDGET", "COST_MATRIX = {'false_negative': 3.0, 'false_positive': 1.0}", "MIN_RECALL = 0.7", "operating_scenarios", "render_shap_summary", "render_model_comparison", "shap.TreeExplainer"):
             assert needle in code, f"template missing {needle}"
         assert "plt.style.use" not in code
+        assert ".sample(" not in code and "recommend_spec_values" not in code
 
         # Fail-closed cases.
         missing = sandbox.execute_ml_contract({"frame_ref": frame_ref, "seed": 42, "_server_context": context}, executor=fake_executor)
@@ -78,7 +79,7 @@ def main() -> int:
         except (TypeError, ValueError) as exc:
             raise AssertionError(f"plan fixture is not JSON-safe: {exc}") from exc
         tampered_plan["analysis_contract"]["target"] = "fnlwgt"
-        tampered_ref = sandbox.ARTIFACTS.write_json(context, run_id, "query-plan", tampered_plan)
+        tampered_ref = sandbox.ARTIFACTS.write_json(context, sandbox.ARTIFACTS.create_run(context), "query-plan", tampered_plan)
         tampered = sandbox.execute_ml_contract({"frame_ref": frame_ref, "contract_ref": tampered_ref, "seed": 42, "_server_context": context}, executor=fake_executor)
         assert not tampered["ok"], tampered
 
@@ -98,9 +99,10 @@ def run_autoresearch_checks(research) -> None:
     from sklearn.model_selection import train_test_split  # type: ignore[reportMissingImports]
 
     values, target = make_classification(n_samples=300, n_features=6, n_informative=4, weights=[0.7, 0.3], random_state=42)
+    values = np.asarray(values)
     frame = pd.DataFrame(values, columns=[f"f{i}" for i in range(values.shape[1])])
     x_tr, x_te, y_tr, y_te = train_test_split(frame, target, test_size=0.25, stratify=target, random_state=42)
-    outcome = research.run_classification_autoresearch(x_tr, y_tr, x_te, y_te, kind="gradient_boosting", objective="pr_auc", seed=42, n_iter=2, cv_folds=3)
+    outcome = research.run_classification_autoresearch(x_tr, y_tr, x_te, y_te, kind="random_forest_shap", objective="pr_auc", seed=42, n_iter=2, cv_folds=3)
     assert len(outcome["probabilities"]) == len(y_te)
     assert outcome["top_features"] and {"name", "importance"} <= set(outcome["top_features"][0])
 

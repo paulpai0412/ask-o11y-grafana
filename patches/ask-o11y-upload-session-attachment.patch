@@ -1,0 +1,374 @@
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -69,12 +69,13 @@
+ 	GrafanaURL string
+ 	AuthToken  string
+ 
+-	UserRole   string
+-	UserID     string
+-	SessionID  string
+-	OrgID      string
+-	OrgName    string
+-	ScopeOrgID string
++	UserRole        string
++	UserID          string
++	SessionID       string
++	UploadDatasetID string
++	OrgID           string
++	OrgName         string
++	ScopeOrgID      string
+ 
+ 	// ExcludeToolNames, when set, removes these tools from the available set
+ 	// before the loop runs. Used to hide graphiti write tools from user sessions.
+@@ -419,6 +420,10 @@
+ 	return false
+ }
+ 
++func hasUploadDatasetContext(req LoopRequest) bool {
++	return req.UploadDatasetID != "" || conversationHasExactUploadDataset(req.Messages)
++}
++
+ func (a *AgentLoop) selectRelevantTools(ctx context.Context, req LoopRequest, tools []mcp.Tool) ([]mcp.Tool, []Message, bool, bool) {
+ 	if len(tools) == 0 {
+ 		return tools, nil, false, false
+@@ -509,9 +514,9 @@
+ 	if hasUploadDatasetContext(req) {
+ 		required := map[string]struct{}{
+ 			"grafana-query_discover_datasets": {},
+-			"grafana-query_inspect_dataset":  {},
+-			"ontology_classify_fields":       {},
+-			"data-query-planner_plan_query":  {},
++			"grafana-query_inspect_dataset":   {},
++			"ontology_classify_fields":        {},
++			"data-query-planner_plan_query":   {},
+ 		}
+ 		for _, tool := range tools {
+ 			if _, ok := required[tool.Name]; ok {
+@@ -668,6 +673,17 @@
+ 	return text
+ }
+ 
++func bindUploadDatasetArgument(toolName string, args map[string]interface{}, datasetID string) error {
++	if toolName != "grafana-query_inspect_dataset" || datasetID == "" {
++		return nil
++	}
++	if supplied := stringArg(args["dataset_id"]); supplied != "" && supplied != datasetID {
++		return fmt.Errorf("uploaded dataset identity mismatch")
++	}
++	args["dataset_id"] = datasetID
++	return nil
++}
++
+ func latestToolRef(messages []Message, toolName, key string) string {
+ 	toolNames := make(map[string]string)
+ 	for _, message := range messages {
+@@ -724,6 +740,9 @@
+ 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+ 		return fmt.Sprintf("Invalid tool arguments: %v", err), true, "tool"
+ 	}
++	if err := bindUploadDatasetArgument(tc.Function.Name, args, req.UploadDatasetID); err != nil {
++		return err.Error(), true, "tool"
++	}
+ 	if tc.Function.Name == "grafana-query_execute_planned_query" && strings.TrimSpace(stringArg(args["plan_ref"])) == "" && req.OpaquePlanRef != "" {
+ 		args["plan_ref"] = req.OpaquePlanRef
+ 	}
+diff --git a/pkg/agent/upload_capability_test.go b/pkg/agent/upload_capability_test.go
+--- a/pkg/agent/upload_capability_test.go
++++ b/pkg/agent/upload_capability_test.go
+@@ -4,9 +4,20 @@
+ 
+ func TestConversationHasExactUploadDataset(t *testing.T) {
+ 	valid := []Message{{Role: "user", Content: "Use uploaded dataset `upload_c67e717d4686ec55d897dee03dddd917` (adult.csv)."}}
+-	if !conversationHasExactUploadDataset(valid) {
++	if !conversationHasExactUploadDataset(valid) || !hasUploadDatasetContext(LoopRequest{Messages: valid}) {
+ 		t.Fatal("exact UI upload evidence was not recognized")
+ 	}
++	const datasetID = "upload_c67e717d4686ec55d897dee03dddd917"
++	if !hasUploadDatasetContext(LoopRequest{UploadDatasetID: datasetID}) {
++		t.Fatal("structured upload attachment was not recognized")
++	}
++	args := map[string]interface{}{}
++	if err := bindUploadDatasetArgument("grafana-query_inspect_dataset", args, datasetID); err != nil || args["dataset_id"] != datasetID {
++		t.Fatalf("structured dataset was not bound: args=%v err=%v", args, err)
++	}
++	if err := bindUploadDatasetArgument("grafana-query_inspect_dataset", map[string]interface{}{"dataset_id": "upload_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, datasetID); err == nil {
++		t.Fatal("foreign dataset identity was accepted")
++	}
+ 	invalid := [][]Message{
+ 		{{Role: "assistant", Content: "upload_c67e717d4686ec55d897dee03dddd917"}},
+ 		{{Role: "user", Content: "upload_short"}},
+diff --git a/pkg/plugin/sessionstore.go b/pkg/plugin/sessionstore.go
+--- a/pkg/plugin/sessionstore.go
++++ b/pkg/plugin/sessionstore.go
+@@ -18,17 +18,18 @@
+ }
+ 
+ type ChatSession struct {
+-	ID           string           `json:"id"`
+-	Title        string           `json:"title"`
+-	Messages     []SessionMessage `json:"messages"`
+-	Summary      string           `json:"summary,omitempty"`
+-	CreatedAt    time.Time        `json:"createdAt"`
+-	UpdatedAt    time.Time        `json:"updatedAt"`
+-	MessageCount int              `json:"messageCount"`
+-	ActiveRunID  string           `json:"activeRunId,omitempty"`
+-	Model        string           `json:"model,omitempty"`
+-	UserID       int64            `json:"-"`
+-	OrgID        int64            `json:"-"`
++	ID              string           `json:"id"`
++	Title           string           `json:"title"`
++	Messages        []SessionMessage `json:"messages"`
++	Summary         string           `json:"summary,omitempty"`
++	CreatedAt       time.Time        `json:"createdAt"`
++	UpdatedAt       time.Time        `json:"updatedAt"`
++	MessageCount    int              `json:"messageCount"`
++	ActiveRunID     string           `json:"activeRunId,omitempty"`
++	Model           string           `json:"model,omitempty"`
++	UploadDatasetID string           `json:"uploadDatasetId,omitempty"`
++	UserID          int64            `json:"-"`
++	OrgID           int64            `json:"-"`
+ }
+ 
+ type SessionMetadata struct {
+@@ -61,6 +62,7 @@
+ 	ClearCurrentSessionID(userID, orgID int64) error
+ 	SetActiveRunID(sessionID string, userID, orgID int64, runID string) error
+ 	ClearActiveRunID(sessionID string, userID, orgID int64) error
++	SetUploadDatasetID(sessionID string, userID, orgID int64, datasetID string) error
+ }
+ 
+ func sessionOwnerKey(userID, orgID int64) string {
+@@ -182,6 +184,19 @@
+ 	return &copied, nil
+ }
+ 
++func (s *SessionStore) SetUploadDatasetID(sessionID string, userID, orgID int64, datasetID string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	session, exists := s.sessions[sessionID]
++	if !exists || session.UserID != userID || session.OrgID != orgID {
++		return fmt.Errorf("session not found")
++	}
++	session.UploadDatasetID = datasetID
++	session.UpdatedAt = time.Now()
++	return nil
++}
++
+ func (s *SessionStore) ListSessions(userID, orgID int64) ([]SessionMetadata, error) {
+ 	s.mu.RLock()
+ 	defer s.mu.RUnlock()
+diff --git a/pkg/plugin/sessionstore_redis.go b/pkg/plugin/sessionstore_redis.go
+--- a/pkg/plugin/sessionstore_redis.go
++++ b/pkg/plugin/sessionstore_redis.go
+@@ -21,17 +21,18 @@
+ 
+ // redisSession is the on-wire format stored in Redis (includes owner fields).
+ type redisSession struct {
+-	ID           string           `json:"id"`
+-	Title        string           `json:"title"`
+-	Messages     []SessionMessage `json:"messages"`
+-	Summary      string           `json:"summary,omitempty"`
+-	CreatedAt    time.Time        `json:"createdAt"`
+-	UpdatedAt    time.Time        `json:"updatedAt"`
+-	MessageCount int              `json:"messageCount"`
+-	ActiveRunID  string           `json:"activeRunId,omitempty"`
+-	Model        string           `json:"model,omitempty"`
+-	UserID       int64            `json:"userId"`
+-	OrgID        int64            `json:"orgId"`
++	ID              string           `json:"id"`
++	Title           string           `json:"title"`
++	Messages        []SessionMessage `json:"messages"`
++	Summary         string           `json:"summary,omitempty"`
++	CreatedAt       time.Time        `json:"createdAt"`
++	UpdatedAt       time.Time        `json:"updatedAt"`
++	MessageCount    int              `json:"messageCount"`
++	ActiveRunID     string           `json:"activeRunId,omitempty"`
++	Model           string           `json:"model,omitempty"`
++	UploadDatasetID string           `json:"uploadDatasetId,omitempty"`
++	UserID          int64            `json:"userId"`
++	OrgID           int64            `json:"orgId"`
+ }
+ 
+ func toRedis(s *ChatSession) *redisSession {
+@@ -39,7 +40,7 @@
+ 		ID: s.ID, Title: s.Title, Messages: s.Messages,
+ 		Summary: s.Summary, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt,
+ 		MessageCount: s.MessageCount, ActiveRunID: s.ActiveRunID, Model: s.Model,
+-		UserID: s.UserID, OrgID: s.OrgID,
++		UploadDatasetID: s.UploadDatasetID, UserID: s.UserID, OrgID: s.OrgID,
+ 	}
+ }
+ 
+@@ -48,7 +49,7 @@
+ 		ID: rs.ID, Title: rs.Title, Messages: rs.Messages,
+ 		Summary: rs.Summary, CreatedAt: rs.CreatedAt, UpdatedAt: rs.UpdatedAt,
+ 		MessageCount: rs.MessageCount, ActiveRunID: rs.ActiveRunID, Model: rs.Model,
+-		UserID: rs.UserID, OrgID: rs.OrgID,
++		UploadDatasetID: rs.UploadDatasetID, UserID: rs.UserID, OrgID: rs.OrgID,
+ 	}
+ }
+ 
+@@ -165,6 +166,20 @@
+ 	return fromRedis(rs), nil
+ }
+ 
++func (s *RedisSessionStore) SetUploadDatasetID(sessionID string, userID, orgID int64, datasetID string) error {
++	rs, err := s.getSessionRaw(sessionID)
++	if err != nil {
++		return err
++	}
++	if rs.UserID != userID || rs.OrgID != orgID {
++		return fmt.Errorf("session not found")
++	}
++	session := fromRedis(rs)
++	session.UploadDatasetID = datasetID
++	session.UpdatedAt = time.Now()
++	return s.saveSession(session)
++}
++
+ func (s *RedisSessionStore) ListSessions(userID, orgID int64) ([]SessionMetadata, error) {
+ 	idxKey := sessionUserIdxKey(userID, orgID)
+ 
+diff --git a/pkg/plugin/plugin.go b/pkg/plugin/plugin.go
+--- a/pkg/plugin/plugin.go
++++ b/pkg/plugin/plugin.go
+@@ -879,6 +879,7 @@
+ 
+ 	var messages []agent.Message
+ 	var sessionID string
++	var uploadDatasetID string
+ 	runModel := requestedModel
+ 	modelSource := "auto"
+ 	if requestedModel != "" {
+@@ -892,6 +893,7 @@
+ 			return
+ 		}
+ 		sessionID = req.SessionID
++		uploadDatasetID = session.UploadDatasetID
+ 		if session.Model != "" {
+ 			if requestedModel != "" && requestedModel != session.Model {
+ 				http.Error(w, "Session model cannot be changed", http.StatusBadRequest)
+@@ -1003,6 +1005,7 @@
+ 		UserRole:             userRole,
+ 		UserID:               strconv.FormatInt(userID, 10),
+ 		SessionID:            sessionID,
++		UploadDatasetID:      uploadDatasetID,
+ 		OrgID:                orgID,
+ 		OrgName:              req.OrgName,
+ 		ScopeOrgID:           req.ScopeOrgID,
+diff --git a/pkg/plugin/uploads.go b/pkg/plugin/uploads.go
+--- a/pkg/plugin/uploads.go
++++ b/pkg/plugin/uploads.go
+@@ -103,6 +103,20 @@
+ 		http.Error(w, "Upload service response failed", http.StatusBadGateway)
+ 		return
+ 	}
++	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
++		var uploaded struct {
++			DatasetID string `json:"dataset_id"`
++		}
++		if err := json.Unmarshal(body, &uploaded); err != nil || !isValidUploadDatasetID(uploaded.DatasetID) {
++			http.Error(w, "Upload service returned an invalid dataset", http.StatusBadGateway)
++			return
++		}
++		if err := p.sessionStore.SetUploadDatasetID(sessionID, userID, orgID, uploaded.DatasetID); err != nil {
++			p.logger.Error("Failed to attach uploaded dataset to session", "error", err)
++			http.Error(w, "Could not attach uploaded dataset to session", http.StatusInternalServerError)
++			return
++		}
++	}
+ 	w.Header().Set("Content-Type", "application/json")
+ 	w.WriteHeader(response.StatusCode)
+ 	if len(body) == 0 {
+@@ -112,10 +126,22 @@
+ 	_, _ = w.Write(body)
+ }
+ 
++func isValidUploadDatasetID(value string) bool {
++	if len(value) != len("upload_")+32 || !strings.HasPrefix(value, "upload_") {
++		return false
++	}
++	for _, char := range value[len("upload_"):] {
++		if !(char >= '0' && char <= '9') && !(char >= 'a' && char <= 'f') {
++			return false
++		}
++	}
++	return true
++}
++
+ func (p *Plugin) handleDeleteUpload(w http.ResponseWriter, r *http.Request) {
+ 	datasetID := r.URL.Query().Get("dataset_id")
+ 	sessionID := r.URL.Query().Get("session_id")
+-	if !strings.HasPrefix(datasetID, "upload_") || !isValidSecureID(sessionID) {
++	if !isValidUploadDatasetID(datasetID) || !isValidSecureID(sessionID) {
+ 		http.Error(w, "Valid dataset and session ids are required", http.StatusBadRequest)
+ 		return
+ 	}
+@@ -146,6 +172,15 @@
+ 	}
+ 	defer response.Body.Close()
+ 	body, _ := io.ReadAll(io.LimitReader(response.Body, 1024*1024))
++	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
++		if session, err := p.sessionStore.GetSession(sessionID, userID, orgID); err == nil && session.UploadDatasetID == datasetID {
++			if err := p.sessionStore.SetUploadDatasetID(sessionID, userID, orgID, ""); err != nil {
++				p.logger.Error("Failed to clear uploaded dataset session attachment", "error", err)
++				http.Error(w, "Could not clear uploaded dataset session attachment", http.StatusInternalServerError)
++				return
++			}
++		}
++	}
+ 	w.Header().Set("Content-Type", "application/json")
+ 	w.WriteHeader(response.StatusCode)
+ 	_, _ = w.Write(body)
+diff --git a/pkg/plugin/uploads_test.go b/pkg/plugin/uploads_test.go
+--- a/pkg/plugin/uploads_test.go
++++ b/pkg/plugin/uploads_test.go
+@@ -14,11 +14,12 @@
+ )
+ 
+ func TestHandleUploadProxiesOwnedSession(t *testing.T) {
++	const datasetID = "upload_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ 	var observedBody string
+ 	var observedDelete bool
+ 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		if r.Method == http.MethodDelete {
+-			observedDelete = r.URL.Path == "/uploads/upload_abc" && r.Header.Get("X-Grafana-Actor-User-Id") == "7" && r.Header.Get("X-Upload-Session-Id") != ""
++			observedDelete = r.URL.Path == "/uploads/"+datasetID && r.Header.Get("X-Grafana-Actor-User-Id") == "7" && r.Header.Get("X-Upload-Session-Id") != ""
+ 			_, _ = w.Write([]byte(`{"ok":true}`))
+ 			return
+ 		}
+@@ -35,7 +36,7 @@
+ 		observedBody = string(body)
+ 		w.Header().Set("Content-Type", "application/json")
+ 		w.WriteHeader(http.StatusCreated)
+-		_, _ = w.Write([]byte(`{"ok":true,"dataset_id":"upload_abc"}`))
++		_, _ = w.Write([]byte(`{"ok":true,"dataset_id":"upload_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`))
+ 	}))
+ 	defer upstream.Close()
+ 
+@@ -69,7 +70,11 @@
+ 	if response.Code != http.StatusCreated || observedBody != "a,b\n1,2\n" {
+ 		t.Fatalf("upload failed: status=%d body=%s observed=%q", response.Code, response.Body.String(), observedBody)
+ 	}
+-	remove := httptest.NewRequest(http.MethodDelete, "/api/uploads?dataset_id=upload_abc&session_id="+session.ID, nil)
++	stored, err := store.GetSession(session.ID, 7, 1)
++	if err != nil || stored.UploadDatasetID != datasetID {
++		t.Fatalf("uploaded dataset was not attached: session=%+v err=%v", stored, err)
++	}
++	remove := httptest.NewRequest(http.MethodDelete, "/api/uploads?dataset_id="+datasetID+"&session_id="+session.ID, nil)
+ 	remove.Header.Set("X-Grafana-User-Id", "7")
+ 	remove.Header.Set("X-Grafana-Org-Id", "1")
+ 	removeResponse := httptest.NewRecorder()
+@@ -77,6 +82,10 @@
+ 	if removeResponse.Code != http.StatusOK || !observedDelete {
+ 		t.Fatalf("remove failed: status=%d observed=%v", removeResponse.Code, observedDelete)
+ 	}
++	stored, err = store.GetSession(session.ID, 7, 1)
++	if err != nil || stored.UploadDatasetID != "" {
++		t.Fatalf("uploaded dataset attachment was not cleared: session=%+v err=%v", stored, err)
++	}
+ }
+ 
+ func TestHandleUploadRejectsUnownedAndOversized(t *testing.T) {

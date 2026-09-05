@@ -29,16 +29,16 @@
       "name": "Isolated Dynamic Python Analysis",
       "url_env": "SANDBOX_ANALYSIS_MCP_URL",
       "local_url": "http://127.0.0.1:8777/mcp",
-      "enabled_tools": ["execute_python_analysis", "execute_python_preprocessing", "list_python_analyses", "inspect_python_analysis", "revise_python_analysis"],
+      "enabled_tools": ["get_ml_capabilities", "reconcile_operation", "profile_dataset", "execute_ml_contract", "execute_python_analysis", "execute_python_preprocessing", "list_python_analyses", "inspect_python_analysis", "revise_python_analysis"],
       "disabled_tools": []
     },
     {
       "id": "artifact-bridge",
-      "name": "Internal Artifact Binding Bridge",
+      "name": "Evidence Reports and Artifact Binding Bridge",
       "url_env": "ARTIFACT_BRIDGE_MCP_URL",
       "local_url": "http://127.0.0.1:8773/mcp",
-      "enabled_tools": [],
-      "disabled_tools": ["resolve_dashboard_refs"]
+      "enabled_tools": ["prepare_ml_report", "inspect_report_artifacts", "compose_ml_dashboard", "grant_artifact_reuse"],
+      "disabled_tools": ["resolve_dashboard_refs", "resolve_dashboard_payload"]
     }
   ]
 }

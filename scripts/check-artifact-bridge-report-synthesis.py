@@ -47,6 +47,16 @@ def synthesis() -> dict:
 
 def main() -> int:
     bridge = load_bridge()
+    compose_schema = next(tool["inputSchema"] for tool in bridge.TOOLS if tool["name"] == "compose_ml_dashboard")
+    assert "unique" in compose_schema["properties"]["uid"]["description"]
+    assert compose_schema["properties"]["uid"]["maxLength"] == 40
+    synthesis_schema = compose_schema["properties"]["synthesis"]
+    assert set(synthesis_schema["required"]) == {"format", "report_title", "thesis", "thesis_evidence", "sections"}
+    section_schema = synthesis_schema["properties"]["sections"]["items"]
+    assert set(section_schema["required"]) == {"section_id", "title", "purpose", "collapsed", "narrative_blocks", "panels"}
+    panel_schema = section_schema["properties"]["panels"]["items"]
+    assert {"preferred_width", "view_narratives", "cross_chart_context"} <= set(panel_schema["required"])
+    assert panel_schema["properties"]["view_narratives"]["type"] == "array"
     with tempfile.TemporaryDirectory() as tmp:
         setattr(bridge, "ARTIFACTS", bridge.ArtifactStore(Path(tmp) / "runs"))
         context = {"org_id": "1", "user_id": "report-tools"}
@@ -111,18 +121,26 @@ def main() -> int:
         spec_panel["view_narratives"][0]["visual_observation"] = None
         spec_composed = bridge.compose_ml_dashboard({
             "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": spec_claim,
-            "uid": "spec-report", "title": "Spec Report", "_server_context": context,
+            "uid": "spec-report", "title": "Spec Report", "output_mode": "full", "_server_context": context,
         })
         assert spec_composed["ok"], spec_composed
 
         composed = bridge.compose_ml_dashboard({
             "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": synthesis(),
-            "uid": "dynamic-report", "title": "Dynamic Report", "_server_context": context,
+            "uid": "dynamic-report", "title": "Dynamic Report", "output_mode": "full", "_server_context": context,
         })
         assert composed["ok"], composed
         dashboard = composed["dashboard"]
         assert next(item for item in dashboard["panels"] if item.get("type") == "row")["askO11ySectionId"] == "model-choice", dashboard
         assert "主要证据呈现明显结构" in str(dashboard), dashboard
+
+        compact = bridge.compose_ml_dashboard({
+            "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": synthesis(),
+            "uid": "opaque-report", "title": "Opaque Report", "_server_context": context,
+        })
+        assert compact["ok"] and "dashboard_ref" in compact["refs"] and "dashboard" not in compact, compact
+        resolved = bridge.resolve_dashboard_refs({"dashboard": {"$dashboard_ref": compact["refs"]["dashboard_ref"]}, "_server_context": context})
+        assert resolved["ok"] and "主要证据呈现明显结构" in str(resolved["dashboard"]), resolved
 
         bad = synthesis(); bad["sections"][0]["panels"][0]["evidence"][0]["fact_ref"] = "unknown"
         denied = bridge.compose_ml_dashboard({

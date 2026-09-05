@@ -11,6 +11,24 @@ ROOT = Path(__file__).resolve().parent
 CATALOG_PATH = ROOT / "semantic/catalog.json"
 MAX_FIELDS = 200
 ALLOWED_ANALYSIS_KINDS = ("catboost", "random_forest_shap", "gradient_boosting", "logistic_regression", "xgboost")
+ALLOWED_REGRESSION_KINDS = ("dummy", "ridge", "random_forest", "extra_trees", "hist_gradient_boosting", "catboost", "xgboost")
+REGRESSION_MODES = ("retrospective_association", "forward_prediction")
+
+
+def optimization_direction(contract: dict[str, Any]) -> str | None:
+    """Business target direction is independent of the metric scorer."""
+    optimization = contract.get("optimization")
+    if optimization is not None and (not isinstance(optimization, dict) or set(optimization) != {"direction"}):
+        raise ValueError("optimization requires only an explicit business direction")
+    direction = optimization["direction"] if optimization is not None else contract.get("target_direction")
+    if direction is not None and direction not in {"minimize", "maximize"}:
+        raise ValueError("invalid optimization direction")
+    if optimization is not None and contract.get("target_direction") not in (None, direction):
+        raise ValueError("legacy and current optimization directions disagree")
+    constrained = contract.get("constrained_search") or {}
+    if not isinstance(constrained, dict) or (constrained.get("enabled") and direction is None):
+        raise ValueError("constrained search requires an explicit business direction")
+    return direction
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -137,7 +155,12 @@ def validate_analysis_contract(snapshot: dict[str, Any], contract: dict[str, Any
     mismatch = verify_snapshot_ref(snapshot, snapshot_ref or contract.get("ontology_snapshot_sha256"))
     if mismatch:
         reject(mismatch, "snapshot.pin")
-    allowed = {"kind", "dataset_id", "target", "features", "as_of", "split", "seed", "ontology_snapshot_sha256", "quality_filter", "positive_class", "purpose", "conclusion", "autotune", "objective", "objective_minimum", "search_budget", "class_imbalance_strategy", "cost_matrix", "cost_matrix_approved", "reporting_denominator", "minimum_recall"}
+    task_kind = contract.get("task_kind", "binary_classification") if isinstance(contract, dict) else "binary_classification"
+    regression = task_kind == "regression"
+    population_filter: dict[str, Any] = {}
+    feature_set_count = 0
+    feature_set_ids: list[str] = []
+    allowed = {"task_kind", "analysis_mode", "include_treatment_candidates", "algorithms", "target_direction", "optimization", "controllable_fields", "context_fields", "forbidden_fields", "constrained_search", "population_filter", "feature_sets", "kind", "dataset_id", "target", "features", "as_of", "split", "seed", "ontology_snapshot_sha256", "quality_filter", "positive_class", "purpose", "conclusion", "autotune", "objective", "objective_minimum", "search_budget", "class_imbalance_strategy", "cost_matrix", "cost_matrix_approved", "reporting_denominator", "minimum_recall"}
     if not isinstance(contract, dict) or set(contract) - allowed:
         reject("ANALYSIS_CONTRACT_INVALID", "contract.shape")
         contract = contract if isinstance(contract, dict) else {}
@@ -180,23 +203,37 @@ def validate_analysis_contract(snapshot: dict[str, Any], contract: dict[str, Any
         if field["semantic_kind"] == "target_proxy":
             reject("TARGET_PROXY_UNRESOLVED", f"feature.lineage:{physical}")
             field_valid = False
-        if field["status"] != "approved":
+        treatment_feature = regression and field["analysis_role"] == "treatment_candidate"
+        if field["status"] != "approved" and not treatment_feature:
             reject("FIELD_NOT_APPROVED", f"feature.approved:{physical}")
             field_valid = False
-        if field["analysis_role"] != "feature" or physical not in dataset["approved_features"]:
+        if treatment_feature:
+            if not bool(contract.get("include_treatment_candidates")):
+                reject("TREATMENT_FEATURE_OPT_IN_REQUIRED", f"feature.treatment_opt_in:{physical}")
+                field_valid = False
+            if physical not in set(map(str, contract.get("controllable_fields") or [])):
+                reject("CONTROLLABLE_FIELD_REQUIRED", f"feature.controllable:{physical}")
+                field_valid = False
+            if contract.get("analysis_mode") == "forward_prediction":
+                availability = field.get("availability") or {}
+                if not bool(availability.get("eligible_at_as_of")):
+                    reject("AVAILABILITY_UNKNOWN", f"feature.availability:{physical}")
+                    field_valid = False
+        elif field["analysis_role"] != "feature" or physical not in dataset["approved_features"]:
             reject("FIELD_ROLE_FORBIDDEN", f"feature.allowlist:{physical}")
             field_valid = False
         availability = field.get("availability") or {}
         eligible = availability.get("eligible_at_as_of")
-        if not isinstance(eligible, bool) or not eligible:
+        if not treatment_feature and (not isinstance(eligible, bool) or not eligible):
             reject("AVAILABILITY_UNKNOWN", f"feature.availability:{physical}")
             field_valid = False
         if field_valid:
             included.append(physical)
-    try:
-        date.fromisoformat(str(contract.get("as_of")))
-    except ValueError:
-        reject("AS_OF_INVALID", "time.as_of")
+    if not regression:
+        try:
+            date.fromisoformat(str(contract.get("as_of")))
+        except ValueError:
+            reject("AS_OF_INVALID", "time.as_of")
     if contract.get("quality_filter") is not None and contract.get("quality_filter") != dataset["quality_policy"]:
         reject("QUALITY_POLICY_VIOLATION", "quality.policy")
     split = contract.get("split")
@@ -204,7 +241,95 @@ def validate_analysis_contract(snapshot: dict[str, Any], contract: dict[str, Any
     split_keys = {"kind", "time_field", "test_fraction", "preprocessing_fit_scope", "seed"}
     if not isinstance(split, dict) or set(split) - split_keys or any(split.get(key) != policy[key] for key in ("kind", "time_field", "test_fraction", "preprocessing_fit_scope")) or ("seed" in split and split["seed"] != policy["seed"]):
         reject("SPLIT_POLICY_VIOLATION", "split.policy")
-    if contract.get("kind") not in ALLOWED_ANALYSIS_KINDS or contract.get("seed") != policy["seed"]:
+    if not regression and isinstance(split, dict) and split.get("kind") != "stratified_holdout":
+        reject("SPLIT_POLICY_VIOLATION", "split.classification_kind")
+    if regression:
+        if contract.get("analysis_mode") not in REGRESSION_MODES:
+            reject("ANALYSIS_CONTRACT_INVALID", "analysis.mode")
+        algorithms = contract.get("algorithms")
+        if not isinstance(algorithms, list) or not algorithms or any(kind not in ALLOWED_REGRESSION_KINDS for kind in algorithms):
+            reject("ANALYSIS_CONTRACT_INVALID", "analysis.algorithms")
+        try:
+            optimization_direction(contract)
+        except ValueError:
+            reject("ANALYSIS_CONTRACT_INVALID", "analysis.optimization")
+        if contract.get("objective", "mae") != "mae":
+            reject("ANALYSIS_CONTRACT_INVALID", "analysis.objective")
+        controllable = contract.get("controllable_fields")
+        context = contract.get("context_fields")
+        forbidden = contract.get("forbidden_fields")
+        raw_population_filter = contract.get("population_filter") or {}
+        if isinstance(raw_population_filter, dict):
+            population_filter = raw_population_filter
+        if not isinstance(raw_population_filter, dict) or any(not isinstance(name, str) or not name for name in raw_population_filter):
+            reject("ANALYSIS_CONTRACT_INVALID", "analysis.population_filter")
+            population_filter = {}
+        population_filter_names = set(population_filter)
+        if any(name not in by_name for name in population_filter_names):
+            reject("UNKNOWN_FIELD", "analysis.population_filter.exists")
+        if any(name in {str(target_name), str(dataset.get("target"))} for name in population_filter_names):
+            reject("POPULATION_FILTER_INVALID", "analysis.population_filter.target")
+        if any(by_name.get(name, {}).get("analysis_role") in {"quality", "forbidden", "identifier"} for name in population_filter_names):
+            reject("POPULATION_FILTER_INVALID", "analysis.population_filter.role")
+        controllable_values: list[Any] = controllable if isinstance(controllable, list) else []
+        context_values: list[Any] = context if isinstance(context, list) else []
+        forbidden_values: list[Any] = forbidden if isinstance(forbidden, list) else []
+        split_field = split.get("time_field") if isinstance(split, dict) else None
+        feature_names = {str(name) for name in features}
+        valid_role_lists = all(len(set(map(str, value))) == len(value) for value in (controllable_values, context_values, forbidden_values)) and all(isinstance(value, list) for value in (controllable, context, forbidden))
+        if not valid_role_lists:
+            controllable_names: set[str] = set()
+            context_names: set[str] = set()
+            forbidden_names: set[str] = set()
+            reject("ANALYSIS_CONTRACT_INVALID", "analysis.field_roles")
+        else:
+            controllable_names = {str(name) for name in controllable_values}
+            context_names = {str(name) for name in context_values}
+            forbidden_names = {str(name) for name in forbidden_values}
+            expected_features = (controllable_names | context_names) - ({str(split_field)} if isinstance(split_field, str) else set()) - population_filter_names
+            if feature_names != expected_features:
+                reject("FIELD_ROLE_FORBIDDEN", "analysis.feature_role_partition")
+            if feature_names & (forbidden_names - population_filter_names):
+                reject("TARGET_PROXY_UNRESOLVED", "analysis.forbidden_feature_overlap")
+            if any(name not in by_name for name in controllable_names):
+                reject("UNKNOWN_FIELD", "analysis.controllable.exists")
+            treatment_count = sum(by_name.get(name, {}).get("analysis_role") == "treatment_candidate" for name in controllable_names)
+            if treatment_count and not bool(contract.get("include_treatment_candidates")):
+                reject("TREATMENT_FEATURE_OPT_IN_REQUIRED", "analysis.treatment_opt_in")
+        raw_feature_sets = contract.get("feature_sets")
+        if raw_feature_sets is not None:
+            if not isinstance(raw_feature_sets, list) or not 1 <= len(raw_feature_sets) <= 6:
+                reject("ANALYSIS_CONTRACT_INVALID", "analysis.feature_sets.bound")
+            else:
+                feature_set_ids = []
+                seen_ids: set[str] = set()
+                for item in raw_feature_sets:
+                    if not isinstance(item, dict):
+                        reject("ANALYSIS_CONTRACT_INVALID", "analysis.feature_sets.shape")
+                        continue
+                    set_id = item.get("id")
+                    set_features = item.get("features")
+                    set_controllable = item.get("controllable_fields", [])
+                    set_context = item.get("context_fields", [])
+                    if not isinstance(set_id, str) or not set_id or set_id in seen_ids or not isinstance(set_features, list) or not set_features or not isinstance(set_controllable, list) or not isinstance(set_context, list):
+                        reject("ANALYSIS_CONTRACT_INVALID", "analysis.feature_sets.shape")
+                        continue
+                    seen_ids.add(set_id)
+                    feature_set_ids.append(set_id)
+                    set_feature_names = {str(name) for name in set_features}
+                    set_controllable_names = {str(name) for name in set_controllable}
+                    set_context_names = {str(name) for name in set_context}
+                    if len(set_feature_names) != len(set_features) or not set_feature_names <= feature_names:
+                        reject("FIELD_ROLE_FORBIDDEN", f"analysis.feature_sets.allowlist:{set_id}")
+                    expected_set_features = (set_controllable_names | set_context_names) - ({str(split_field)} if isinstance(split_field, str) else set()) - population_filter_names
+                    if set_feature_names != expected_set_features or set_controllable_names & set_context_names:
+                        reject("FIELD_ROLE_FORBIDDEN", f"analysis.feature_sets.partition:{set_id}")
+                    if any(name not in by_name for name in set_controllable_names | set_context_names):
+                        reject("UNKNOWN_FIELD", f"analysis.feature_sets.exists:{set_id}")
+                    if any(by_name.get(name, {}).get("analysis_role") == "treatment_candidate" for name in set_controllable_names) and not bool(contract.get("include_treatment_candidates")):
+                        reject("TREATMENT_FEATURE_OPT_IN_REQUIRED", f"analysis.feature_sets.treatment_opt_in:{set_id}")
+                feature_set_count = len(feature_set_ids)
+    elif contract.get("kind") not in ALLOWED_ANALYSIS_KINDS or contract.get("seed") != policy["seed"]:
         reject("ANALYSIS_CONTRACT_INVALID", "analysis.kind_seed")
     selected = set(included)
     excluded = [{"field": field["physical_name"], "reason": field["reason"], "status": field["status"], "role": field["analysis_role"]} for field in dataset["fields"] if field["physical_name"] not in selected and field["physical_name"] not in {dataset["target"], dataset["time_identity"], dataset["quality_policy"]["field"]}]
@@ -219,4 +344,9 @@ def validate_analysis_contract(snapshot: dict[str, Any], contract: dict[str, Any
             {key: field.get(key) for key in ("physical_name", "unit", "semantic_kind", "analysis_role", "reason") if key in field}
             for field in dataset["fields"][:MAX_FIELDS]
         ],
+        "analysis_mode": contract.get("analysis_mode") if regression else None,
+        "treatment_feature_count": sum(by_name.get(name, {}).get("analysis_role") == "treatment_candidate" for name in included),
+        "population_filter": population_filter,
+        "feature_set_count": feature_set_count,
+        "feature_set_ids": feature_set_ids,
     }

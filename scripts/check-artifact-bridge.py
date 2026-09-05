@@ -42,7 +42,7 @@ def main() -> int:
             "model_panel_type_preserved": panel.get("type") == "xychart",
             "model_panel_options_preserved": panel.get("options") == {"mapping": "auto"},
             "trusted_query_bound": panel.get("targets", [{}])[0].get("url") == "http://data.example/input.csv",
-            "bridge_has_no_grafana_write": not any(name.startswith(("create_", "update_", "prepare_")) for name in [tool["name"] for tool in bridge.TOOLS]),
+            "bridge_has_no_grafana_write": not any(name.startswith(("create_", "update_")) for name in [tool["name"] for tool in bridge.TOOLS]),
         }
         if not result.get("ok") or not all(checks.values()):
             raise AssertionError(json.dumps({"checks": checks, "result": result}, indent=2))

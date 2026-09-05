@@ -42,8 +42,8 @@ def main() -> int:
             store = dqp.ArtifactStore(Path(tmp) / "runs")
             for module in [dqp, grafana_query, sandbox, bridge]:
                 setattr(module, "ARTIFACTS", store)
-            context = {"org_id": "1", "user_id": "security-owner"}
-            other = {"org_id": "1", "user_id": "security-other"}
+            context = {"org_id": "1", "user_id": "security-owner", "session_id": "security-session"}
+            other = {"org_id": "1", "user_id": "security-other", "session_id": "security-other-session"}
             run_id = store.create_run(context, "run_security_adaptive")
             metadata = {"dataset_id": "authorized", "datasource_uid": "csv-poc", "datasource_type": "yesoreyeram-infinity-datasource", "fields": [{"name": "date", "type": "date"}, {"name": "x", "type": "number"}, {"name": "y", "type": "number"}, {"name": "constant_class", "type": "string"}], "date_range": {"all_from": "2026-01-01", "all_to": "2026-12-31"}, "query_template": {"refId": "A", "datasource": {"uid": "csv-poc", "type": "yesoreyeram-infinity-datasource"}, "type": "csv", "source": "url", "url": "http://127.0.0.1:8767/authorized.csv", "columns": [{"selector": "date"}, {"selector": "x"}, {"selector": "y"}, {"selector": "constant_class"}]}}
             metadata_ref = store.write_json(context, run_id, "dataset-metadata", metadata)
@@ -68,7 +68,7 @@ def main() -> int:
             checks.append(require("grafana_query_inconsistent_frame_rejected", not validation.get("ok") and "equal lengths" in json.dumps(validation), validation))
 
             frame = {"schema": {"fields": [{"name": "date"}, {"name": "x"}, {"name": "y"}, {"name": "constant_class"}]}, "data": {"values": [[f"2026-01-{day:02d}" for day in range(1, 31)], list(range(30)), [value * 2 for value in range(30)], ["same"] * 30]}}
-            frame_ref = store.write_json(context, run_id, "grafana-frame", [frame])
+            frame_ref = store.write_json(context, dqp.parse_artifact_ref(valid["plan_ref"])[0], "grafana-frame", [frame])
             def fake_execution(*_args):
                 return {"execution_id": "security", "execution_count": 1, "exit_code": 0, "results": [], "stdout": [], "stderr": [], "error": None, "complete": {"timestamp": 1, "execution_time_in_millis": 1}}
 
@@ -109,7 +109,7 @@ def main() -> int:
             analysis_target = bridge.resolve_dashboard_refs({"dashboard": {"panels": [{"targets": [{"$execution_ref": execution_ref}]}]}, "_server_context": context})
             panel = resolved.get("dashboard", {}).get("panels", [{}])[0]
             checks.append(require("artifact_bridge_preserves_model_panel_json", resolved.get("ok") and panel.get("type") == "trend" and panel.get("options") == {"xField": "date"}, resolved))
-            checks.append(require("artifact_bridge_resolves_query_without_writes", panel.get("targets", [{}])[0].get("source") == "url" and [tool["name"] for tool in bridge.TOOLS] == ["resolve_dashboard_refs"], resolved))
+            checks.append(require("artifact_bridge_resolves_query_without_writes", panel.get("targets", [{}])[0].get("source") == "url" and "resolve_dashboard_refs" in [tool["name"] for tool in bridge.TOOLS] and not any(tool["name"].startswith(("create_", "update_")) for tool in bridge.TOOLS), resolved))
             checks.append(require("artifact_bridge_rejects_analysis_as_chart_data", not analysis_target.get("ok") and "image asset binding" in analysis_target.get("error", ""), analysis_target))
 
             wferp_run = store.create_run(context, "run_security_wferp")

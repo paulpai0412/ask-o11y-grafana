@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TDD check for the real Grafana Plotly panel plugin and fallback contract."""
+"""Check the real Grafana plugin's explicit image/Plotly/error contract."""
 from __future__ import annotations
 
 import json
@@ -26,7 +26,7 @@ def main() -> int:
 
     render_mode = PANEL / "src/renderMode.mjs"
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", f"import{{resolveRenderMode as r,shouldShowPanelNarrative as n}}from'{render_mode.as_uri()}';if(r({{figure:{{data:[],layout:{{}}}}}})!=='plotly'||r({{fallbackUrl:'x'}})!=='fallback'||n(1)!==false||n(2)!==true)process.exit(2)"],
+        ["node", "--input-type=module", "-e", f"import{{resolveRenderMode as r,shouldShowPanelNarrative as n}}from'{render_mode.as_uri()}';if(r({{figure:{{data:[],layout:{{}}}}}})!=='plotly'||r({{renderMode:'image',fallbackUrl:'x'}})!=='image'||r({{fallbackUrl:'x'}})!=='error'||r({{renderMode:'plotly',figure:{{data:null}},fallbackUrl:'x'}})!=='error'||r({{renderMode:'image',figure:{{data:[]}},fallbackUrl:'x'}})!=='error'||n(1)!==false||n(2)!==true)process.exit(2)"],
         check=False, capture_output=True, text=True,
     )
     if result.returncode:
@@ -49,9 +49,9 @@ def main() -> int:
         raise AssertionError(f"Grafana theme contract failed: {theme_result.stderr}")
 
     dist = PANEL / "dist/module.js"
-    if not dist.exists():
+    if not (PANEL / "node_modules").is_dir():
         subprocess.run(["npm", "ci", "--prefix", str(PANEL)], check=True)
-        subprocess.run(["npm", "--prefix", str(PANEL), "run", "build"], check=True)
+    subprocess.run(["npm", "--prefix", str(PANEL), "run", "build"], check=True)
     assert dist.stat().st_size > 1_000_000, dist
     bundle = dist.read_text(errors="ignore")
     assert "Plotly" in bundle and "fallbackUrl" in bundle, "Plotly/fallback missing from built panel"
@@ -62,7 +62,7 @@ def main() -> int:
     assert "asko11y-plotly-panel" in compose, "unsigned plugin allowlist missing"
     assert "grafana-panels/asko11y-plotly-panel" in installer, "panel build/install step missing"
 
-    print("ok: real Grafana Plotly panel plugin + fallback")
+    print("ok: rebuilt Grafana plugin + explicit image/plotly/error modes")
     return 0
 
 

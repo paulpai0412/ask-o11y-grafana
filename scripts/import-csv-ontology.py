@@ -25,7 +25,10 @@ def canonical_bytes(value: Any) -> bytes:
 def slug(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9._-]+", "-", value.casefold()).strip("-.")
     if not normalized:
-        raise ValueError("dataset_id/namespace must contain a portable identifier")
+        text = value.strip()
+        if not text:
+            raise ValueError("dataset_id/namespace must contain a portable identifier")
+        return "u-" + hashlib.sha256(text.encode()).hexdigest()[:12]
     return normalized
 
 

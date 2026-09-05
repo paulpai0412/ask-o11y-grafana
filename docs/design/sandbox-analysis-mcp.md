@@ -30,15 +30,27 @@ The external endpoints bind loopback, require the shared service bearer, and use
 
 ## Sandbox contract
 
-Sandbox Analysis exposes five tools:
+Sandbox Analysis exposes six tools:
 
+- `profile_dataset`: run the deterministic full-data profile over one authorized frame without model-authored Python.
 - `execute_python_analysis`: execute a new revision against one authorized frame.
 - `execute_python_preprocessing`: execute generated preprocessing against one authorized original uploaded CSV/XLSX document; `emit_frame` returns both a chained frame and derived session dataset.
 - `list_python_analyses`: list retained revisions for the authenticated context.
 - `inspect_python_analysis`: return retained source and compact metadata, never frame rows.
 - `revise_python_analysis`: run complete replacement source against a prior revision's authorized frame.
 
-A minimal call is:
+A profile call is:
+
+```json
+{
+  "frame_ref": "artifact://run_…/grafana-frame",
+  "seed": 42
+}
+```
+
+`profile_dataset` computes missingness, numeric distribution, categorical concentration, bounded Spearman relationships, and a supported temporal trend over every input row and field. Its bins and time buckets are visual-only; the manifest records `full_data=true`, `sampling=false`, and `derived_dataset=false`. The trusted host composes this program from the opaque query plan, so it cannot become a model-method selector.
+
+A model-authored Python call remains available only for an explicitly confirmed analysis that has a suitable contract:
 
 ```json
 {
@@ -101,9 +113,9 @@ Every call creates and destroys one sandbox. No kernel persists across turns.
 
 | Control | Limit |
 | --- | ---: |
-| sandbox lifetime | 10 minutes |
-| CPU | 1 |
-| memory | 1 GiB |
+| sandbox lifetime | 3600 seconds |
+| CPU | 4 |
+| memory | 4 GiB |
 | source | 32 KiB |
 | input bundle | 16 MiB |
 | original uploaded document | 50 MiB, CSV/XLSX only |
@@ -175,7 +187,7 @@ Only a successful built-in Grafana write and returned URL prove a Dashboard exis
 
 Artifacts persist for the configured retention period. Ask O11y compacts only successful refs, output schemas, and Dashboard identities into later turns. List/inspect/revise recover analysis source and provenance without restoring raw frames, MIME bodies, complete tool responses, or kernels.
 
-The reproducible Ask O11y v0.3.2 integration patch is `patches/ask-o11y-dynamic-tools-and-timeout.patch`. It contains dynamic capability/Skill selection, embedded dashboarding references, opaque binding middleware, Preview/publication enforcement, successful-state compaction, and the 10-minute external MCP timeout.
+The reproducible Ask O11y v0.3.2 integration patch is `patches/ask-o11y-dynamic-tools-and-timeout.patch`. It contains dynamic capability/Skill selection, embedded dashboarding references, opaque binding middleware, Preview/publication enforcement, successful-state compaction, and the 3600-second external MCP and Sandbox execution timeout.
 
 ## Acceptance criteria
 
@@ -184,13 +196,14 @@ The reproducible Ask O11y v0.3.2 integration patch is `patches/ask-o11y-dynamic-
 3. Engineering/Finance Analysis, `analysis_core`, external Renderer tools, and method-specific runtime paths are absent.
 4. Grafana remains the only datasource executor; Ontology, Planner, and Sandbox have no datasource credentials.
 5. Missing identity, foreign refs, raw frames, unsupported arguments, and oversized inputs fail closed.
-6. Trusted validity filtering runs before generated code and is verified against the source row count.
-7. Sandbox execution has deny-all egress, bounded resources/output, no credentials, no volumes, and unconditional cleanup.
-8. Analysis PNG outputs remain behind authorized refs; signed URLs are host-resolved and never authored by the model.
-9. Artifact Bridge preserves model-authored panels/options, resolves only authorized bindings, and exposes no Grafana write tool.
-10. Preview is a real tagged Dashboard; publication removes the tag on the same UID without rerunning query or Python.
-11. E2E proves SHAP PNG visibility without an analysis data target, query-only dynamic XY authoring, built-in-only publication, and absence of model-visible bridge calls.
-12. Production deployment adds OpenSandbox authentication and gVisor, Kata, or Firecracker; local `runc` evidence is not production attestation.
+6. `profile_dataset` profiles every returned row and field and records the full-data/visual-only invariants before any optional ML path.
+7. Trusted validity filtering runs before generated code and is verified against the source row count.
+8. Sandbox execution has deny-all egress, bounded resources/output, no credentials, no volumes, and unconditional cleanup.
+9. Analysis PNG outputs remain behind authorized refs; signed URLs are host-resolved and never authored by the model.
+10. Artifact Bridge preserves model-authored panels/options, resolves only authorized bindings, and exposes no Grafana write tool.
+11. Preview is a real tagged Dashboard; publication removes the tag on the same UID without rerunning query or Python.
+12. E2E proves SHAP PNG visibility without an analysis data target, query-only dynamic XY authoring, built-in-only publication, and absence of model-visible bridge calls.
+13. Production deployment adds OpenSandbox authentication and gVisor, Kata, or Firecracker; local `runc` evidence is not production attestation.
 
 ## Deferred
 

@@ -6,6 +6,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd  # type: ignore[reportMissingImports]
 from sklearn.datasets import make_classification  # type: ignore[reportMissingImports]
 from sklearn.model_selection import train_test_split  # type: ignore[reportMissingImports]
@@ -27,12 +28,13 @@ def load_module():
 def main() -> int:
     research = load_module()
     values, target = make_classification(n_samples=600, n_features=12, n_informative=8, weights=[0.75, 0.25], class_sep=1.2, random_state=42)
+    values = np.asarray(values)
     frame = pd.DataFrame(values, columns=[f"f{index}" for index in range(values.shape[1])])
     x_train, x_test, y_train, y_test = train_test_split(frame, target, test_size=0.2, stratify=target, random_state=42)
 
     result = research.run_classification_autoresearch(
         x_train, y_train, x_test, y_test,
-        kind="gradient_boosting", objective="accuracy", seed=42, n_iter=4, cv_folds=3,
+        kind="random_forest_shap", objective="accuracy", seed=42, n_iter=4, cv_folds=3,
         objective_minimum=0.75,
     )
     assert 1 <= len(result["trials"]) <= 5

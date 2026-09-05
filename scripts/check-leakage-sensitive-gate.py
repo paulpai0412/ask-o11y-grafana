@@ -22,6 +22,7 @@ def load_module(name: str, path: Path):
 
 
 def main() -> int:
+    load_module("ontology_contract", ROOT / "ontology_contract.py")
     semantics = load_module("governance_semantics", ROOT / "upload_semantics.py")
 
     rows = ["Age,Gender,Race,Satisfaction Score,MonthlyCharge,Churn"]

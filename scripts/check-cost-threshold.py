@@ -26,10 +26,11 @@ def load_module(name: str, path: Path):
 
 def run(research, cost_matrix=None, minimum_recall=None):
     values, target = make_classification(n_samples=500, n_features=8, n_informative=6, weights=[0.75, 0.25], class_sep=1.0, random_state=7)
+    values = np.asarray(values)
     frame = pd.DataFrame(values, columns=[f"f{i}" for i in range(values.shape[1])])
     x_tr, x_te, y_tr, y_te = train_test_split(frame, target, test_size=0.25, stratify=target, random_state=42)
     return research.run_classification_autoresearch(
-        x_tr, y_tr, x_te, y_te, kind="gradient_boosting", objective="accuracy", seed=42,
+        x_tr, y_tr, x_te, y_te, kind="random_forest_shap", objective="accuracy", seed=42,
         n_iter=2, cv_folds=3, cost_matrix=cost_matrix, minimum_recall=minimum_recall,
     )
 
@@ -37,10 +38,9 @@ def run(research, cost_matrix=None, minimum_recall=None):
 def main() -> int:
     research = load_module("cost_research", ROOT / "sandbox-analysis-mcp/ml_autoresearch.py")
 
-    # scale_pos_weight is now part of the declared search space.
-    _, space = research._estimator("gradient_boosting", 42)
-    # scale_pos_weight is now part of the declared LightGBM search space.
-    assert "model__scale_pos_weight" in space, list(space)
+    # Exercise an installed core estimator, not a silent optional-library fallback.
+    _, space = research._estimator("random_forest_shap", 42)
+    assert "model__class_weight" in space, list(space)
 
     recall_first = run(research, cost_matrix={"false_negative": 5.0, "false_positive": 1.0})
     precision_first = run(research, cost_matrix={"false_negative": 1.0, "false_positive": 5.0})
@@ -73,7 +73,7 @@ def main() -> int:
         identity={"run_id": "r", "dataset_id": "d", "ontology_snapshot_id": "s", "ontology_sha256": "a" * 64, "contract_sha256": "b" * 64, "seed": 42},
         objective={"target": "t", "task_kind": "binary_classification", "primary_metric": "accuracy", "positive_class": "1", "threshold": recall_first["operating_threshold"], "threshold_cost_approved": True},
         data={"rows": 500, "features": 8, "train_rows": 375, "holdout_rows": 125, "split_kind": "stratified_holdout", "excluded_fields": []},
-        process={"model_family": "LightGBM", "search_budget": 2, "completed_trials": 2, "cv_folds": 3, "preprocessing_fit_scope": "training_only", "best_params": {}},
+        process={"model_family": "random_forest_shap", "search_budget": 2, "completed_trials": 2, "cv_folds": 3, "preprocessing_fit_scope": "training_only", "best_params": {}},
         baseline_metrics={"accuracy": 0.75}, selected_metrics=recall_first["metrics"],
         guards={**recall_first["guards"], "verdict": "accepted"},
         trials=recall_first["trials"], features=[{"name": "f0", "importance": 0.1, "explanation": "x"}],

@@ -22,6 +22,13 @@ def load_module():
 
 
 def main() -> int:
+    ontology_path = ROOT / "ontology_contract.py"
+    spec = importlib.util.spec_from_file_location("ontology_contract", ontology_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {ontology_path}")
+    ontology = importlib.util.module_from_spec(spec)
+    sys.modules["ontology_contract"] = ontology
+    spec.loader.exec_module(ontology)
     semantics = load_module()
     hints = {
         "dataset_id": "upload_x",
@@ -29,7 +36,7 @@ def main() -> int:
             {"physical_name": "row_id", "analysis_role": "identifier", "missing_rate": 0.0},
             {"physical_name": "sensor", "analysis_role": "feature", "missing_rate": 0.1},
             {"physical_name": "mostly_missing", "analysis_role": "feature", "missing_rate": 0.7},
-            {"physical_name": "defect", "analysis_role": "target_candidate", "missing_rate": 0.0, "minority_rate": 0.02},
+            {"physical_name": "defect", "analysis_role": "target_candidate", "missing_rate": 0.0, "minority_rate": 0.02, "distinct_count": 2},
         ],
         "quality_policy": {"rare_positive_rate": 0.05, "missing_rate_max": 0.4, "minimum_valid_rows": 20},
     }
@@ -47,7 +54,7 @@ def main() -> int:
     assert "IMBALANCE_STRATEGY_REQUIRED" in rejected["rejection_codes"]
     assert "mostly_missing" in rejected["limitations"]
 
-    accepted = semantics.validate_analysis_contract(hints, {**base, "class_imbalance_strategy": "scale_pos_weight"})
+    accepted = semantics.validate_analysis_contract(hints, {**base, "class_imbalance_strategy": "balanced"})
     assert accepted["conforms"], accepted
     assert accepted["included_fields"] == ["sensor", "mostly_missing"]
     assert "row_id" in accepted["excluded_fields"]

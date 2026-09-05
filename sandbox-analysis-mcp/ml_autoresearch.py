@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 from itertools import combinations
-from typing import Any
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ml_execution import GENERALIZATION_LIMITS, cv_splits, fit_counts, sum_fit_counts
+from typing import Any, cast
 
 import numpy as np  # type: ignore[reportMissingImports]
 import pandas as pd  # type: ignore[reportMissingImports]
@@ -11,9 +16,9 @@ try:
 except (ImportError, OSError):
     LGBMClassifier = None
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin, clone  # type: ignore[reportMissingImports]
-from sklearn.ensemble import HistGradientBoostingClassifier  # type: ignore[reportMissingImports]
 from sklearn.inspection import permutation_importance  # type: ignore[reportMissingImports]
 from sklearn.compose import ColumnTransformer  # type: ignore[reportMissingImports]
+from sklearn.isotonic import IsotonicRegression
 from sklearn.impute import SimpleImputer  # type: ignore[reportMissingImports]
 from sklearn.linear_model import LogisticRegression  # type: ignore[reportMissingImports]
 from sklearn.metrics import accuracy_score, average_precision_score, roc_auc_score  # type: ignore[reportMissingImports]
@@ -62,11 +67,11 @@ def generalization_verdict(
     max_psi: float,
     objective_minimum: float | None,
 ) -> str:
-    if abs(cv_score - holdout_score) > 0.05:
+    if abs(cv_score - holdout_score) > GENERALIZATION_LIMITS["generalization_gap"]:
         return "overfit"
-    if importance_stability < 0.6:
+    if importance_stability < GENERALIZATION_LIMITS["importance_stability"]:
         return "unstable"
-    if max_psi > 0.25:
+    if max_psi > GENERALIZATION_LIMITS["max_psi"]:
         return "drift"
     if objective_minimum is not None and holdout_score < objective_minimum:
         return "below_objective"
@@ -163,7 +168,7 @@ class CatBoostAdapter(ClassifierMixin, BaseEstimator):
 def _estimator(kind: str, seed: int, frame: pd.DataFrame | None = None) -> tuple[Any, dict[str, list[Any]]]:
     if kind == "gradient_boosting":
         if LGBMClassifier is not None:
-            model = LGBMClassifier(random_state=seed, n_jobs=-1, verbosity=-1)
+            model = LGBMClassifier(random_state=seed, n_jobs=1, verbosity=-1)
             space = {
                 "model__n_estimators": [150, 250, 400, 600],
                 "model__learning_rate": [0.02, 0.04, 0.06, 0.1],
@@ -175,14 +180,7 @@ def _estimator(kind: str, seed: int, frame: pd.DataFrame | None = None) -> tuple
                 "model__scale_pos_weight": [1.0, 2.0, 4.0],
             }
             return model, space
-        return HistGradientBoostingClassifier(random_state=seed), {
-            "model__max_iter": [150, 250, 400],
-            "model__learning_rate": [0.03, 0.06, 0.1],
-            "model__max_leaf_nodes": [15, 31, 63],
-            "model__min_samples_leaf": [10, 20, 40],
-            "model__l2_regularization": [0.0, 1.0, 5.0],
-            "model__class_weight": [None, "balanced"],
-        }
+        raise ValueError("lightgbm is unavailable; the requested algorithm was not substituted")
     if kind == "logistic_regression":
         model = LogisticRegression(max_iter=3000, random_state=seed)
         return model, {
@@ -190,7 +188,7 @@ def _estimator(kind: str, seed: int, frame: pd.DataFrame | None = None) -> tuple
             "model__class_weight": [None, "balanced"],
         }
     if kind == "random_forest_shap":
-        model = RandomForestClassifier(random_state=seed, n_jobs=-1)
+        model = RandomForestClassifier(random_state=seed, n_jobs=1)
         return model, {
             "model__n_estimators": [200, 400, 600],
             "model__max_depth": [8, 12, 16, None],
@@ -202,7 +200,7 @@ def _estimator(kind: str, seed: int, frame: pd.DataFrame | None = None) -> tuple
         if CatBoostClassifier is None:
             raise ValueError("catboost is unavailable in the sandbox image")
         categorical = tuple() if frame is None else tuple(str(name) for name in frame.columns if not pd.api.types.is_numeric_dtype(frame[name]))
-        model = CatBoostAdapter(categorical_columns=categorical, random_seed=seed, thread_count=4)
+        model = CatBoostAdapter(categorical_columns=categorical, random_seed=seed, thread_count=1)
         return model, {
             "model__iterations": [150, 250, 400],
             "model__depth": [4, 6, 8],
@@ -213,7 +211,7 @@ def _estimator(kind: str, seed: int, frame: pd.DataFrame | None = None) -> tuple
         }
     if kind == "xgboost":
         if XGBClassifier is not None:
-            model = XGBClassifier(random_state=seed, n_jobs=-1, verbosity=0, eval_metric="logloss")
+            model = XGBClassifier(random_state=seed, n_jobs=1, verbosity=0, eval_metric="logloss")
             space = {
                 "model__n_estimators": [150, 250, 400, 600],
                 "model__max_depth": [3, 5, 7, 9],
@@ -225,12 +223,7 @@ def _estimator(kind: str, seed: int, frame: pd.DataFrame | None = None) -> tuple
                 "model__scale_pos_weight": [1.0, 2.0, 4.0],
             }
             return model, space
-        return HistGradientBoostingClassifier(random_state=seed), {
-            "model__max_iter": [150, 250, 400],
-            "model__learning_rate": [0.03, 0.06, 0.1],
-            "model__max_leaf_nodes": [15, 31, 63],
-            "model__min_samples_leaf": [10, 20, 40],
-        }
+        raise ValueError("xgboost is unavailable; the requested algorithm was not substituted")
     raise ValueError(f"unsupported autoresearch kind: {kind}")
 
 
@@ -259,11 +252,11 @@ def aggregate_importance_to_original(names: Any, values: Any, columns: Any) -> d
     return grouped
 
 
-def _importance_stability(best: Pipeline, frame: pd.DataFrame, target: Any, cv: StratifiedKFold, top_k: int = 10) -> float:
+def _importance_stability(best: Pipeline, frame: pd.DataFrame, target: Any, cv: Any, top_k: int = 10) -> float:
     columns = [str(c) for c in getattr(best, "feature_names_in_", getattr(best.steps[0][1], "feature_names_in_", []))]
     top_sets: list[set[str]] = []
-    for train_index, test_index in cv.split(frame, target):
-        estimator = clone(best)
+    for train_index, test_index in (cv.split(frame, target) if hasattr(cv, "split") else cv):
+        estimator = cast(Pipeline, clone(best))
         estimator.fit(frame.iloc[train_index], np.asarray(target)[train_index])
         preprocess = estimator.named_steps["preprocess"]
         model = estimator.named_steps["model"]
@@ -274,9 +267,9 @@ def _importance_stability(best: Pipeline, frame: pd.DataFrame, target: Any, cv: 
             names = np.asarray(preprocess.get_feature_names_out(), dtype=str)
             values = np.abs(np.asarray(model.coef_, dtype=float)).reshape(-1)
         else:
-            importance = permutation_importance(estimator, frame.iloc[test_index], np.asarray(target)[test_index], n_repeats=2, random_state=42, n_jobs=-1)
+            importance = permutation_importance(estimator, frame.iloc[test_index], np.asarray(target)[test_index], n_repeats=2, random_state=42, n_jobs=1)
             names = np.asarray(frame.columns, dtype=str)
-            values = np.asarray(importance.importances_mean, dtype=float)
+            values = np.asarray(importance["importances_mean"], dtype=float)
         grouped = aggregate_importance_to_original(names, values, columns)
         grouped_names = np.asarray(list(grouped.keys()), dtype=str)
         grouped_values = np.asarray(list(grouped.values()), dtype=float)
@@ -297,7 +290,7 @@ def _top_features(best: Pipeline, holdout: pd.DataFrame, holdout_target: np.ndar
         from sklearn.inspection import permutation_importance  # type: ignore[reportMissingImports]
 
         outcome = permutation_importance(best, holdout, holdout_target, n_repeats=n_repeats, random_state=seed, n_jobs=n_jobs)
-        pairs = sorted(zip([str(name) for name in holdout.columns], [float(value) for value in outcome.importances_mean]), key=lambda pair: -pair[1])
+        pairs = sorted(zip([str(name) for name in holdout.columns], [float(value) for value in outcome["importances_mean"]]), key=lambda pair: -pair[1])
         return [{"name": name, "importance": max(value, 0.0)} for name, value in pairs[:20] if value > 0]
     except (TypeError, ValueError) as exc:
         raise ValueError("feature importance could not be calculated") from exc
@@ -365,13 +358,12 @@ def select_operating_threshold(
         raise ValueError("cost-optimal threshold is invalid") from exc
 
 
-def _calibrate_probabilities(best: Pipeline, train: pd.DataFrame, target: Any, cv: StratifiedKFold, *, n_jobs: int = -1) -> tuple[np.ndarray, np.ndarray]:
+def _calibrate_probabilities(best: Pipeline, train: pd.DataFrame, target: Any, cv: Any, *, n_jobs: int = -1) -> tuple[np.ndarray, IsotonicRegression]:
     """Out-of-fold isotonic calibration; returns (oof_calibrated, calibrator)."""
-    from sklearn.isotonic import IsotonicRegression  # type: ignore[reportMissingImports]
     from sklearn.model_selection import cross_val_predict  # type: ignore[reportMissingImports]
 
     y_array = np.asarray(target)
-    oof = cross_val_predict(best, train, y_array, cv=cv, method="predict_proba", n_jobs=n_jobs)[:, 1]
+    oof = np.asarray(cross_val_predict(best, train, y_array, cv=cv, method="predict_proba", n_jobs=n_jobs))[:, 1]
     calibrator = IsotonicRegression(out_of_bounds="clip")
     calibrator.fit(oof, y_array)
     return np.asarray(calibrator.predict(oof), dtype=float), calibrator
@@ -413,26 +405,58 @@ def run_classification_autoresearch(
     objective_minimum: float | None = None,
     cost_matrix: dict[str, float] | None = None,
     minimum_recall: float | None = None,
+    selection_only: bool = False,
+    imbalance_strategy: str | None = None,
 ) -> dict[str, Any]:
     if not 1 <= n_iter <= 40:
         raise ValueError("n_iter must be between 1 and 40")
     if list(train.columns) != list(holdout.columns):
         raise ValueError("train/holdout feature columns must match")
     model, search_space = _estimator(kind, seed, train)
+    if imbalance_strategy not in {None, "none", "balanced"}:
+        raise ValueError("unsupported class imbalance strategy")
+    if imbalance_strategy == "balanced":
+        if "model__class_weight" in search_space:
+            search_space["model__class_weight"] = ["balanced"]
+        else:
+            labels = np.asarray(target)
+            positives = np.count_nonzero(labels == 1)
+            if not 0 < positives < len(labels):
+                raise ValueError("balanced weighting requires both training classes")
+            search_space["model__scale_pos_weight"] = [(len(labels) - positives) / positives]
     if kind == "catboost":
         categorical = tuple(str(name) for name in train.columns if not pd.api.types.is_numeric_dtype(train[name]))
         preprocessor: Any = CatBoostFramePreprocessor(categorical)
         parallel_jobs = 1
     else:
         preprocessor = _preprocessor(train)
-        parallel_jobs = -1
+        parallel_jobs = 1
     pipeline = Pipeline([("preprocess", preprocessor), ("model", model)])
-    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
+    cv, receipts = cv_splits("stratified_holdout", target, cv_folds, seed)
     if objective not in OBJECTIVE_SCORING:
         raise ValueError(f"unsupported objective: {objective}")
-    search = RandomizedSearchCV(pipeline, search_space, n_iter=n_iter, scoring=OBJECTIVE_SCORING[objective], cv=cv, random_state=seed, n_jobs=parallel_jobs, refit=True, return_train_score=False)
+    search = RandomizedSearchCV(pipeline, search_space, n_iter=n_iter, scoring=OBJECTIVE_SCORING[objective], cv=cv, random_state=seed, n_jobs=parallel_jobs, refit=True, return_train_score=False, error_score=cast(Any, "raise"))
     search.fit(train, target)  # holdout is intentionally not passed to search
+    trials_done = len(search.cv_results_["params"])
+    candidate = {"kind": kind, "cv_score": _to_float(search.best_score_, "best CV score"), "search": search, "n_iter": trials_done,
+                 "cv_receipts": receipts, "cv_indices": cv, "fit_counts": fit_counts(trials_done, len(cv))}
+    if selection_only:
+        return candidate
+    return evaluate_classification_candidate(candidate, train, target, holdout, holdout_target, objective=objective, seed=seed, cv_folds=cv_folds, objective_minimum=objective_minimum, cost_matrix=cost_matrix, minimum_recall=minimum_recall)
 
+
+def evaluate_classification_candidate(
+    candidate: dict[str, Any], train: pd.DataFrame, target: Any,
+    holdout: pd.DataFrame, holdout_target: Any, *,
+    objective: str = "roc_auc", seed: int = 42, cv_folds: int = 5,
+    objective_minimum: float | None = None, cost_matrix: dict[str, float] | None = None,
+    minimum_recall: float | None = None,
+) -> dict[str, Any]:
+    """Final evaluation only, after the caller has locked the CV winner."""
+    search = candidate["search"]
+    kind, n_iter = candidate["kind"], candidate["n_iter"]
+    cv = candidate["cv_indices"]
+    parallel_jobs = 1
     probabilities = search.best_estimator_.predict_proba(holdout)[:, 1]
     try:
         probability_list = [float(value) for value in probabilities]
@@ -477,6 +501,8 @@ def run_classification_autoresearch(
         })
     return {
         "kind": kind,
+        "cv_receipts": candidate["cv_receipts"],
+        "fit_counts": {**candidate["fit_counts"], "calibration_oof_fits": len(cv), "calibrator_fits": 1, "stability_fits": len(cv)},
         "objective": objective,
         "best_params": search.best_params_,
         "cv_score": cv_score,
@@ -491,6 +517,8 @@ def run_classification_autoresearch(
         "estimator": search.best_estimator_,
         "top_features": top_features,
         "holdout_used_during_search": False,
+        "holdout_evaluations": 1,
+        "selection_basis": "training_cv",
         "seed": seed,
         "n_iter": n_iter,
     }
@@ -509,11 +537,14 @@ def run_multi_model_comparison(
     cost_matrix: dict[str, float] | None = None,
     minimum_recall: float | None = None,
     objective_minimum: float | None = None,
+    imbalance_strategy: str | None = None,
 ) -> dict[str, Any]:
-    """Run autotune for each kind sequentially, compare, and recommend the best by CV."""
-    if not kinds or not all(k in ("catboost", "gradient_boosting", "random_forest_shap", "logistic_regression", "xgboost") for k in kinds):
-        raise ValueError("kinds must be a non-empty list of supported algorithm names")
-    per_kind_budget = max(1, n_iter // len(kinds))
+    """Compare on training CV only; evaluate the locked winner on holdout."""
+    if not kinds or len(set(kinds)) != len(kinds) or not all(k in ("catboost", "gradient_boosting", "random_forest_shap", "logistic_regression", "xgboost") for k in kinds):
+        raise ValueError("kinds must be a non-empty unique list of supported algorithm names")
+    if isinstance(n_iter, bool) or not len(kinds) <= n_iter <= 40:
+        raise ValueError("global trial budget must cover the candidate count and be at most 40")
+    per_kind_budget = n_iter // len(kinds)
     comparison: list[dict[str, Any]] = []
     for kind in kinds:
         result = run_classification_autoresearch(
@@ -522,30 +553,23 @@ def run_multi_model_comparison(
             n_iter=per_kind_budget, cv_folds=cv_folds,
             cost_matrix=cost_matrix, minimum_recall=minimum_recall,
             objective_minimum=objective_minimum,
+            selection_only=True, imbalance_strategy=imbalance_strategy,
         )
-        comparison.append({
-            "kind": kind,
-            "cv_score": result["cv_score"],
-            "metrics": result["metrics"],
-            "guards": result["guards"],
-            "verdict": result["verdict"],
-            "operating_threshold": result["operating_threshold"],
-            "operating_scenarios": result["operating_scenarios"],
-            "best_params": result["best_params"],
-            "trials": result["trials"],
-            "top_features": result["top_features"],
-            "calibrated_probabilities": result["calibrated_probabilities"],
-            "estimator": result["estimator"],
-        })
-    eligible = [row for row in comparison if row["verdict"] == "accepted"]
-    candidates = eligible or comparison
-    best = max(candidates, key=lambda r: r["cv_score"])
+        comparison.append(result)
+    winner = max(comparison, key=lambda row: row["cv_score"])
+    best = evaluate_classification_candidate(winner, train, target, holdout, holdout_target, objective=objective, seed=seed, cv_folds=cv_folds, objective_minimum=objective_minimum, cost_matrix=cost_matrix, minimum_recall=minimum_recall)
     return {
-        "comparison": comparison,
+        "comparison": [{"kind": row["kind"], "cv_score": row["cv_score"], "best_params": row["search"].best_params_, "search_trials": row["n_iter"]} for row in comparison],
         "best_kind": best["kind"],
         "best_result": best,
-        "selected_from_accepted": bool(eligible),
-        "eligible_kinds": [row["kind"] for row in (eligible or comparison)],
+        "selection_basis": "training_cv",
+        "holdout_evaluations": 1,
+        "completed_trials": sum(row["n_iter"] for row in comparison),
+        "fit_counts": sum_fit_counts([row["fit_counts"] if row is not winner else best["fit_counts"] for row in comparison]),
+        "cv_receipts": best["cv_receipts"],
+        "baseline_kind": "constant_negative_no_fit",
+        "execution_mode": "sequential",
+        "eligible_kinds": [row["kind"] for row in comparison],
         "per_kind_budget": per_kind_budget,
         "objective": objective,
         "seed": seed,

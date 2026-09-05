@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Telco E2E for ontology data-atlas PNG + Plotly output inside the sandbox image."""
+"""Sandbox-only Telco rendering fixture; not host authorization or LLM E2E evidence."""
 from __future__ import annotations
 
 import json
@@ -16,7 +16,6 @@ from ml_autoresearch import run_classification_autoresearch  # type: ignore[repo
 from ml_presentation import (  # type: ignore[reportMissingImports]
     build_manifest,
     build_plotly_figures,
-    recommend_spec_values,
     render_assets,
     render_shap_summary,
     validate_manifest,
@@ -45,6 +44,8 @@ def main() -> int:
     x = data[features]
     y = data[target].astype(int)
     x_train, x_hold, y_train, y_hold = train_test_split(x, y, test_size=0.2, random_state=SEED, stratify=y)
+    x_train, x_hold = pd.DataFrame(x_train), pd.DataFrame(x_hold)
+    y_train, y_hold = pd.Series(y_train), pd.Series(y_hold)
 
     result = run_classification_autoresearch(
         x_train, y_train, x_hold, y_hold,
@@ -92,7 +93,7 @@ def main() -> int:
     estimator = result["estimator"]
     preprocess = estimator.named_steps["preprocess"]
     model = estimator.named_steps["model"]
-    sample = x_hold.sample(min(200, len(x_hold)), random_state=SEED)
+    sample = x_hold
     transformed = preprocess.transform(sample)
     if hasattr(transformed, "toarray"):
         transformed = transformed.toarray()
@@ -101,11 +102,6 @@ def main() -> int:
         shap_values = shap_values[:, :, -1]
     transformed_names = [str(name).split("__", 1)[-1] for name in preprocess.get_feature_names_out()]
     render_shap_summary(manifest, shap_values, transformed_names, transformed, OUTPUT)
-    shap_by_column: dict[str, np.ndarray] = {}
-    for index, name in enumerate(transformed_names):
-        source = next((feature for feature in features if name == feature or name.startswith(feature + "_")), name)
-        shap_by_column[source] = shap_by_column.get(source, np.zeros(len(shap_values))) + shap_values[:, index]
-    recommend_spec_values(manifest, shap_by_column=shap_by_column, sample_frame=sample, top_n=3)
 
     figures = build_plotly_figures(
         manifest, y_true=y_hold.tolist(), probabilities=probabilities,

@@ -2,7 +2,7 @@
 [server]
 host = "127.0.0.1"
 port = 8080
-max_sandbox_timeout_seconds = 1200
+max_sandbox_timeout_seconds = 3600
 
 [log]
 level = "INFO"

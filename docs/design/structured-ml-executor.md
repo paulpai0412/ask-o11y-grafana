@@ -1,6 +1,8 @@
 # Structured ML executor
 
-Status: implementation design
+Status: trusted executor implemented; 2026-09-05 contract-integrity amendments pending implementation and release acceptance.
+
+Current requirements: [Natural-language analysis platform](natural-language-analysis-platform.md), NLAP-03/04/05/06/09/10/11. Historical checks below do not establish compliance with these amendments.
 
 Scope: Sandbox Analysis MCP standard ML execution path
 
@@ -8,7 +10,7 @@ Related: [`ontology-ml-accuracy.md`](./ontology-ml-accuracy.md), [`ml-grafana-pr
 
 ## Problem
 
-Standard supervised ML currently executes model-authored Python. Every observed execution failure in the Adult and Telco acceptance runs traces to this freedom: nullable-dtype boolean crashes, wrong library call signatures, invented payload shapes, and Matplotlib style changes that reset the CJK font. Advisory skills reduce but cannot eliminate these failures, and results are not reproducible byte-for-byte.
+The original standard-ML path used model-authored Python, exposing library-signature, dtype, payload and rendering errors. A trusted template now exists. The current gap is not merely generated-code freedom: the plan/frame linkage, actual split, study-level holdout use and trusted execution receipts must also be enforced.
 
 ## Design
 
@@ -23,6 +25,17 @@ execute_ml_contract(frame_ref, contract_ref, seed)
 - The template runs entirely inside the pinned image using the trusted modules:
   `ml_preprocessing` (training-only preprocessing) → `ml_autoresearch` (budgeted search + untouched holdout + guards) → `ml_presentation` (bounded manifest + plain-language assets, including the data-profile chart).
 - The model never sees or authors the template. Free-form Python remains available via `execute_python_analysis` / `execute_python_preprocessing` for exploratory work; the planner-facing guidance points standard ML at `execute_ml_contract`.
+
+## Mandatory amendments (pending)
+
+- Verify contract_ref and frame provenance share the same plan digest, source, scope and approval revision; independently authorized refs are insufficient.
+- Honor the declared outer/CV split. Unsupported combinations fail before compute, never silently become random stratified splits.
+- Select model and feature set using train/CV only; lock the winner before final holdout. Holdout-derived verdicts cannot filter selection candidates.
+- Separate metric direction from optional business optimization direction; pure prediction does not require target optimization.
+- Account for global search trials across models/feature sets and expose actual adapter availability. Sequential execution is not described as parallel.
+- Record source/query/eligible/train/test/explained rows and approved exclusions. Generic Python artifacts cannot self-assert verified-ML status.
+- Recover compute/write transport failures through operation receipts; do not blindly rerun completed work.
+- Route every generated image through the Plotly plugin in explicit image/plotly mode (NLAP-07).
 
 ## Contract additions
 
@@ -47,4 +60,5 @@ Optional `analysis_contract` fields, validated by the Planner gate and baked int
 ## Acceptance
 
 1. Contract TDD: composed template parses, bakes budget/objective/positive class, emits manifest; missing contract, unsupported kind, and tampered hash fail closed.
-2. End-to-end: fresh Ask O11y session, natural language only, produces a Grafana Preview through `execute_ml_contract` with zero generated training code.
+2. Negative gates: mismatched valid refs, unsupported split, unapproved exclusions, holdout-dependent winner changes and budget overruns fail their corresponding checks.
+3. End-to-end: fresh Ask O11y session, natural language only, produces a Grafana Preview through `execute_ml_contract` with zero model-authored training code; original event receipts and browser evidence establish lineage and plugin rendering. A baseline-blocked model is a valid platform outcome, not predictive success.

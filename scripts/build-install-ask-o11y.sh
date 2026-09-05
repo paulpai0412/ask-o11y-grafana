@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-SOURCE_DIR="$ROOT/.scratch/ask-o11y-build"
+SOURCE_DIR=${ASK_O11Y_BUILD_DIR:-"$ROOT/.scratch/ask-o11y-release-build"}
 PLOTLY_PANEL_DIR="$ROOT/grafana-panels/asko11y-plotly-panel"
 GO_BIN=${GO_BIN:-"$ROOT/.scratch/go/bin/go"}
 BASE_COMMIT=8395ae10c3e38beae56329e4174a14a9a6d4c680
@@ -18,7 +18,12 @@ git checkout -q "$BASE_COMMIT"
 git apply "$ROOT/patches/ask-o11y-dynamic-tools-and-timeout.patch"
 git apply "$ROOT/patches/ask-o11y-upload-datasets.patch"
 git apply "$ROOT/patches/ask-o11y-ml-method-skill.patch"
+git apply --unidiff-zero "$ROOT/patches/ask-o11y-data-understanding.patch"
 git apply "$ROOT/patches/ask-o11y-upload-capability-closure.patch"
+git apply "$ROOT/patches/ask-o11y-upload-session-header.patch"
+git apply "$ROOT/patches/ask-o11y-plan-ref-repair.patch"
+git apply "$ROOT/patches/ask-o11y-upload-session-attachment.patch"
+git apply "$ROOT/patches/ask-o11y-nlap-authority-and-effects.patch"
 npm ci --ignore-scripts
 npm run typecheck
 npm run build:frontend:prod

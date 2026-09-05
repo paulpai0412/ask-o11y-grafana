@@ -1,13 +1,15 @@
 """Tiny server-side artifact store for workflow-node MCP tools."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from workflow_node import WorkflowContractError, make_artifact_ref, parse_artifact_ref
 
@@ -71,6 +73,7 @@ class ArtifactStore:
                     "run_id": run_id,
                     "org_id": str(context.get("org_id", "")),
                     "user_id": str(context.get("user_id", "")),
+                    "session_id": str(context.get("session_id", "")),
                     "created_at": time.time(),
                 },
                 ensure_ascii=False,
@@ -82,17 +85,125 @@ class ArtifactStore:
         metadata_path.chmod(0o600)
         return run_id
 
+    def grant_reuse(self, context: dict[str, Any], execution_ref: str, target_session: str) -> dict[str, str]:
+        run_id, parts = parse_artifact_ref(execution_ref)
+        if parts != ("sandbox-execution",) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", target_session):
+            raise WorkflowContractError("reuse requires an execution ref and an explicit target session identity")
+        self.read_json(context, execution_ref)
+        try:
+            metadata = json.loads(self._metadata_path(run_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise WorkflowContractError("reuse source metadata is unavailable") from exc
+        if not context.get("session_id") or metadata.get("session_id") != context["session_id"]:
+            raise ArtifactAuthError("only the original source session may grant reuse")
+        grant = {"source_session_id": context["session_id"], "target_session_id": target_session, "scope": "existing_execution_results_only"}
+        name = "reuse-grant-" + hashlib.sha256(target_session.encode()).hexdigest()[:32]
+        grant_ref = self.write_json(context, run_id, name, grant)
+        return {"execution_ref": execution_ref, "grant_ref": grant_ref, **grant}
+
+    @staticmethod
+    def _durable_json(path: Path, value: Any) -> None:
+        temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        with temporary.open("x", encoding="utf-8") as handle:
+            temporary.chmod(0o600)
+            json.dump(value, handle, ensure_ascii=False, allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def reconcile_operation(self, context: dict[str, Any], operation_id: str) -> dict[str, Any]:
+        """Recover only host-persisted completion evidence; never infer success or redispatch."""
+        if not re.fullmatch(r"[a-f0-9]{64}", operation_id):
+            raise WorkflowContractError("invalid operation identity")
+        operation = self.root / "operations" / operation_id
+        try:
+            identity = json.loads((operation / "identity.json").read_text())
+        except (OSError, ValueError) as exc:
+            raise ArtifactAuthError("operation is unavailable for this session") from exc
+        actor = {key: str(context.get(key) or "") for key in ("org_id", "user_id", "session_id")}
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        if not all(actor.values()) or identity[0] != actor or digest != operation_id:
+            raise ArtifactAuthError("operation identity does not match this actor/session")
+        try:
+            completion = json.loads((operation / "completion.json").read_text())
+        except FileNotFoundError:
+            return {"operation_id": operation_id, "status": "indeterminate", "redispatch_allowed": False}
+        except (OSError, ValueError) as exc:
+            raise WorkflowContractError("completion evidence is invalid; no redispatch allowed") from exc
+        if completion.get("operation_id") != operation_id or not isinstance(completion.get("result"), dict):
+            raise WorkflowContractError("completion receipt does not match the operation")
+        result = completion["result"]
+        if (result.get("evidence") or {}).get("effect_outcome") == "indeterminate":
+            raise WorkflowContractError("unknown outcome is not completion evidence")
+        self._durable_json(operation / "response.json", result)
+        return {"operation_id": operation_id, "status": "completed" if result.get("ok", True) else "failed", "result": result, "redispatch_allowed": False}
+
+    def run_once(self, context: dict[str, Any], kind: str, inputs: dict[str, Any], execute: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """Reserve before effects; a crash or unknown outcome is never automatically retried."""
+        actor = {key: str(context.get(key) or "") for key in ("org_id", "user_id", "session_id")}
+        if not all(actor.values()):
+            raise ArtifactAuthError("effect execution requires an authenticated actor and session")
+        encoded = json.dumps([actor, kind, inputs], sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+        key = hashlib.sha256(encoded).hexdigest()
+        directory = self.root / "operations"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        operation = directory / key
+        response = operation / "response.json"
+        try:
+            operation.mkdir(mode=0o700)
+        except FileExistsError:
+            try:
+                cached = json.loads(response.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                recovered = self.reconcile_operation(context, key)
+                if recovered["status"] in {"completed", "failed"}:
+                    return recovered["result"]
+                raise WorkflowContractError(f"operation {key} is running or indeterminate; reconcile it before retrying")
+            except (OSError, ValueError) as exc:
+                raise WorkflowContractError("operation receipt is invalid; no redispatch allowed") from exc
+            return cached
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self._durable_json(operation / "identity.json", [actor, kind, inputs])
+        result = execute()
+        result.setdefault("evidence", {})["operation_id"] = key
+        if (result.get("evidence") or {}).get("effect_outcome") == "indeterminate":
+            return result
+        self._durable_json(operation / "completion.json", {"operation_id": key, "result": result})
+        self._durable_json(response, result)
+        return result
+
     def write_json(self, context: dict[str, Any], run_id: str, name: str, value: Any) -> str:
-        self._authorize(context, run_id)
+        self._authorize(context, run_id, name)
         ref = make_artifact_ref(run_id, name)
         path = self._artifact_path(ref)
-        path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        path.chmod(0o600)
+        payload = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        if name in {"query-plan", "grafana-frame", "grafana-query-response", "dataframe-validation", "sandbox-code", "sandbox-execution", "sandbox-provenance"}:
+            try:
+                with path.open("x", encoding="utf-8") as handle:
+                    path.chmod(0o600)
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except FileExistsError:
+                if path.read_text(encoding="utf-8") != payload:
+                    raise WorkflowContractError("immutable evidence cannot be replaced; create a new plan/run")
+        else:
+            path.write_text(payload, encoding="utf-8")
+            path.chmod(0o600)
         return ref
 
     def read_json(self, context: dict[str, Any], ref: str) -> Any:
-        run_id, _ = parse_artifact_ref(ref)
-        self._authorize(context, run_id)
+        run_id, parts = parse_artifact_ref(ref)
+        self._authorize(context, run_id, parts[0])
         try:
             return json.loads(self._artifact_path(ref).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -107,7 +218,9 @@ class ArtifactStore:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if str(context.get("org_id", "")) != metadata.get("org_id") or str(context.get("user_id", "")) != metadata.get("user_id"):
+            try:
+                self._authorize(context, metadata_path.parent.name, name)
+            except (ArtifactAuthError, WorkflowContractError):
                 continue
             ref = make_artifact_ref(metadata_path.parent.name, name)
             if self._artifact_path(ref).is_file():
@@ -177,7 +290,7 @@ class ArtifactStore:
             raise WorkflowContractError("artifact path escaped store root")
         return path
 
-    def _authorize(self, context: dict[str, Any], run_id: str) -> None:
+    def _authorize(self, context: dict[str, Any], run_id: str, name: str = "") -> None:
         try:
             meta = json.loads(self._metadata_path(run_id).read_text(encoding="utf-8"))
         except OSError as exc:
@@ -186,3 +299,14 @@ class ArtifactStore:
         context_user = str(context.get("user_id", ""))
         if context_org != meta.get("org_id") or context_user != meta.get("user_id"):
             raise ArtifactAuthError("artifact context mismatch")
+        session = str(context.get("session_id", ""))
+        if session != meta.get("session_id", ""):
+            if name not in {"sandbox-execution", "sandbox-provenance", "dashboard"} and not name.startswith(("report-context-", "report-inspection-")):
+                raise ArtifactAuthError("session reuse does not authorize input datasets or new computations")
+            grant_path = self._run_dir(run_id) / ("reuse-grant-" + hashlib.sha256(session.encode()).hexdigest()[:32] + ".json")
+            try:
+                grant = json.loads(grant_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ArtifactAuthError("artifact session mismatch; explicit reuse is required") from exc
+            if grant.get("target_session_id") != session or grant.get("source_session_id") != meta.get("session_id") or grant.get("scope") != "existing_execution_results_only":
+                raise ArtifactAuthError("invalid session reuse grant")

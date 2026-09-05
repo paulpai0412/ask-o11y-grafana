@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 from pathlib import Path
 
@@ -64,7 +65,11 @@ def main() -> int:
     explanations = manifest["plain_language"]
     assert "每 1,000 筆" in explanations["accuracy"]
     assert "約 4 筆" in explanations["generalization"]
-    assert "約八成" in explanations["stability"]
+    assert "78%" in explanations["stability"]
+    different = adult_manifest(presentation)
+    different["guards"]["verdict"] = "unstable"
+    rebuilt = presentation.build_manifest(**{key: different[key] for key in ("purpose", "conclusion", "identity", "objective", "data", "process", "guards", "trials", "features", "limitations")}, baseline_metrics=different["results"]["baseline"], selected_metrics=different["results"]["selected"])
+    assert "不可部署" in rebuilt["decision"]["operational_status"]
     assert "不代表未來" in explanations["drift"]
 
     for bad in (
@@ -72,6 +77,8 @@ def main() -> int:
         {**manifest, "physical_path": "/tmp/private.csv"},
         {**manifest, "trials": manifest["trials"] * 2},
         {**manifest, "features": manifest["features"] * 21},
+        {**manifest, "results": {"selected": {"accuracy": math.nan}}},
+        {**manifest, "process": {"estimator": object()}},
     ):
         try:
             presentation.validate_manifest(bad)

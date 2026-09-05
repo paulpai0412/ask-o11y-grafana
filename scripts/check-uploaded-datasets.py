@@ -20,6 +20,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         uploads.UPLOAD_ROOT = Path(tmp)
         context = {"org_id": "1", "user_id": "7"}
+        assert uploads._infer_type(["0.6056", "0.4425"]) == "number"
+        assert uploads._infer_type(["-0.35", "0.42"]) == "number"
+        assert uploads._infer_type(["001", "002"]) == "string"
         csv_result = uploads.store_upload(context=context, session_id="session-one", filename="sales.csv", raw=b"code,amount\n001,10\n002,20\n")
         assert csv_result["rows"] == 2 and csv_result["columns"] == 2
         assert csv_result["fields"] == [{"name": "code", "type": "string"}, {"name": "amount", "type": "number"}]

@@ -39,7 +39,7 @@ diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
  		}
  		selected[name] = struct{}{}
 +	}
-+	if conversationHasExactUploadDataset(req.Messages) {
++	if hasUploadDatasetContext(req) {
 +		required := map[string]struct{}{
 +			"grafana-query_discover_datasets": {},
 +			"grafana-query_inspect_dataset":  {},

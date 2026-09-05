@@ -22,7 +22,7 @@ def _unb64(value: str) -> bytes:
 
 
 def sign_output_url(*, public_base: str, secret: str, context: dict[str, str], execution_ref: str, output_index: int, expires_at: int) -> str:
-    payload = json.dumps({"org": context["org_id"], "user": context["user_id"], "ref": execution_ref, "index": output_index, "exp": expires_at}, separators=(",", ":"), sort_keys=True).encode()
+    payload = json.dumps({"org": context["org_id"], "user": context["user_id"], "session": context.get("session_id", ""), "ref": execution_ref, "index": output_index, "exp": expires_at}, separators=(",", ":"), sort_keys=True).encode()
     encoded = _b64(payload)
     signature = _b64(hmac.new(secret.encode(), encoded.encode(), hashlib.sha256).digest())
     return public_base.rstrip("/") + "/assets/" + encoded + "." + signature
@@ -37,7 +37,7 @@ def read_signed_output(token: str, *, secret: str, artifacts) -> tuple[bytes, st
         payload = json.loads(_unb64(encoded))
         if int(payload["exp"]) < int(time.time()):
             raise PermissionError("artifact URL expired")
-        context = {"org_id": str(payload["org"]), "user_id": str(payload["user"])}
+        context = {"org_id": str(payload["org"]), "user_id": str(payload["user"]), "session_id": str(payload.get("session", ""))}
         execution = artifacts.read_json(context, str(payload["ref"]))
         index = int(payload["index"])
         result = execution["results"][index]

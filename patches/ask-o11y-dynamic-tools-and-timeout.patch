@@ -34,7 +34,7 @@ new file mode 100644
 index 0000000..2469cf6
 --- /dev/null
 +++ b/pkg/agent/dashboard_resolver.go
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,151 @@
 +package agent
 +
 +import (
@@ -51,7 +51,7 @@ index 0000000..2469cf6
 +	if err != nil {
 +		return false, fmt.Errorf("dashboard JSON is invalid: %w", err)
 +	}
-+	return strings.Contains(string(encoded), `"$plan_ref"`) || strings.Contains(string(encoded), `"$execution_ref"`), nil
++	return strings.Contains(string(encoded), `"$plan_ref"`) || strings.Contains(string(encoded), `"$execution_ref"`) || strings.Contains(string(encoded), `"$dashboard_ref"`), nil
 +}
 +
 +func (a *AgentLoop) resolveDashboardBindings(dashboard map[string]interface{}, req LoopRequest) (map[string]interface{}, error) {
@@ -164,14 +164,16 @@ index 0000000..2469cf6
 +		return a.resolvePatchBindings(args, req)
 +	}
 +	if req.ForceGrafanaPreview {
-+		tags, _ := dashboard["tags"].([]interface{})
-+		normalized := []interface{}{previewDashboardTag}
-+		for _, tag := range tags {
-+			if tag != previewDashboardTag {
-+				normalized = append(normalized, tag)
++		if _, opaqueDashboardRef := dashboard["$dashboard_ref"]; !opaqueDashboardRef {
++			tags, _ := dashboard["tags"].([]interface{})
++			normalized := []interface{}{previewDashboardTag}
++			for _, tag := range tags {
++				if tag != previewDashboardTag {
++					normalized = append(normalized, tag)
++				}
 +			}
++			dashboard["tags"] = normalized
 +		}
-+		dashboard["tags"] = normalized
 +	}
 +	resolved, err := a.resolveDashboardBindings(dashboard, req)
 +	if err != nil {
@@ -250,7 +252,7 @@ index c22dd6f..b9349b4 100644
  const maxTruncationRetries = 1
 +const maxSelectedTools = 24
 +const publicationQuestion = "是否確認將此 Grafana Preview 正式發佈至 Dashboard？"
-+const grafanaPreviewNudge = "[SYSTEM: The confirmed intent requires a visually inspectable Grafana Preview, not a chat-only Result Preview. Use the selected dashboarding skill and mcp-grafana_update_dashboard with one complete dashboard JSON. For an analysis result, use only an opaque PNG asset binding and image/text panels; use $plan_ref targets only when Sandbox was not called. The trusted host resolves them. The host will enforce preview status. Return the exact Grafana URL and stop for publication confirmation.]"
++const grafanaPreviewNudge = "[SYSTEM: The confirmed intent requires a visually inspectable Grafana Preview, not a chat-only Result Preview. Use the selected dashboarding skill and mcp-grafana_update_dashboard with one complete dashboard JSON. For an analysis result, use only an opaque PNG asset binding and image/text panels; use $plan_ref targets only when Sandbox was not called. After compose_ml_dashboard returns refs.dashboard_ref, send {dashboard: {$dashboard_ref: refs.dashboard_ref}} rather than copying the full dashboard; the host resolves it. The trusted host resolves all refs. The host will enforce preview status. Return the exact Grafana URL and stop for publication confirmation.]"
  
  // truncatedToolCallNudge is injected after a truncated tool call is discarded so
  // the model reissues a smaller, complete call rather than repeating the cutoff.
@@ -1160,7 +1162,7 @@ index 7b2c1f4..026a0b8 100644
 -const connectDialTimeout = 10 * time.Second
 +const (
 +	connectDialTimeout = 10 * time.Second
-+	toolCallTimeout    = 10 * time.Minute
++	toolCallTimeout    = 3600 * time.Second
 +)
  
  // forceReconnectMinInterval is the dedupe window that prevents the health

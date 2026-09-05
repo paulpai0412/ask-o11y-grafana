@@ -108,9 +108,10 @@ def main() -> int:
             promoted = next(item for item in evidence_panels if item["askO11yArtifactId"] == "class-view")
             assert promoted["gridPos"]["w"] == 24 and promoted["gridPos"]["h"] >= 16, promoted["gridPos"]
         if index == 1:
-            content = evidence_panels[0]["options"]["content"]
-            assert "资料模型显示群组之间存在明显差异。" in content, content
-            assert "应与其他证据和资料限制一起阅读。" not in content, "single-view panel repeated the panel-level narrative"
+            options = evidence_panels[0]["options"]
+            assert options["renderMode"] == "image", options
+            assert "content" not in options, "image evidence must remain in the Plotly plugin, not a text panel"
+            assert options["narrative"]["observation"] == "本图显示的变化与整份报告一致。"
         assert "$asset_url_" in str(dashboard), dashboard
         if any("plotly_index" in output for output in outputs.values()):
             assert "$plotly_" in str(dashboard), dashboard

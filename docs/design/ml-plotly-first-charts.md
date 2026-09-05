@@ -1,13 +1,15 @@
 # Plotly-first ML 圖表 + PNG Fallback 設計
 
-日期：2026-08-26　狀態：implemented（TDD + Grafana/Chromium E2E）
+日期：2026-08-26；修訂：2026-09-05。狀態：歷史 Plotly-first 路徑已有 E2E；全圖片 plugin 規範待實作。
+
+現行規範以 [平台架構修訂](natural-language-analysis-platform.md) NLAP-07 為準：PNG-only 也必須在 plugin 內以明確 image mode 呈現，禁止 Text-image 路徑與靜默降級。下方既有 fallback 行為及 E2E 為歷史實作紀錄，不代表新要求已完成。
 依據：[Plotly plugin 研究](./ml-grafana-plotly-plugin-research.md)；報告編排見 [Generic LLM Report Synthesis](./ml-llm-report-synthesis.md)
 
 > Sandbox 可產生 bounded Plotly capabilities；最終選擇哪些圖、順序、寬度與 narrative 由整份報告 LLM synthesis 決定，不固定十四圖 Dashboard。
 
 ## 目標
 
-ML Preview 的 14 張圖全部產生 **Plotly 主呈現**；PNG 不再並排顯示，降級為 **自動 fallback**（plugin 錯誤、未安裝、列印、稽核）。不繞過唯一讀／唯一算／唯一寫。
+所有分析產出圖片均由 **asko11y-plotly-panel** 呈現，不固定圖表數量。Sanitized figure 使用 plotly mode，PNG-only 使用 image mode；保留原圖、敘述與 evidence，不偽造互動能力。Plugin 未安裝或 figure 無效時明示錯誤，不繞過至 Text panel 或靜默降級。唯一讀／唯一算／唯一寫邊界不變。
 
 ## 架構
 
@@ -40,7 +42,15 @@ mcp-grafana（唯一 writer）→ Preview → 同 UID publish
 - `config` 由 host 固定：`{displaylogo:false, responsive:true}`；sanitizer idempotent，Bridge 只接受完全相同的 fixed config。
 - small-multiples layout 只允許 `xaxis/yaxis` 1..12；`axis13` 與其他 layout key fail closed。
 
-## Dashboard contract 變更
+## Dashboard contract 修訂（待實作）
+
+- 所有圖片 artifact panel 必須使用 pinned plugin；Text 僅可敘述，禁止 HTML/CSS 圖片繞過。
+- Image mode 只需受信任 PNG binding 與完整 narrative/view evidence，不要求不存在的 Plotly binding。
+- Plotly mode 仍必須有 sanitized figure binding；非法 figure 要明示錯誤。更新 figure 後可重新渲染，不沿用舊 failure state。
+- 單 view image mode 也必須顯示 view narrative，不能因去重而遺失全部說明。
+- Compositor、Bridge、validator、host writer/prompt 與 browser checks 必須一起遷移；舊 dashboard 重用 artifacts，不重算。
+
+以下為舊版 contract，僅供遷移比對；衝突處由上述修訂取代：
 
 - ML dashboard 允許的 panel type 新增 pinned `asko11y-plotly-panel`。
 - Plotly panel 必須：≥1 `askO11yPlotlyBindings`（placeholder 形如 `$plotly_*`）＋ fallback PNG binding（`fallbackUrl` 用 `$asset_url_*`）＋ `alt` ＋ caption。

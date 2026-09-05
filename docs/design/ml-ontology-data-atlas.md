@@ -4,6 +4,26 @@
 
 > 本文中的固定五幕與 Telco Dashboard 僅記錄早期 E2E 演進，不是 production 報告流程。Production 由 LLM 根據完整 facts/artifacts 動態決定 sections、順序、圖表與內容。
 
+## Current architecture amendment — profile first
+
+目前 production data-first seam 是 `sandbox-analysis-mcp/profile_dataset`。它接收同一個授權 Grafana frame，對**每一列、每一欄**做 deterministic profiling，並把 profile facts 與視覺化 assets 寫入 manifest；不抽樣、不截斷、不建立 derived dataset，也不決定 ML 方法。Histogram bins、top categories、Spearman matrix 的 bounded field set、以及時間趨勢的 bucket 只服務圖表，不會回流成查詢或模型輸入。
+
+流程依證據與使用者意圖動態分支，而非中央固定 DAG：
+
+```text
+inspect dataset/schema → observed/approved ontology evidence → Analysis Preview + confirmation
+  → exact full-data Planner plan → Grafana Query frame
+  → profile_dataset (non-ML default) → facts/assets/report or explicit ML preview
+```
+
+- Upload ontology 是 session-scoped observed candidate；manifest/provenance 明示 `inferred`，除非實際 approved snapshot 回傳 `approved`。
+- WFERP 無明確預測意圖時維持描述性、診斷性或比較性分析；先 schema search、再 bounded SELECT plan，檢查 grain、JOIN 膨脹與日期語義後才 profile。
+- ML 只在使用者明確要求 prediction/estimation/forecast/model comparison 後啟動，重新建立 ontology-pinned target/features/split contract；`Timestamp` 等時間欄可作 chronological split，但不得自動進 feature。
+- Profile/ML 皆保留原始 frame row count；只有受信任 deterministic executor 可產生分析 artifact。報告由 `prepare_ml_report`、`inspect_report_artifacts`、`compose_ml_dashboard` 以 generic manifest/facts 處理，不代表只支援 ML。
+- Tool/recovery 錯誤交由 native LLM 讀取原始 error、schema、refs 與 evidence 後修正；不新增 Recovery Engine、固定 retry state machine、hardcoded ref、fallback、mock 或 fabricated data。
+
+這個 amendment supersedes 本文後續任何把 data atlas 視為 ML-only 或把 chart aggregation 當成資料集的描述；歷史 Telco 章節保留作實作演進紀錄。
+
 ## 背景與問題
 
 現行 ML contract（`sandbox-analysis-mcp/ml_presentation.py`）產出 14 張 PNG artifact，

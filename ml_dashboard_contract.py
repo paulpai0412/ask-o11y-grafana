@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from html.parser import HTMLParser
 from typing import Any
 
 FORBIDDEN_KEYS = {"raw_rows", "frame", "python_code", "credentials", "physical_path", "signed_url"}
@@ -12,6 +13,26 @@ PLOTLY_PLUGIN_ID = "asko11y-plotly-panel"
 MAX_SECTIONS = 8
 MAX_PANELS = 24
 NARRATIVE_FIELDS = {"headline", "observation", "interpretation", "cross_chart_context", "limitation", "next_step", "evidence"}
+
+
+class _NarrativeHTML(HTMLParser):
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag not in {"div", "p", "span", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "b", "em", "i", "ul", "ol", "li", "br", "hr", "blockquote", "code", "pre", "table", "thead", "tbody", "tr", "td", "th"}:
+            raise ValueError("text panels are narrative-only; images require the Plotly plugin")
+        for name, value in attrs:
+            if name == "style":
+                if not re.fullmatch(r"[A-Za-z0-9\s:;#.,%+\-]*", value or ""):
+                    raise ValueError("text panel style contains an unsafe image or active binding")
+            elif name not in {"class", "title", "role", "aria-label", "lang", "dir", "colspan", "rowspan"}:
+                raise ValueError("text panel attribute is not narrative-only")
+
+
+def validate_narrative_content(content: Any) -> None:
+    if not isinstance(content, str) or "![" in content:
+        raise ValueError("text panels are narrative-only; images require the Plotly plugin")
+    parser = _NarrativeHTML(convert_charrefs=True)
+    parser.feed(content)
+    parser.close()
 
 
 def _panels(value: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -141,11 +162,15 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
         _safe_text(block.get("title"), "narrative block title")
         _safe_text(block.get("body"), "narrative block body")
         _validate_display_evidence(block.get("evidence"), "narrative block")
+    for panel in flattened:
+        if panel.get("type") == "text":
+            validate_narrative_content((panel.get("options") or {}).get("content", ""))
     evidence_panels = [panel for panel in flattened if panel.get("askO11yArtifactId") is not None]
     if not evidence_panels:
         raise ValueError("report dashboard requires at least one evidence panel")
-    placeholders: set[str] = set()
     for panel in evidence_panels:
+        if panel.get("type") != PLOTLY_PLUGIN_ID:
+            raise ValueError("all image evidence must use the Plotly plugin")
         artifact_id = panel.get("askO11yArtifactId")
         if not isinstance(artifact_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", artifact_id):
             raise ValueError("evidence panel artifact id is invalid")
@@ -154,6 +179,7 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
             raise ValueError("evidence panel view ids are invalid")
         _validate_narrative(panel)
         _validate_view_narratives(panel, view_ids)
+        panel_placeholders: set[str] = set()
         bindings = panel.get("askO11yAssetBindings")
         if not isinstance(bindings, list) or not bindings:
             raise ValueError("evidence panel requires an opaque PNG binding")
@@ -168,19 +194,24 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
             output_index = binding.get("output_index")
             if isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
                 raise ValueError("asset binding output index is invalid")
-            placeholders.add(placeholder)
+            panel_placeholders.add(placeholder)
         serialized_options = json.dumps(panel.get("options") or {}, ensure_ascii=False)
-        if not any(placeholder in serialized_options for placeholder in placeholders):
+        if not any(placeholder in serialized_options for placeholder in panel_placeholders):
             raise ValueError("asset binding placeholder is not used by its panel")
         if panel.get("type") == PLOTLY_PLUGIN_ID:
             plotly_bindings = panel.get("askO11yPlotlyBindings")
             options = panel.get("options") or {}
-            if not isinstance(plotly_bindings, list) or not plotly_bindings or "fallbackUrl" not in options or "narrative" not in options:
-                raise ValueError("Plotly evidence panel requires figure, fallback, and narrative bindings")
+            mode = options.get("renderMode")
+            if mode not in {"image", "plotly"} or options.get("fallbackUrl") not in panel_placeholders or "narrative" not in options:
+                raise ValueError("image evidence requires an explicit mode, asset, and narrative")
+            if mode == "plotly" and (not isinstance(plotly_bindings, list) or not plotly_bindings):
+                raise ValueError("Plotly mode requires a sanitized figure binding")
+            if mode == "image" and (plotly_bindings or "figure" in options):
+                raise ValueError("image mode cannot claim a Plotly figure")
             if options.get("selectedViewIds") != view_ids or options.get("viewNarratives") != panel.get("askO11yViewNarratives"):
                 raise ValueError("Plotly selected views and narratives must match the evidence panel metadata")
             view_specs = options.get("viewSpecs")
-            if not isinstance(view_specs, list) or {item.get("view_id") for item in view_specs if isinstance(item, dict)} != set(view_ids):
+            if mode == "plotly" and (not isinstance(view_specs, list) or {item.get("view_id") for item in view_specs if isinstance(item, dict)} != set(view_ids)):
                 raise ValueError("Plotly view specs must cover the selected evidence views")
     _walk(dashboard)
 

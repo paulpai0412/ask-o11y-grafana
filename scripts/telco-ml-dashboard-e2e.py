@@ -100,7 +100,7 @@ def main() -> int:
         raise RuntimeError(f"LLM synthesis unavailable: {exc}; run --prepare-only and synthesize the whole report first") from exc
     composed = bridge.compose_ml_dashboard({
         "report_context_ref": report_context_ref, "inspection_refs": inspection_refs, "synthesis": synthesis,
-        "uid": UID, "title": synthesis["report_title"], "_server_context": context,
+        "uid": UID, "title": synthesis["report_title"], "output_mode": "full", "_server_context": context,
     })
     if not composed.get("ok"):
         raise RuntimeError(f"compose_ml_dashboard failed: {composed}")

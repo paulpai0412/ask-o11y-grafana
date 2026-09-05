@@ -1,0 +1,112 @@
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -93,6 +93,11 @@
+ 	// states selected from the user's current turn.
+ 	ForceGrafanaPreview     bool
+ 	ForceGrafanaPublication bool
++
++	// Recovered opaque refs are extracted from successful tool results in this
++	// run. They repair omitted dependent arguments without inventing a ref.
++	OpaquePlanRef  string
++	OpaqueFrameRef string
+ }
+ 
+ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSEEvent) {
+@@ -290,6 +295,8 @@
+ 			if ctx.Err() != nil {
+ 				return
+ 			}
++			req.OpaquePlanRef = latestToolRef(messages, "data-query-planner_plan_query", "plan_ref")
++			req.OpaqueFrameRef = latestToolRef(messages, "grafana-query_execute_planned_query", "frame_ref")
+ 
+ 			a.send(ctx, eventCh, SSEEvent{
+ 				Type: "tool_call_start",
+@@ -656,6 +663,41 @@
+ 	return budget
+ }
+ 
++func stringArg(value interface{}) string {
++	text, _ := value.(string)
++	return text
++}
++
++func latestToolRef(messages []Message, toolName, key string) string {
++	toolNames := make(map[string]string)
++	for _, message := range messages {
++		if message.Role != "assistant" {
++			continue
++		}
++		for _, call := range message.ToolCalls {
++			toolNames[call.ID] = call.Function.Name
++		}
++	}
++	for index := len(messages) - 1; index >= 0; index-- {
++		message := messages[index]
++		if message.Role != "tool" || toolNames[message.ToolCallID] != toolName {
++			continue
++		}
++		var result map[string]interface{}
++		if json.Unmarshal([]byte(message.Content), &result) != nil || result["ok"] != true {
++			continue
++		}
++		if ref, ok := result[key].(string); ok && strings.TrimSpace(ref) != "" {
++			return ref
++		}
++		refs, _ := result["refs"].(map[string]interface{})
++		if ref, ok := refs[key].(string); ok && strings.TrimSpace(ref) != "" {
++			return ref
++		}
++	}
++	return ""
++}
++
+ func (a *AgentLoop) executeTool(ctx context.Context, tc ToolCall, req LoopRequest) (content string, isError bool, errorKind string) {
+ 	_, span := tracing.DefaultTracer().Start(ctx, "mcp_tool_call",
+ 		trace.WithAttributes(attribute.String("mcp.tool_name", tc.Function.Name)))
+@@ -682,6 +724,17 @@
+ 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+ 		return fmt.Sprintf("Invalid tool arguments: %v", err), true, "tool"
+ 	}
++	if tc.Function.Name == "grafana-query_execute_planned_query" && strings.TrimSpace(stringArg(args["plan_ref"])) == "" && req.OpaquePlanRef != "" {
++		args["plan_ref"] = req.OpaquePlanRef
++	}
++	if tc.Function.Name == "sandbox-analysis_execute_ml_contract" {
++		if strings.TrimSpace(stringArg(args["contract_ref"])) == "" && req.OpaquePlanRef != "" {
++			args["contract_ref"] = req.OpaquePlanRef
++		}
++		if strings.TrimSpace(stringArg(args["frame_ref"])) == "" && req.OpaqueFrameRef != "" {
++			args["frame_ref"] = req.OpaqueFrameRef
++		}
++	}
+ 	if strings.HasPrefix(tc.Function.Name, "grafana-query_") && req.SessionID != "" {
+ 		args["_server_session_id"] = req.SessionID
+ 	}
+diff --git a/pkg/agent/loop_test.go b/pkg/agent/loop_test.go
+--- a/pkg/agent/loop_test.go
++++ b/pkg/agent/loop_test.go
+@@ -1039,3 +1039,24 @@
+ 		}
+ 	}
+ }
++
++func TestLatestToolRefRecoversNestedPlanRef(t *testing.T) {
++	messages := []Message{
++		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", Function: FunctionCall{Name: "data-query-planner_plan_query"}}}},
++		{Role: "tool", ToolCallID: "call-1", Content: `{"ok":true,"refs":{"plan_ref":"artifact://run-1/query-plan"}}`},
++	}
++	if got := latestToolRef(messages, "data-query-planner_plan_query", "plan_ref"); got != "artifact://run-1/query-plan" {
++		t.Fatalf("plan ref = %q", got)
++	}
++}
++
++func TestLatestToolRefIgnoresFailedOrUnrelatedResults(t *testing.T) {
++	messages := []Message{
++		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", Function: FunctionCall{Name: "other_tool"}}, {ID: "call-2", Function: FunctionCall{Name: "data-query-planner_plan_query"}}}},
++		{Role: "tool", ToolCallID: "call-1", Content: `{"ok":true,"plan_ref":"artifact://wrong"}`},
++		{Role: "tool", ToolCallID: "call-2", Content: `{"ok":false,"plan_ref":"artifact://failed"}`},
++	}
++	if got := latestToolRef(messages, "data-query-planner_plan_query", "plan_ref"); got != "" {
++		t.Fatalf("failed/unrelated ref = %q", got)
++	}
++}

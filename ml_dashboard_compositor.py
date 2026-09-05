@@ -187,6 +187,7 @@ def _evidence_panel(
             **base,
             "type": PLOTLY_PLUGIN_ID,
             "options": {
+                "renderMode": "plotly",
                 "figure": plotly_placeholder,
                 "fallbackUrl": asset_placeholder,
                 "alt": panel["headline"],
@@ -202,9 +203,18 @@ def _evidence_panel(
                 "plugin_id": PLOTLY_PLUGIN_ID,
             }],
         }
-    image = f'<img src="{asset_placeholder}" alt="{html.escape(panel["headline"])}" style="width:100%;max-height:65%;object-fit:contain">'
-    panel_summary = _narrative_html(narrative) if len(view_narratives) > 1 else ""
-    return {**base, "type": "text", "options": {"mode": "html", "content": image + _view_narratives_html(view_narratives) + panel_summary}}
+    return {
+        **base,
+        "type": PLOTLY_PLUGIN_ID,
+        "options": {
+            "renderMode": "image",
+            "fallbackUrl": asset_placeholder,
+            "alt": panel["headline"],
+            "narrative": narrative,
+            "selectedViewIds": panel["view_ids"],
+            "viewNarratives": view_narratives,
+        },
+    }
 
 
 def compose_dashboard(

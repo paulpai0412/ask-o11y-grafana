@@ -10,7 +10,7 @@
     {
       "type": "application",
       "name": "consensys-asko11y-app",
-      "version": "0.3.2+skills+timeout10m",
+      "version": "0.3.2+skills+timeout3600s",
       "purl": "pkg:github/Consensys/ask-o11y-plugin@v0.3.2",
       "licenses": [{"license": {"id": "MIT"}}],
       "externalReferences": [{"type": "vcs", "url": "https://github.com/Consensys/ask-o11y-plugin/tree/8395ae1"}],

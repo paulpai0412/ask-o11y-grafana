@@ -18,7 +18,13 @@ Use this skill when you need to:
 - validate table/column identifiers against ERP metadata;
 - optionally execute in test environment and validate columns, row counts, or aggregates.
 
-Do not use this skill for write operations (`INSERT`/`UPDATE`/`DELETE`/DDL/`EXEC`) or multi-statement SQL batches.
+Do not use this skill for write operations (`INSERT`/`UPDATE`/`DELETE`/`DDL`/`EXEC`) or multi-statement SQL batches.
+
+## Analysis routing
+
+For WFERP/ERP questions, SQL is only the authorized read boundary. First use the bounded schema search and plan tools; never guess tables, joins, identifiers, or date meaning. Before execution, show the user the exact projection, grain, join cardinality, date semantics, and full-data row bounds and wait for confirmation.
+
+After Grafana Query returns the authorized frame, use `profile_dataset(frame_ref)` for non-predictive understanding. It profiles every returned row and field; visual bins/time buckets are presentation-only and must not become a derived dataset or ML input. Default to descriptive, diagnostic, or comparative analysis. Do not force ML unless the user explicitly asks for prediction/modeling and confirms a separate ontology-pinned analysis contract. If a profile or report tool fails, read its exact error and opaque refs, then repair from that evidence rather than guessing or falling back to a fixture.
 
 ## Safety Policy
 

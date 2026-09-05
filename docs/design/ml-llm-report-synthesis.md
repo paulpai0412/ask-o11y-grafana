@@ -1,6 +1,14 @@
 # Generic LLM Report Synthesis + Grafana-native Plotly
 
-状态：implemented（TDD + live Grafana E2E）
+状态：既有实现与历史 E2E 已有记录；2026-09-05 全图片 plugin 与原始证据验收修订待实现。
+
+当前规范见 [平台架构修订](natural-language-analysis-platform.md) NLAP-01、07、10。下方历史结果不代表当前全部路径已符合新规范。
+
+## Generic profile amendment
+
+`prepare_ml_report`、`inspect_report_artifacts`、`compose_ml_dashboard` 名稱沿自 ML 歷史，但 contract 不限 ML manifest；`ask-o11y-data-profile-v1` 可直接進同一條 evidence-bound report pipeline。Profile report 的 facts 必須保留完整輸入 row/field coverage，圖表聚合只能作視覺展示。LLM 先讀完整 bounded facts、artifact catalog 與每個 view spec，再以 vision/spec 批次檢查全部 artifacts；最後一次輸出跨圖 synthesis，逐一為要呈現的 view 提供獨立 data/visual observation、interpretation、limitation、next step 與 evidence。若 validator 退回，僅依原始錯誤與 refs 修正，不重跑已成功的 query/profile。
+
+Profile 不會自動升級成 ML：WFERP/ERP 或 upload 若沒有明確預測意圖，報告只做描述性、診斷性或比較性敘事；ontology candidate 仍標示 `inferred`/`observed`，不得冒充 approved。
 
 ## 决议
 
@@ -20,9 +28,9 @@ Artifact Bridge.inspect_report_artifacts
 Ask O11y LLM（分 bounded 批次看完完整报告与全部图）
   → ReportSynthesis JSON
 Artifact Bridge.compose_ml_dashboard
-  → require report_context_ref + inspection receipts → validate facts/artifacts/views → generic dashboard with opaque bindings
+  → require report_context_ref + inspection receipts → validate facts/artifacts/views → persist generic dashboard and return opaque dashboard_ref
 Artifact Bridge.resolve_dashboard_refs
-  → Grafana writer
+  → resolve dashboard_ref + asset/query bindings → Grafana writer
 ```
 
 ## LLM inspection transport
@@ -101,9 +109,10 @@ LLM 必须先读取 deterministic facts、sanitized Plotly JSON 与 figure/view 
 
 - 只读取 LLM 产生的 section 顺序、collapsed、priority、preferred width 与 artifact references；不识别固定 story roles、dataset、字段或图名。
 - LLM 决定 section 数量、图表选择、正文／折叠与顺序；compositor 不自动重排内容，只在尺寸不足或安全越界时 fail closed／提升为 full width。
-- 有 Plotly output 时建立 `asko11y-plotly-panel` + PNG fallback；否则建立 image/text panel。
+- 所有图片 evidence panel 一律建立 `asko11y-plotly-panel`：sanitized figure 使用显式 plotly mode，PNG-only 使用显式 image mode；模式来自 artifact capability，不依 dataset/model 名称。
+- Text panel 仅用于叙述，不得用 `<img>` 或 CSS 图片绕过 plugin。非法 figure 不静默降级；PNG image mode 不冒充互动图。此修订尚待同步修改 compositor、validator、writer gate、prompt 与 plugin（NLAP-07）。
 - narrative 以同 panel 的结构化区块呈现：观察／解读／跨图关系／限制／下一步／数值证据。
-- Grafana row 使用 `askO11ySectionId` metadata；write gate 只验证 section id、panel narrative、artifact/fact evidence 与 bounds，不验证固定角色、标题、顺序或中文词句。
+- Grafana row 使用 `askO11ySectionId` metadata；write gate 只验证 section id、panel narrative、artifact/fact evidence 与 bounds，不验证固定角色、标题、顺序或中文词句。Compose 后以 opaque `dashboard_ref` 传递完整 dashboard，避免把大 JSON 再生成一次。
 
 ## Plotly responsive grid
 
@@ -183,7 +192,9 @@ Skill 只规定安全工具边界：先取得完整 bounded report context，再
 
 ## 验收
 
-- Production Python/TypeScript 中无 `Telco`、业务字段名或固定 14 chart list。
+- Live WFERP check：`scripts/check-wferp-data-understanding.py` 以 schema search 的实际 table/field evidence 动态产生 bounded SQL，完成 Grafana Query → full profile → all-artifact inspect → generic compose；不呼叫 ML。
+- Native recovery 的历史运行有修正错误记录，但现有 `check-native-recovery-e2e.py` 只验证摘要，不能证明完整运行链；NLAP-01 要求从原始 run/session/tool-call events 验证，不允许合并 continuation 冒充 fresh E2E。
+- Production 不得依业务字段名或固定 chart list 决策；2026-09-05 审查发现 upload roles 与 regression 文案仍有业务 hardcode，待 NLAP-08 修正，不能宣称全项目已无 hardcode。
 - 同一 compositor 渲染 classification、correlation、time-series fixtures。
 - 每个正文 chart 都有本报告上下文相关的 narrative 与 validated evidence facts。
 - Plotly 在 Grafana dark/light 与 1440×900、1280×720 无白底割裂、重叠或无效缩图。

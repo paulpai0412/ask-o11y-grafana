@@ -15,6 +15,7 @@ import shutil
 import time
 import zipfile
 import importlib.util
+from datetime import datetime, timezone
 import sys
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -60,14 +61,56 @@ def _normalize_headers(values: list[Any]) -> list[str]:
     return headers
 
 
-def _infer_type(values: list[str]) -> str:
+def _looks_numeric(value: str) -> bool:
+    if not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", value):
+        return False
+    unsigned = value.lstrip("+-")
+    integer_part = unsigned.split(".", 1)[0]
+    # Preserve zero-padded integer identifiers (001), but accept decimal readings such as 0.6056.
+    return not ("." not in unsigned and len(integer_part) > 1 and integer_part.startswith("0"))
+
+
+_TEMPORAL_NAME_RE = re.compile(r"(?:^|[^a-z0-9])(date|datetime|timestamp|time|created|updated|event)(?:$|[^a-z0-9])", re.IGNORECASE)
+
+
+def _parse_temporal(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if _looks_numeric(text):
+        try:
+            numeric = float(text)
+            if not (1_000_000_000 <= numeric <= 100_000_000_000_000):
+                return None
+            if numeric > 100_000_000_000:
+                numeric /= 1000
+            parsed = datetime.fromtimestamp(numeric, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    else:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _looks_temporal_name(name: str) -> bool:
+    return bool(_TEMPORAL_NAME_RE.search(name))
+
+
+def _infer_type(values: list[str], name: str = "") -> str:
     observed = [value.strip() for value in values if value.strip()][:1000]
     if not observed:
         return "string"
-    if all(re.fullmatch(r"-?\d+(?:\.\d+)?", value) and not (len(value) > 1 and value.startswith("0")) for value in observed):
-        return "number"
     if all(re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T].*)?", value) for value in observed):
         return "date"
+    if all(_looks_numeric(value) for value in observed):
+        if _looks_temporal_name(name) and all(_parse_temporal(value) is not None for value in observed):
+            return "date"
+        return "number"
     return "string"
 
 
@@ -87,7 +130,27 @@ def _csv_profile(path: Path) -> tuple[list[dict[str, str]], int]:
                     samples[index].append(row[index])
     if rows == 0:
         raise ValueError("uploaded dataset has no data rows")
-    return [{"name": name, "type": _infer_type(samples[index])} for index, name in enumerate(headers)], rows
+    return [{"name": name, "type": _infer_type(samples[index], name)} for index, name in enumerate(headers)], rows
+
+
+def _date_range(path: Path, fields: list[dict[str, str]]) -> dict[str, str]:
+    date_names = {str(field["name"]) for field in fields if field.get("type") == "date"}
+    if not date_names:
+        return {"kind": "unbounded"}
+    minimum: datetime | None = None
+    maximum: datetime | None = None
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            for name in date_names:
+                parsed = _parse_temporal(row.get(name))
+                if parsed is None:
+                    continue
+                minimum = parsed if minimum is None or parsed < minimum else minimum
+                maximum = parsed if maximum is None or parsed > maximum else maximum
+    if minimum is None or maximum is None:
+        return {"kind": "unbounded"}
+    return {"all_from": minimum.date().isoformat(), "all_to": maximum.date().isoformat()}
 
 
 def _write_csv(raw: bytes, destination: Path) -> None:
@@ -182,6 +245,7 @@ def store_upload(*, context: dict[str, str], session_id: str, filename: str, raw
             "parent_upload_id": parent_upload_id,
             "rows": rows,
             "columns": len(fields),
+            "date_range": _date_range(csv_path, fields),
             "fields": fields,
             "created_at": int(time.time()),
             "expires_at": int(time.time()) + UPLOAD_RETENTION_SECONDS,

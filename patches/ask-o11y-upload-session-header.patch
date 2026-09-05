@@ -1,0 +1,100 @@
+diff --git a/pkg/mcp/client.go b/pkg/mcp/client.go
+index dd6bca1..5daf68b 100644
+--- a/pkg/mcp/client.go
++++ b/pkg/mcp/client.go
+@@ -49,6 +49,7 @@ type customRoundTripper struct {
+ 	orgName     string
+ 	scopeOrgId  string // Direct X-Scope-OrgId value (takes priority over orgName)
+ 	actorUserID string
++	sessionID   string
+ 	config      ServerConfig
+ }
+ 
+@@ -84,6 +85,9 @@ func (t *customRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
+ 			req.Header.Set(key, value)
+ 		}
+ 	}
++	if t.sessionID != "" {
++		req.Header.Set("X-Grafana-Session-Id", t.sessionID)
++	}
+ 
+ 	return t.base.RoundTrip(req)
+ }
+@@ -248,6 +252,10 @@ func (c *Client) connectMCPWithOrgContext(orgID string, orgName string, scopeOrg
+ }
+ 
+ func (c *Client) connectMCPWithActorContext(orgID string, orgName string, scopeOrgId string, actorUserID string) error {
++	return c.connectMCPWithActorAndSessionContext(orgID, orgName, scopeOrgId, actorUserID, "")
++}
++
++func (c *Client) connectMCPWithActorAndSessionContext(orgID string, orgName string, scopeOrgId string, actorUserID string, sessionID string) error {
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
+ 
+@@ -271,6 +279,7 @@ func (c *Client) connectMCPWithActorContext(orgID string, orgName string, scopeO
+ 		orgName:     orgName,
+ 		scopeOrgId:  scopeOrgId,
+ 		actorUserID: actorUserID,
++		sessionID:   sessionID,
+ 		config:      c.config,
+ 	})
+ 
+@@ -573,6 +582,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
+ }
+ 
+ func (c *Client) callMCPToolOnceWithActor(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
++	sessionID, _ := arguments["_server_session_id"].(string)
+ 	// Track whether we're using org context for potential reconnection
+ 	// Forward org headers to all MCP servers (not just specific ones)
+ 	useOrgContext := orgID != "" || orgName != "" || scopeOrgId != ""
+@@ -582,7 +592,7 @@ func (c *Client) callMCPToolOnceWithActor(toolName string, arguments map[string]
+ 	if useOrgContext {
+ 		c.logger.Debug("Calling tool with org context", "server", c.config.ID, "tool", toolName, "orgID", orgID, "orgName", orgName, "scopeOrgId", scopeOrgId)
+ 
+-		if err := c.connectMCPWithActorContext(orgID, orgName, scopeOrgId, actorUserID); err != nil {
++		if err := c.connectMCPWithActorAndSessionContext(orgID, orgName, scopeOrgId, actorUserID, sessionID); err != nil {
+ 			c.logger.Error("Failed to connect to server with org context", "server", c.config.ID, "error", sanitizeError(err))
+ 			return nil, err
+ 		}
+@@ -620,7 +630,7 @@ func (c *Client) callMCPToolOnceWithActor(toolName string, arguments map[string]
+ 			var reconnectErr error
+ 			if useOrgContext {
+ 				// connectMCPWithOrgContext handles session cleanup atomically
+-				reconnectErr = c.connectMCPWithActorContext(orgID, orgName, scopeOrgId, actorUserID)
++				reconnectErr = c.connectMCPWithActorAndSessionContext(orgID, orgName, scopeOrgId, actorUserID, sessionID)
+ 			} else {
+ 				// Clear the session to force reconnection
+ 				c.mu.Lock()
+diff --git a/pkg/mcp/session_header_test.go b/pkg/mcp/session_header_test.go
+new file mode 100644
+index 0000000..1d94469
+--- /dev/null
++++ b/pkg/mcp/session_header_test.go
+@@ -0,0 +1,27 @@
++package mcp
++
++import (
++	"net/http"
++	"testing"
++)
++
++type roundTripFunc func(*http.Request) (*http.Response, error)
++
++func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
++
++func TestCustomRoundTripperAddsTrustedSessionHeader(t *testing.T) {
++	base := roundTripFunc(func(req *http.Request) (*http.Response, error) {
++		if got := req.Header.Get("X-Grafana-Session-Id"); got != "session-123" {
++			t.Fatalf("session header = %q", got)
++		}
++		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
++	})
++	transport := &customRoundTripper{base: base, sessionID: "session-123"}
++	request, err := http.NewRequest(http.MethodPost, "http://example.invalid/mcp", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := transport.RoundTrip(request); err != nil {
++		t.Fatal(err)
++	}
++}

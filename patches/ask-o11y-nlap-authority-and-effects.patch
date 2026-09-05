@@ -1,0 +1,775 @@
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -35,7 +35,7 @@
+ const maxTruncationRetries = 1
+ const maxSelectedTools = 24
+ const publicationQuestion = "是否確認將此 Grafana Preview 正式發佈至 Dashboard？"
+-const grafanaPreviewNudge = "[SYSTEM: The confirmed intent requires a visually inspectable Grafana Preview, not a chat-only Result Preview. Use the selected dashboarding skill and mcp-grafana_update_dashboard with one complete dashboard JSON. For an analysis result, use only an opaque PNG asset binding and image/text panels; use $plan_ref targets only when Sandbox was not called. After compose_ml_dashboard returns refs.dashboard_ref, send {dashboard: {$dashboard_ref: refs.dashboard_ref}} rather than copying the full dashboard; the host resolves it. The trusted host resolves all refs. The host will enforce preview status. Return the exact Grafana URL and stop for publication confirmation.]"
++const grafanaPreviewNudge = "[SYSTEM: The confirmed intent requires a visually inspectable Grafana Preview, not a chat-only Result Preview. Use the selected dashboarding skill and mcp-grafana_update_dashboard with one complete dashboard JSON. For an analysis image, use only an opaque asset binding in asko11y-plotly-panel with explicit image or plotly mode; text panels are narrative-only; use $plan_ref targets only when Sandbox was not called. After compose_ml_dashboard returns refs.dashboard_ref, send {dashboard: {$dashboard_ref: refs.dashboard_ref}} rather than copying the full dashboard; the host resolves it. The trusted host resolves all refs. The host will enforce preview status. Return the exact Grafana URL and stop for publication confirmation.]"
+ 
+ // truncatedToolCallNudge is injected after a truncated tool call is discarded so
+ // the model reissues a smaller, complete call rather than repeating the cutoff.
+@@ -292,12 +292,14 @@
+ 		msg.Content = ""
+ 		messages = append(messages, msg)
+ 
+-		for _, tc := range msg.ToolCalls {
++		for callIndex, tc := range msg.ToolCalls {
+ 			if ctx.Err() != nil {
+ 				return
+ 			}
+ 			req.OpaquePlanRef = latestToolRef(messages, "data-query-planner_plan_query", "plan_ref")
+ 			req.OpaqueFrameRef = latestToolRef(messages, "grafana-query_execute_planned_query", "frame_ref")
++			tc = bindTrustedToolCall(tc, req)
++			msg.ToolCalls[callIndex] = tc
+ 
+ 			a.send(ctx, eventCh, SSEEvent{
+ 				Type: "tool_call_start",
+@@ -740,33 +742,49 @@
+ 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+ 		return fmt.Sprintf("Invalid tool arguments: %v", err), true, "tool"
+ 	}
++	if args == nil {
++		return "Tool arguments must be a JSON object", true, "tool"
++	}
++	if err := validateInspectionTransport(tc.Function.Name, args); err != nil {
++		return err.Error(), true, "tool"
++	}
+ 	if err := bindUploadDatasetArgument(tc.Function.Name, args, req.UploadDatasetID); err != nil {
+ 		return err.Error(), true, "tool"
+ 	}
+-	if tc.Function.Name == "grafana-query_execute_planned_query" && strings.TrimSpace(stringArg(args["plan_ref"])) == "" && req.OpaquePlanRef != "" {
+-		args["plan_ref"] = req.OpaquePlanRef
+-	}
+-	if tc.Function.Name == "sandbox-analysis_execute_ml_contract" {
+-		if strings.TrimSpace(stringArg(args["contract_ref"])) == "" && req.OpaquePlanRef != "" {
+-			args["contract_ref"] = req.OpaquePlanRef
+-		}
+-		if strings.TrimSpace(stringArg(args["frame_ref"])) == "" && req.OpaqueFrameRef != "" {
+-			args["frame_ref"] = req.OpaqueFrameRef
+-		}
+-	}
+-	if strings.HasPrefix(tc.Function.Name, "grafana-query_") && req.SessionID != "" {
++	if req.SessionID != "" {
+ 		args["_server_session_id"] = req.SessionID
+ 	}
++	var operationIdentity []byte
+ 	if tc.Function.Name == "mcp-grafana_update_dashboard" {
++		if req.OrgID == "" || req.UserID == "" || req.SessionID == "" {
++			return "Dashboard effects require an authenticated actor and session", true, "tool"
++		}
++		var identityErr error
++		operationIdentity, identityErr = json.Marshal([]interface{}{req.OrgID, req.UserID, req.SessionID, req.ForceGrafanaPreview, req.ForceGrafanaPublication, args})
++		if identityErr != nil {
++			return "Invalid dashboard operation identity", true, "tool"
++		}
+ 		resolved, err := a.prepareBuiltInDashboardArgs(args, req)
+ 		if err != nil {
+ 			return err.Error(), true, "tool"
+ 		}
++		if err := validateImagePanels(resolved); err != nil {
++			return err.Error(), true, "tool"
++		}
+ 		args = resolved
+ 	}
+ 	mcp.EnsureScopedGraphitiArgs(tool, args, req.OrgID)
+ 
+-	result, err := a.mcpProxy.CallToolWithActorContext(tc.Function.Name, args, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
++	invoke := func() (*mcp.CallToolResult, error) {
++		return a.mcpProxy.CallToolWithActorContext(tc.Function.Name, args, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
++	}
++	var result *mcp.CallToolResult
++	var err error
++	if operationIdentity != nil {
++		result, err = dashboardOnce(operationIdentity, invoke)
++	} else {
++		result, err = invoke()
++	}
+ 	if err != nil {
+ 		a.logger.Error("Tool call failed", "tool", tc.Function.Name, "error", err)
+ 		var te *mcp.TransportError
+@@ -776,6 +794,9 @@
+ 		return fmt.Sprintf("Tool call error: %v", err), true, "protocol"
+ 	}
+ 
++	if result == nil {
++		return "Tool returned no result; effect outcome is indeterminate", true, "protocol"
++	}
+ 	if result.IsError {
+ 		text := extractText(result)
+ 		if text == "" {
+@@ -798,7 +819,12 @@
+ 	}
+ 
+ 	risk := mcp.ClassifyToolRisk(tool, req.MCPServers)
+-	if !approvalPolicyEnabled(req.ApprovalPolicy) || !risk.RequiresApproval {
++	exactApproval := requiresExactAnalysisApproval(tc.Function.Name)
++	if exactApproval {
++		risk.RequiresApproval = true
++		risk.Reason = "Approve this exact dataset/plan/frame or dashboard operation; prior tool-wide grants do not authorize new analysis inputs."
++	}
++	if !exactApproval && (!approvalPolicyEnabled(req.ApprovalPolicy) || !risk.RequiresApproval) {
+ 		return a.executeTool(ctx, tc, req)
+ 	}
+ 
+@@ -811,7 +837,7 @@
+ 		Arguments:  tc.Function.Arguments,
+ 	}
+ 
+-	if req.CheckApprovalGrant != nil {
++	if !exactApproval && req.CheckApprovalGrant != nil {
+ 		granted, err := req.CheckApprovalGrant(ctx, approval)
+ 		if err != nil {
+ 			a.logger.Warn("Failed to check saved approval grant", "error", err, "tool", tc.Function.Name)
+diff --git a/pkg/agent/dashboard_resolver.go b/pkg/agent/dashboard_resolver.go
+--- a/pkg/agent/dashboard_resolver.go
++++ b/pkg/agent/dashboard_resolver.go
+@@ -3,11 +3,91 @@
+ import (
+ 	"encoding/json"
+ 	"fmt"
++	"io"
++	"regexp"
+ 	"strings"
++
++	"golang.org/x/net/html"
+ )
+ 
+ const artifactBridgeResolveTool = "artifact-bridge_resolve_dashboard_refs"
+ const previewDashboardTag = "ask-o11y-preview"
++
++var narrativeStylePattern = regexp.MustCompile(`^[A-Za-z0-9\s:;#.,%+\-]*$`)
++
++func validateNarrativeHTML(content string) error {
++	if strings.Contains(content, "![") {
++		return fmt.Errorf("text panels are narrative-only; use the Plotly plugin for images")
++	}
++	tokens := html.NewTokenizer(strings.NewReader(content))
++	for {
++		kind := tokens.Next()
++		if kind == html.ErrorToken {
++			if tokens.Err() == io.EOF {
++				return nil
++			}
++			return tokens.Err()
++		}
++		if kind != html.StartTagToken && kind != html.SelfClosingTagToken {
++			continue
++		}
++		token := tokens.Token()
++		if !strings.Contains(" div p span h1 h2 h3 h4 h5 h6 strong b em i ul ol li br hr blockquote code pre table thead tbody tr td th ", " "+token.Data+" ") {
++			return fmt.Errorf("text panels are narrative-only; use the Plotly plugin for images")
++		}
++		for _, attribute := range token.Attr {
++			if attribute.Key == "style" {
++				if !narrativeStylePattern.MatchString(attribute.Val) {
++					return fmt.Errorf("unsafe text panel style")
++				}
++			} else if !strings.Contains(" class title role aria-label lang dir colspan rowspan ", " "+attribute.Key+" ") {
++				return fmt.Errorf("text panel attribute is not narrative-only")
++			}
++		}
++	}
++}
++
++// All analysis images use the plugin, including PNG-only artifacts.
++func validateImagePanels(value interface{}) error {
++	switch node := value.(type) {
++	case map[string]interface{}:
++		// Also validate partial JSON patches, where the surrounding panel type is absent.
++		if content, ok := node["content"].(string); ok {
++			if err := validateNarrativeHTML(content); err != nil {
++				return err
++			}
++		}
++		if _, operation := node["op"]; operation {
++			if content, ok := node["value"].(string); ok {
++				if err := validateNarrativeHTML(content); err != nil {
++					return err
++				}
++			}
++		}
++		if _, artifact := node["askO11yArtifactId"]; artifact && node["type"] != "asko11y-plotly-panel" {
++			return fmt.Errorf("analysis image evidence must use asko11y-plotly-panel")
++		}
++		if node["type"] == "text" {
++			options, _ := node["options"].(map[string]interface{})
++			text, _ := options["content"].(string)
++			if err := validateNarrativeHTML(text); err != nil {
++				return err
++			}
++		}
++		for _, child := range node {
++			if err := validateImagePanels(child); err != nil {
++				return err
++			}
++		}
++	case []interface{}:
++		for _, child := range node {
++			if err := validateImagePanels(child); err != nil {
++				return err
++			}
++		}
++	}
++	return nil
++}
+ 
+ func hasOpaqueDashboardRefs(value interface{}) (bool, error) {
+ 	encoded, err := json.Marshal(value)
+@@ -22,7 +102,7 @@
+ 	if err != nil || !hasRefs {
+ 		return dashboard, err
+ 	}
+-	result, err := a.mcpProxy.CallToolWithActorContext(artifactBridgeResolveTool, map[string]interface{}{"dashboard": dashboard}, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
++	result, err := a.mcpProxy.CallToolWithActorContext(artifactBridgeResolveTool, map[string]interface{}{"dashboard": dashboard, "_server_session_id": req.SessionID}, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("artifact binding resolution failed: %w", err)
+ 	}
+diff --git a/pkg/mcp/client.go b/pkg/mcp/client.go
+--- a/pkg/mcp/client.go
++++ b/pkg/mcp/client.go
+@@ -85,6 +85,20 @@
+ 			req.Header.Set(key, value)
+ 		}
+ 	}
++	// Actor/session headers are host-owned, never overridden by server configuration.
++	if t.orgID != "" {
++		req.Header.Set("X-Grafana-Org-Id", t.orgID)
++	}
++	if t.scopeOrgId != "" {
++		req.Header.Set("X-Scope-OrgID", t.scopeOrgId)
++	} else if t.orgName != "" {
++		req.Header.Set("X-Scope-OrgID", t.orgName)
++	}
++	req.Header.Del("X-Grafana-Actor-User-Id")
++	req.Header.Del("X-Grafana-Session-Id")
++	if t.actorUserID != "" {
++		req.Header.Set("X-Grafana-Actor-User-Id", t.actorUserID)
++	}
+ 	if t.sessionID != "" {
+ 		req.Header.Set("X-Grafana-Session-Id", t.sessionID)
+ 	}
+@@ -528,14 +542,39 @@
+ }
+ 
+ func (c *Client) callMCPToolWithActorContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
+-	return c.callMCPToolWithRetry(func(name string, args map[string]interface{}, org, orgName, scope string) (*CallToolResult, error) {
+-		return c.callMCPToolOnceWithActor(name, args, org, orgName, scope, actorUserID)
++	// Each call owns its connection: reconnects cannot replace another actor's session.
++	isolated := NewClient(c.ctx, c.config, c.logger, c.httpClient)
++	c.mu.RLock()
++	isolated.tools = append([]Tool(nil), c.tools...)
++	c.mu.RUnlock()
++	defer isolated.Close()
++	return isolated.callMCPToolWithRetry(func(name string, args map[string]interface{}, org, orgName, scope string) (*CallToolResult, error) {
++		return isolated.callMCPToolOnceWithActor(name, args, org, orgName, scope, actorUserID)
+ 	}, toolName, arguments, orgID, orgName, scopeOrgId)
++}
++
++func (c *Client) safeTransportRetry(toolName string) bool {
++	// Read-only does not mean free to recompute. These effects need host receipts.
++	switch toolName {
++	case "update_dashboard", "execute_ml_contract", "execute_python_analysis", "execute_document_analysis", "execute_python_preprocessing", "profile_dataset", "revise_python_analysis":
++		return false
++	}
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++	for _, tool := range c.tools {
++		if tool.Name == toolName && tool.Annotations != nil && tool.Annotations.ReadOnlyHint != nil {
++			return *tool.Annotations.ReadOnlyHint
++		}
++	}
++	return false
+ }
+ 
+ func (c *Client) callMCPToolWithRetry(once callToolOncer, toolName string, arguments map[string]interface{}, orgID, orgName, scopeOrgId string) (*CallToolResult, error) {
+ 	var lastErr error
+-	maxAttempts := len(retrySchedule) + 1 // initial try + one retry per backoff slot
++	maxAttempts := 1
++	if c.safeTransportRetry(toolName) {
++		maxAttempts += len(retrySchedule)
++	}
+ 	for attempt := 0; attempt < maxAttempts; attempt++ {
+ 		result, err := once(toolName, arguments, orgID, orgName, scopeOrgId)
+ 		if err == nil {
+@@ -583,6 +622,13 @@
+ 
+ func (c *Client) callMCPToolOnceWithActor(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
+ 	sessionID, _ := arguments["_server_session_id"].(string)
++	wireArgs := make(map[string]interface{}, len(arguments))
++	for key, value := range arguments {
++		if key != "_server_session_id" {
++			wireArgs[key] = value
++		}
++	}
++	arguments = wireArgs
+ 	// Track whether we're using org context for potential reconnection
+ 	// Forward org headers to all MCP servers (not just specific ones)
+ 	useOrgContext := orgID != "" || orgName != "" || scopeOrgId != ""
+@@ -622,7 +668,7 @@
+ 	})
+ 	if err != nil {
+ 		// If the call failed due to connection issues, try to reconnect once
+-		if strings.Contains(err.Error(), "connection closed") || strings.Contains(err.Error(), "client is closing") {
++		if c.safeTransportRetry(toolName) && (strings.Contains(err.Error(), "connection closed") || strings.Contains(err.Error(), "client is closing")) {
+ 			c.logger.Warn("Connection closed, attempting to reconnect", "error", sanitizeError(err), "server", c.config.ID)
+ 
+ 			// Try to reconnect - use the same connection method as the original call
+diff --git a/pkg/mcp/retry_test.go b/pkg/mcp/retry_test.go
+--- a/pkg/mcp/retry_test.go
++++ b/pkg/mcp/retry_test.go
+@@ -4,6 +4,8 @@
+ 	"context"
+ 	"errors"
+ 	"io"
++	"net/http"
++	"net/http/httptest"
+ 	"sync/atomic"
+ 	"testing"
+ 	"time"
+@@ -18,6 +20,7 @@
+ func retryTestClient(ctx context.Context) *Client {
+ 	return &Client{
+ 		config: ServerConfig{ID: "test"},
++		tools:  []Tool{{Name: "t", Annotations: &ToolAnnotations{ReadOnlyHint: boolPtr(true)}}},
+ 		logger: log.DefaultLogger,
+ 		ctx:    ctx,
+ 	}
+@@ -149,6 +152,41 @@
+ 	}
+ }
+ 
++func TestNLAPConfigurationCannotOverrideActorHeaders(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		for key, expected := range map[string]string{"X-Grafana-Org-Id": "2", "X-Grafana-Actor-User-Id": "actor", "X-Grafana-Session-Id": "session", "X-Scope-OrgID": "scope", "X-Grafana-User": "service"} {
++			if r.Header.Get(key) != expected {
++				t.Errorf("%s was overridden: %s", key, r.Header.Get(key))
++			}
++		}
++		w.WriteHeader(http.StatusOK)
++	}))
++	defer server.Close()
++	client := &http.Client{Timeout: time.Second, Transport: &customRoundTripper{base: http.DefaultTransport, orgID: "2", actorUserID: "actor", sessionID: "session", scopeOrgId: "scope", config: ServerConfig{Headers: map[string]string{"X-Grafana-Org-Id": "wrong", "X-Grafana-Actor-User-Id": "wrong", "X-Grafana-Session-Id": "wrong", "X-Scope-OrgID": "wrong", "X-Grafana-User": "service"}}}}
++	response, err := client.Get(server.URL)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer response.Body.Close()
++}
++
++func TestRetry_EffectsAndUnknownToolsAreNotReplayed(t *testing.T) {
++	for _, name := range []string{"update_dashboard", "execute_ml_contract", "execute_python_preprocessing", "unknown"} {
++		c := retryTestClient(context.Background())
++		if name != "unknown" {
++			c.tools = append(c.tools, Tool{Name: name, Annotations: &ToolAnnotations{ReadOnlyHint: boolPtr(true)}})
++		}
++		calls := 0
++		once := func(string, map[string]interface{}, string, string, string) (*CallToolResult, error) {
++			calls++
++			return nil, io.ErrUnexpectedEOF
++		}
++		if _, err := c.callMCPToolWithRetry(once, name, nil, "", "", ""); err == nil || calls != 1 {
++			t.Fatalf("%s was silently replayed: calls=%d err=%v", name, calls, err)
++		}
++	}
++}
++
+ func TestJitteredDuration_BoundsAreRespected(t *testing.T) {
+ 	base := 100 * time.Millisecond
+ 	for i := 0; i < 500; i++ {
+diff --git a/pkg/agent/effect_receipts.go b/pkg/agent/effect_receipts.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/agent/effect_receipts.go
+@@ -0,0 +1,126 @@
++package agent
++
++import (
++	"consensys-asko11y-app/pkg/mcp"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++)
++
++func syncReceiptDirectory(path string) error {
++	file, err := os.Open(path)
++	if err != nil {
++		return err
++	}
++	defer file.Close()
++	return file.Sync()
++}
++
++type dashboardCompletion struct {
++	OperationID string              `json:"operation_id"`
++	Result      *mcp.CallToolResult `json:"result"`
++}
++
++func persistDashboardReceipt(operation, name string, payload []byte) error {
++	file, err := os.CreateTemp(operation, ".receipt-*")
++	if err != nil {
++		return err
++	}
++	temporary := file.Name()
++	defer os.Remove(temporary)
++	_, writeErr := file.Write(payload)
++	syncErr := file.Sync()
++	closeErr := file.Close()
++	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
++		return err
++	}
++	if err := os.Rename(temporary, filepath.Join(operation, name)); err != nil {
++		return err
++	}
++	return syncReceiptDirectory(operation)
++}
++
++// reconcileDashboardReceipt trusts only a durable completion from this exact actor/input identity.
++// No completion evidence means indeterminate, never permission to write again.
++func reconcileDashboardReceipt(operation string) (*mcp.CallToolResult, error) {
++	payload, err := os.ReadFile(filepath.Join(operation, "completion.json"))
++	if err != nil {
++		return nil, fmt.Errorf("dashboard operation %s running or indeterminate; no completion evidence, do not redispatch", filepath.Base(operation))
++	}
++	var completion dashboardCompletion
++	if err := json.Unmarshal(payload, &completion); err != nil {
++		return nil, err
++	}
++	if completion.OperationID != filepath.Base(operation) || completion.Result == nil || completion.Result.IsError {
++		return nil, fmt.Errorf("dashboard completion identity/outcome is invalid")
++	}
++	response, err := json.Marshal(completion.Result)
++	if err != nil {
++		return nil, err
++	}
++	if err := persistDashboardReceipt(operation, "response.json", response); err != nil {
++		return nil, err
++	}
++	return completion.Result, nil
++}
++
++// dashboardOnce reserves durably before writing. Unknown outcomes require reconciliation.
++func dashboardOnce(identity []byte, invoke func() (*mcp.CallToolResult, error)) (*mcp.CallToolResult, error) {
++	root := os.Getenv("ASKO11Y_EFFECT_STORE")
++	if root == "" {
++		data := os.Getenv("GF_PATHS_DATA")
++		if data == "" {
++			return nil, fmt.Errorf("dashboard writer requires a persistent ASKO11Y_EFFECT_STORE or GF_PATHS_DATA")
++		}
++		root = filepath.Join(data, "ask-o11y-operations")
++	}
++	if err := os.MkdirAll(root, 0700); err != nil {
++		return nil, err
++	}
++	digest := sha256.Sum256(identity)
++	operation := filepath.Join(root, hex.EncodeToString(digest[:]))
++	response := filepath.Join(operation, "response.json")
++	if err := os.Mkdir(operation, 0700); err != nil {
++		if !errors.Is(err, os.ErrExist) {
++			return nil, err
++		}
++		payload, err := os.ReadFile(response)
++		if errors.Is(err, os.ErrNotExist) {
++			return reconcileDashboardReceipt(operation)
++		}
++		if err != nil {
++			return nil, err
++		}
++		var result mcp.CallToolResult
++		if err := json.Unmarshal(payload, &result); err != nil {
++			return nil, fmt.Errorf("dashboard receipt invalid: %w", err)
++		}
++		return &result, nil
++	}
++	if err := syncReceiptDirectory(root); err != nil {
++		return nil, err
++	}
++	result, err := invoke()
++	if err != nil || result == nil || result.IsError {
++		return result, err
++	}
++	payload, err := json.Marshal(result)
++	if err != nil {
++		return nil, err
++	}
++	completion, err := json.Marshal(dashboardCompletion{OperationID: filepath.Base(operation), Result: result})
++	if err != nil {
++		return nil, err
++	}
++	if err := persistDashboardReceipt(operation, "completion.json", completion); err != nil {
++		return nil, err
++	}
++	if err := persistDashboardReceipt(operation, "response.json", payload); err != nil {
++		return nil, err
++	}
++	return result, nil
++}
+diff --git a/pkg/agent/effect_receipts_test.go b/pkg/agent/effect_receipts_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/agent/effect_receipts_test.go
+@@ -0,0 +1,122 @@
++package agent
++
++import (
++	"consensys-asko11y-app/pkg/mcp"
++	"crypto/sha256"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestNLAPDashboardReceiptReplayAndUnknown(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	calls := 0
++	invoke := func() (*mcp.CallToolResult, error) { calls++; return &mcp.CallToolResult{}, nil }
++	for i := 0; i < 2; i++ {
++		if _, err := dashboardOnce([]byte("same-bound-operation"), invoke); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if calls != 1 {
++		t.Fatalf("writer executed %d times", calls)
++	}
++	_, err := dashboardOnce([]byte("unknown-operation"), func() (*mcp.CallToolResult, error) {
++		calls++
++		return nil, errors.New("lost connection after dispatch")
++	})
++	if err == nil {
++		t.Fatal("unknown effect was reported successful")
++	}
++	if _, err := dashboardOnce([]byte("unknown-operation"), invoke); err == nil {
++		t.Fatal("unknown effect was replayed")
++	}
++	if calls != 2 {
++		t.Fatal("writer was invoked after unknown outcome")
++	}
++}
++
++func TestNLAPDashboardCompletionReconcilesWithoutWriter(t *testing.T) {
++	root := t.TempDir()
++	t.Setenv("ASKO11Y_EFFECT_STORE", root)
++	identity := []byte("actor/session/exact-approved-input")
++	key := fmt.Sprintf("%x", sha256.Sum256(identity))
++	operation := filepath.Join(root, key)
++	calls := 0
++	// Inject failure after the remote success, at local response publication.
++	_, err := dashboardOnce(identity, func() (*mcp.CallToolResult, error) {
++		calls++
++		if err := os.Mkdir(filepath.Join(operation, "response.json"), 0700); err != nil {
++			t.Fatal(err)
++		}
++		return &mcp.CallToolResult{}, nil
++	})
++	if err == nil {
++		t.Fatal("response publication fault was not injected")
++	}
++	if err := os.Remove(filepath.Join(operation, "response.json")); err != nil {
++		t.Fatal(err)
++	}
++	result, err := dashboardOnce(identity, func() (*mcp.CallToolResult, error) { t.Fatal("writer redispatched"); return nil, nil })
++	if err != nil || result == nil || calls != 1 {
++		t.Fatalf("completion recovery failed: %v", err)
++	}
++	payload, err := json.Marshal(dashboardCompletion{OperationID: "other-actor-input", Result: &mcp.CallToolResult{}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(operation, "completion.json"), payload, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Remove(filepath.Join(operation, "response.json")); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := dashboardOnce(identity, func() (*mcp.CallToolResult, error) { t.Fatal("writer redispatched"); return nil, nil }); err == nil {
++		t.Fatal("mismatched completion accepted")
++	}
++}
++
++func TestNLAPTextCannotEmbedImages(t *testing.T) {
++	for _, content := range []string{`<img src="x">`, `<video poster="x"></video>`, `<div style="background:image-set('x' 1x)">x</div>`, `<div style="background:u\72l(x)">x</div>`, `![image](x)`} {
++		if validateNarrativeHTML(content) == nil {
++			t.Fatalf("image bypass accepted: %s", content)
++		}
++	}
++	patch := map[string]interface{}{"operations": []interface{}{map[string]interface{}{"op": "replace", "path": "$.panels[0].options.content", "value": `<img src="x">`}}}
++	if validateImagePanels(patch) == nil {
++		t.Fatal("partial patch bypassed the image boundary")
++	}
++	if err := validateNarrativeHTML(`<div style="padding:8px 12px"><h2>報告</h2><strong>證據</strong></div>`); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestNLAPTextOnlyTransportCannotAttestVision(t *testing.T) {
++	for _, mode := range []interface{}{nil, "vision"} {
++		err := validateInspectionTransport("artifact-bridge_inspect_report_artifacts", map[string]interface{}{"mode": mode})
++		if err == nil || !strings.Contains(err.Error(), "HOST_VISION_TRANSPORT_UNAVAILABLE") {
++			t.Fatalf("missing vision delivery guard: %v", err)
++		}
++	}
++	if err := validateInspectionTransport("artifact-bridge_inspect_report_artifacts", map[string]interface{}{"mode": "spec"}); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestNLAPBindingPrecedesApproval(t *testing.T) {
++	call := ToolCall{ID: "call", Function: FunctionCall{Name: "sandbox-analysis_execute_ml_contract", Arguments: `{}`}}
++	bound := bindTrustedToolCall(call, LoopRequest{OpaquePlanRef: "artifact://plan/query-plan", OpaqueFrameRef: "artifact://plan/grafana-frame"})
++	var args map[string]interface{}
++	if err := json.Unmarshal([]byte(bound.Function.Arguments), &args); err != nil {
++		t.Fatal(err)
++	}
++	if args["contract_ref"] != "artifact://plan/query-plan" || args["frame_ref"] != "artifact://plan/grafana-frame" {
++		t.Fatal("approval arguments lack bound refs")
++	}
++	if !requiresExactAnalysisApproval(call.Function.Name) || !requiresExactAnalysisApproval("mcp-grafana_update_dashboard") {
++		t.Fatal("effects bypass exact approval")
++	}
++}
+diff --git a/pkg/agent/analysis_authority.go b/pkg/agent/analysis_authority.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/agent/analysis_authority.go
+@@ -0,0 +1,51 @@
++package agent
++
++import (
++	"encoding/json"
++	"errors"
++)
++
++func validateInspectionTransport(name string, args map[string]interface{}) error {
++	// Message.Content is text-only; a vision receipt would falsely attest image delivery.
++	if name == "artifact-bridge_inspect_report_artifacts" && args["mode"] != "spec" {
++		return errors.New(`{"ok":false,"step":"inspect_report_artifacts","error":"HOST_VISION_TRANSPORT_UNAVAILABLE","recoverable":true,"instruction":"Use mode=spec and visual_observation=null. This host carries text tool results only; browser rendering is verified separately."}`)
++	}
++	return nil
++}
++
++func requiresExactAnalysisApproval(name string) bool {
++	switch name {
++	case "grafana-query_execute_planned_query", "sandbox-analysis_execute_ml_contract", "sandbox-analysis_profile_dataset", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_execute_python_preprocessing", "sandbox-analysis_revise_python_analysis", "mcp-grafana_update_dashboard", "artifact-bridge_grant_artifact_reuse":
++		return true
++	default:
++		return false
++	}
++}
++
++// Bind trusted refs before emitting the event and asking approval, not after approval.
++func bindTrustedToolCall(call ToolCall, req LoopRequest) ToolCall {
++	var args map[string]interface{}
++	if json.Unmarshal([]byte(call.Function.Arguments), &args) != nil || args == nil {
++		return call
++	}
++	if bindUploadDatasetArgument(call.Function.Name, args, req.UploadDatasetID) != nil {
++		return call
++	}
++	bind := func(key, value string) {
++		current, exists := args[key]
++		if value != "" && (!exists || current == nil || current == "") {
++			args[key] = value
++		}
++	}
++	switch call.Function.Name {
++	case "grafana-query_execute_planned_query":
++		bind("plan_ref", req.OpaquePlanRef)
++	case "sandbox-analysis_execute_ml_contract":
++		bind("contract_ref", req.OpaquePlanRef)
++		bind("frame_ref", req.OpaqueFrameRef)
++	}
++	if encoded, err := json.Marshal(args); err == nil {
++		call.Function.Arguments = string(encoded)
++	}
++	return call
++}
+diff --git a/pkg/agent/skills/ml-method-selection/SKILL.md b/pkg/agent/skills/ml-method-selection/SKILL.md
+--- a/pkg/agent/skills/ml-method-selection/SKILL.md
++++ b/pkg/agent/skills/ml-method-selection/SKILL.md
+@@ -3,7 +3,9 @@
+ description: REQUIRED for any machine-learning or statistical analysis turn. Always select for 模型訓練、自動調參、分類、迴歸、分群、異常偵測、時間序列、預測、特徵重要性、結果解釋，或要求把 ML 過程/結果做成 Grafana Dashboard；亦涵蓋智慧製造設備健康、預測性維護 predictive maintenance、異常偵測 anomaly detection、良率/不良、製程參數、SPC/Cpk/OEE、需求預測。
+ ---
+ 
+-# 智慧製造分析方法指引（設備・製程・製造營運）
++# 資料驅動分析方法指引
++
++下列製造案例僅是 advisory examples，不是平台預設、欄位判定規則或必跑分析。以當前工具可執行能力與使用者核准 contract 為準；未支援的方法／split 必須明示，不得換方法假裝已執行。
+ 
+ 本 skill 是 advisory knowledge：提供選法準則、判定門檻與解讀規範，不構成固定流程。
+ 實際工具 schema 與資料現況永遠優先。方法必須落在 sandbox 已安裝套件內：
+@@ -20,13 +22,13 @@
+ 當 dataset id 是精確的 `upload_<32 hex>` 且任務是 ML：
+ 
+ - 先 inspect sanitized fields，再直接對 upload candidate 做 field classification；不要以「沒有 approved snapshot」為由停止，也不要只查 approved snapshot list。
+-- candidate classification 會回傳 `target_candidate`、`feature_allowlist`、排除角色、quality policy 與 candidate snapshot SHA；這些是本次 session 的 observed semantic evidence，不等同組織級正式 ontology promotion。
++- classification 回傳全量欄位 facts、風險 hypotheses、quality policy 與 source SHA；不會替使用者選 target。欄名、順序或 numeric magnitude 不是 target/feature 權威，目標及納入欄位來自使用者意圖與核准契約。
+ - `leakage_risk`（如 Satisfaction/Reason/Rating 等事後欄位）與 `sensitive`（如 Gender/Sex/Race 等受保護屬性）欄位會被 deterministic gate 自動排除，Planner 直接拒絕含它們的 contract；請在 Analysis Preview 主動說明排除原因，不要等待閘門報錯，也不要嘗試納入。
+-- ML query plan 必須使用 candidate 回傳的 target/allowlist/hash 建 analysis contract，並由 Planner 的 upload semantic gate 做最終 deterministic 驗證。
++- ML query plan 用 observed fields/hash 與使用者核准 target/features 建 contract，由 Planner 驗證型別、風險與同源資料。不得把 hypothesis 當成已核准 ontology。
+ - split 必須明確含 `kind`、`test_fraction` 與 `preprocessing_fit_scope: "training_only"`；一般無時間欄的二元分類使用 stratified holdout。不要把缺少 fit scope 誤解成必須改成順序切分。
+ - 同一 ML plan 的 selected fields 必須精確等於 target + model features；被排除或只供公平性/subgroup 檢查的欄位不能偷偷混進模型 query。若使用者需要 subgroup 稽核，先在 Preview 說明，待模型結果後以獨立授權 plan 進行。
+ - 使用者對 Analysis Preview 的確認只授權本次分析；不能把 upload candidate 宣稱為全域 approved ontology。
+-- 若 candidate classification 不確定或無 target，才向使用者釐清，不得回退為人工猜欄位。
++- 若使用者意圖仍無法確定 target 才釐清；使用者已明示 target 時不得因 candidate 沒有 target 而阻擋。
+ 
+ ### Regression 與受限候選設定
+ 
+@@ -34,7 +36,11 @@
+ - chronological/grouped split、training-only preprocessing、MAE 選模、holdout-once 與 bootstrap interval 都由 trusted template 強制；LLM 不得改寫 deterministic 規則。完整 contract 必須含 algorithms，且 `features = controllable_fields + context_fields - split field`。Regression query projection 必須精確是 `target + model features + split field`；split field 只供切分，不得混入模型 features。
+ - constrained search 只能在模型優於 baseline 後使用，只能評估 ontology 標記的 controllable fields 與已觀察支持組合，不得生成 unseen source、position 或超出 bounds 的外推值。`support_group_fields must be context_fields`，只能放來源、位置、批次等背景分組，不得放 controllable fields；若沒有已觀察或使用者核准的工程界線，必須傳 `bounds: {}`，禁止猜測極大上下界。
+ - 結果只能稱為 `candidate_settings`，必須附 support、uncertainty、混雜限制、受控試驗建議與停止條件；不得稱為因果最佳。
+-- 若要檢查 feature-set 敏感度，可比較 nested feature sets（approved context-only、加上明確 opt-in 的 treatment candidates、treatment-only），三者必須使用 same split and budget；holdout 只作最後比較，不得用來回頭選欄位。
++- 模型和 feature sets 共用一個 global search budget，先僅憑 training CV 鎖定 winner，再對它做 final holdout gate。不得檢視每組 holdout 再挑選，也不得失敗後挑 runner-up。現行比較為 sequential，不宣稱並行。
++- `objective=mae` 是 scorer 的 minimize；純預測不需要業務方向。只有使用者要求並核准 constrained search 才傳 `optimization.direction`，不得把降低誤差誤解為降低 target。
++- 所有訓練與 explanation 使用完整核准資料；圖表聚合只供展示，不回流模型。不抽樣、不截斷、不建立 derived dataset，資源不足明示。
++- 所有圖片必須由 `asko11y-plotly-panel` 呈現，明確 image/plotly mode；純敘述可用 Text，但不得用 HTML/CSS/Markdown 圖片繞過。invalid figure 明示錯誤，不降級偽裝。
++- 修改報告只重用既有 execution/report refs，不重跑 query/ML。effect outcome 若為 indeterminate，先調查既有 receipt，不盲目重試。
+ 
+ ## 1. 問題分型（先分型，再選法）
+ 
+@@ -254,7 +260,7 @@
+ 不得套用固定分析流程、固定 section、固定圖表清單、固定順序、固定 caption 或資料集／欄位專用文字。分析計算完成後，使用下列安全工具邊界；報告 flow 與 content 由你依本次使用者目的、完整 facts 與全部 artifacts 自主決定。
+ 
+ 1. 呼叫 `prepare_ml_report(execution_ref, manifest_output_index)`，取得 opaque `report_context_ref`、bounded artifact/fact catalog、每图 figure/view/axis/scale specs 與限制；不得读取 raw rows、path、signed URL。
+-2. 以 `inspect_report_artifacts(report_context_ref, artifact_ids, mode)` 分 bounded 批次覆盖**全部** artifacts。先读 deterministic facts、sanitized Plotly JSON 与 view/axis/scale specs，建立数值解释；再读 PNG 验证形状、颜色、聚类、重叠与渲染问题。模型支持 vision 时用 `mode=vision`；不支持 vision 时用 `mode=spec`，并明确不声称做过视觉判读。保存每批 `inspection_ref`。
++2. 以 `inspect_report_artifacts(report_context_ref, artifact_ids, mode)` 分 bounded 批次覆盖**全部** artifacts。先读 deterministic facts、sanitized Plotly JSON 与 view/axis/scale specs，建立数值解释；再读 PNG 验证形状、颜色、聚类、重叠与渲染问题。只有模型和宿主 transport 都支持图片输入时才可用 `mode=vision`。当前 Ask O11y 的 tool-result transport 是 text-only，必须用 `mode=spec`、`visual_observation=null`，不声称做过视觉判读；浏览器渲染另行验证。保存每批 `inspection_ref`。
+ 3. 所有批次完成后只做**一次整份报告 synthesis**，不得逐图各自生成互不相干的 caption。先形成全局 thesis、`thesis_evidence`、跨图关系與资料限制，再决定要选哪些 artifact/view、section 数量、顺序、标题、可选 `narrative_blocks`、正文／折叠状态及 full/half width。
+ 4. 输出一个 `ask-o11y-report-synthesis-v1`。section id/title/purpose/order 完全依本次报告动态产生。Thesis 与任何无图结论 block 都必须引用 evidence。每个选中的 panel 必须写 `artifact_id`、`view_ids`、跨 views 总结与 `view_narratives`；每个 selected view 都要独立提供 `headline`、`data_observation`、`visual_observation`、`interpretation`、`limitation`、`next_step`、`evidence`。Vision-inspected view 的 visual observation 必填；spec-only 必须为 null。
+ 5. narrative 字段不得自行写数字；所有数值用 `evidence: [{fact_ref, format}]` 引用 deterministic fact。未知 fact/artifact/view、HTML、URL、script 或未经 evidence 支持的数字会被拒绝。
+diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
+--- a/pkg/plugin/prompt_defaults.go
++++ b/pkg/plugin/prompt_defaults.go
+@@ -69,13 +69,13 @@
+ When Sandbox output metadata includes an image asset and the user requested that image in the Dashboard, use an opaque panel asset binding according to the selected skill. Never author or invent an ` + "`/assets/`" + ` URL or base64/MIME body. A signed CSV URL returned directly by Sandbox may be reported as a download, but must never be used as a Dashboard image binding.
+ 
+ When an authorized query plan supplies panel data and Sandbox was not called, put only ` + "`$plan_ref`" + ` + ` + "`fields`" + ` plus ` + "`refId`" + ` in a model-authored target. Do not add datasource, URL, query, parser, or data fields because the trusted host supplies them.
+-An analysis dashboard may contain only image/text panels. Bind the requested Sandbox PNG as an opaque asset; never put ` + "`$execution_ref`" + ` in a panel target or combine an analysis asset with a Grafana data target.
++Every analysis image must use the asko11y-plotly-panel plugin with explicit image or plotly mode. Text panels are narrative-only: never embed HTML/CSS/Markdown images. Invalid figures must show an error, not silently fall back. This host carries text-only tool results: use mode=spec and visual_observation=null for report inspection; do not claim visual inspection. Bind the requested Sandbox PNG as an opaque asset; never put ` + "`$execution_ref`" + ` in a panel target or combine an analysis asset with a Grafana data target.
+ The host resolves these placeholders immediately before dispatch; never reconstruct datasource queries or expose raw artifact data.
+ 
+ For requested previews, create one complete dashboard using the intended final title; preview status lives only in the host-enforced first tag. Stop with its exact Grafana URL. After explicit publication confirmation, patch that same UID; the host normalizes the mutation to remove only the preview tag. Never change the requested panel type or analytical meaning without confirmation.
+ ### Data-first analysis
+ 
+-Before analyzing an unfamiliar upload, ERP/WFERP dataset, or numeric table, use the data-understanding skill and the available inspect/schema tools. Keep dataset IDs, physical fields, date semantics, grain, relations, and opaque refs dynamic from tool evidence. Show an Analysis Preview and wait for confirmation before query or sandbox execution. If the user did not explicitly ask for prediction/modeling, profile the complete authorized frame with ` + "`profile_dataset`" + ` and prefer descriptive, diagnostic, or comparative analysis; do not invoke ML merely because columns are numeric. Profile charts are visual-only aggregations, never a derived dataset or training input. An uploaded ontology remains inferred/observed unless an approved snapshot says otherwise.
++Before analyzing an unfamiliar upload, ERP/WFERP dataset, or numeric table, use the data-understanding skill and the available inspect/schema tools. Keep dataset IDs, physical fields, date semantics, grain, relations, and opaque refs dynamic from tool evidence. Show an Analysis Preview and wait for confirmation before query or sandbox execution. If the user did not explicitly ask for prediction/modeling, profile the complete authorized frame with ` + "`profile_dataset`" + ` and prefer descriptive, diagnostic, or comparative analysis; do not invoke ML merely because columns are numeric. Profile charts are visual-only aggregations, never a derived dataset or training input. Use all approved rows for modeling and explanations; never sample, truncate, or create derived datasets. Report resource limits explicitly. Model and feature-set selection use training CV only, sharing one global search budget; lock the winner before holdout evaluation. MAE direction is not a business target direction; pure prediction does not require optimization. An uploaded ontology remains inferred/observed unless an approved snapshot says otherwise.
+ 
+ When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. For completed profile/analysis results, use ` + "`prepare_ml_report`" + `, ` + "`inspect_report_artifacts`" + `, and ` + "`compose_ml_dashboard`" + ` generically: inspect all bounded facts and artifact/view evidence, then synthesize once with evidence-bound per-view narratives before the sole approved Grafana writer.
+ 
+@@ -87,7 +87,7 @@
+ 2. **No invention on failure**: If a tool call fails, returns empty, or is unavailable, say so literally. Do not invent, interpolate, or substitute a plausible-looking alternative.
+ 3. **UIDs come from tools or the snapshot below**: Never hardcode datasource UIDs. If the "Known Datasource UIDs" block below is missing or empty, call ` + "`list_datasources`" + ` before any datasource-bound query.
+ 4. **Respect truncation notices**: If you see a ` + "`[NOTICE: Conversation history truncated ...]`" + ` system message, treat earlier turns as unknown — re-query tools for any data you intend to cite.
+-5. **Transport failures = UNAVAILABLE**: If you see a ` + "`[SYSTEM: MCP transport failure ...]`" + ` tool result, the data is UNAVAILABLE — do not substitute. Either retry once or tell the user the data is currently unavailable.
++5. **Transport failures = UNAVAILABLE**: If you see a ` + "`[SYSTEM: MCP transport failure ...]`" + ` tool result, the data is UNAVAILABLE — do not substitute. Only declared read-only calls may be safely retried. A compute/write outcome may be indeterminate: reconcile its existing operation receipt, never blindly repeat it or change inputs just to bypass the receipt.
+ 6. **Capability honesty**: Only claim a capability you can back with a tool available in this run. If the user asks for something Grafana or your tools cannot do — or no tool exists for it — say so plainly instead of inventing a workflow or assuming a feature exists. Do not describe Grafana behaviour you cannot verify with a tool.
+ {{if .DatasourceSnapshot}}
+ 

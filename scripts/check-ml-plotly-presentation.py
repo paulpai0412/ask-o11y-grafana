@@ -100,7 +100,7 @@ def main() -> int:
             "roc_pr_curves": "scatter",
             "calibration_curve": "scatter",
             "threshold_cost_curve": "scatter",
-            "shap_summary": "scatter",
+            "shap_summary": "heatmap",
         }
         missing = expected.keys() - figures.keys()
         assert not missing, f"missing plotly figures: {sorted(missing)}"
@@ -125,6 +125,26 @@ def main() -> int:
             trace_types = {trace["type"] for trace in sanitized["data"]}
             if expected_type not in trace_types:
                 raise AssertionError(f"{name} should adapt to {expected_type}, got {sorted(trace_types)}")
+
+        # Full-row SHAP displays stay bounded without truncation, including the last row.
+        full_shap = np.random.default_rng(13).normal(size=(10000, 12))
+        full_shap[-1, 0] = 1e6
+        density = presentation.build_plotly_figures(
+            manifest, shap_values=full_shap, sample_values=np.zeros_like(full_shap),
+            feature_names=[f"field_{i}" for i in range(12)],
+        )["shap_summary"]
+        trace = density["data"][0]
+        assert len(json.dumps(density).encode()) <= contract.MAX_FIGURE_BYTES
+        assert trace["type"] == "heatmap" and len(trace["z"]) == 10
+        assert all(sum(counts) == 10000 for counts in trace["z"]), "SHAP rows were dropped"
+        assert trace["z"][0][-1] == 1, "last-row outlier disappeared"
+        invalid = full_shap.copy(); invalid[-1, 0] = np.nan
+        try:
+            presentation.build_plotly_figures(manifest, shap_values=invalid, sample_values=np.zeros_like(invalid), feature_names=[f"field_{i}" for i in range(12)])
+        except ValueError as exc:
+            assert "finite" in str(exc)
+        else:
+            raise AssertionError("non-finite SHAP input was silently dropped")
 
         # Determinism: same inputs → identical JSON.
         repeat = presentation.build_plotly_figures(

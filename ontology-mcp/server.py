@@ -113,6 +113,34 @@ def tool_get_semantic_context(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("dataset_id and bounded intent are required")
     if not isinstance(fields, list) or len(fields) > MAX_FIELDS or any(not isinstance(field, str) or not field for field in fields):
         raise ValueError(f"fields must be a bounded array of at most {MAX_FIELDS} names")
+    if dataset_id.startswith("upload_"):
+        context = args.get("_server_context")
+        if not isinstance(context, dict):
+            raise ValueError("uploaded dataset requires authenticated session context")
+        metadata = uploaded_datasets.inspect_upload(context, dataset_id, context.get("session_id"))
+        hints = upload_semantics.load_hints(uploaded_datasets.UPLOAD_ROOT / dataset_id)
+        by_name = {field["physical_name"]: field for field in hints["fields"]}
+        requested = fields or list(by_name)
+        unknown = [field for field in requested if field not in by_name]
+        if unknown:
+            raise ValueError("UNKNOWN_FIELD: " + ", ".join(unknown))
+        identity = {"snapshot_id": f"candidate:{dataset_id}", "sha256": metadata["source_sha256"], "status": "observed"}
+        return response(
+            "get_semantic_context",
+            snapshot=identity,
+            candidate=True,
+            context={
+                "dataset_id": dataset_id,
+                "intent": intent,
+                "status": "observed",
+                "grain": "one uploaded row; business grain is unapproved",
+                "target_candidate": upload_semantics.primary_target(hints),
+                "feature_allowlist": upload_semantics.feature_allowlist(hints),
+                "quality_policy": hints["quality_policy"],
+                "split_policy": {"allowed": ["chronological_holdout", "grouped_holdout", "stratified_holdout"], "preprocessing_fit_scope": "training_only"},
+                "fields": [by_name[field] for field in requested],
+            },
+        )
     snapshot, identity = load_verified(args.get("snapshot_ref"), dataset_id=dataset_id)
     dataset = contract.find_dataset(snapshot, dataset_id)
     if dataset is None:
@@ -185,7 +213,17 @@ def tool_validate_analysis_contract(args: dict[str, Any]) -> dict[str, Any]:
     analysis_contract = args.get("contract")
     if not isinstance(analysis_contract, dict):
         raise ValueError("contract must be an object")
-    snapshot, _identity = load_verified(args.get("snapshot_ref"), dataset_id=analysis_contract.get("dataset_id"))
+    dataset_id = analysis_contract.get("dataset_id")
+    if isinstance(dataset_id, str) and dataset_id.startswith("upload_"):
+        context = args.get("_server_context")
+        if not isinstance(context, dict):
+            raise ValueError("uploaded dataset requires authenticated session context")
+        metadata = uploaded_datasets.inspect_upload(context, dataset_id, context.get("session_id"))
+        hints = upload_semantics.load_hints(uploaded_datasets.UPLOAD_ROOT / dataset_id)
+        validation = upload_semantics.validate_analysis_contract(hints, analysis_contract)
+        validation["snapshot"].update({"snapshot_id": f"candidate:{dataset_id}", "sha256": metadata["source_sha256"], "status": "observed"})
+        return response("validate_analysis_contract", validation=validation, candidate=True)
+    snapshot, _identity = load_verified(args.get("snapshot_ref"), dataset_id=dataset_id)
     return response("validate_analysis_contract", validation=contract.validate_analysis_contract(snapshot, analysis_contract, args.get("snapshot_ref")))
 
 

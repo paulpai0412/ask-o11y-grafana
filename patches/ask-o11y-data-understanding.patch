@@ -1,0 +1,63 @@
+diff --git a/pkg/agent/skills/data-understanding/SKILL.md b/pkg/agent/skills/data-understanding/SKILL.md
+new file mode 100644
+index 0000000..d4f5a6b
+--- /dev/null
++++ b/pkg/agent/skills/data-understanding/SKILL.md
+@@ -0,0 +1,48 @@
++---
++name: data-understanding
++description: REQUIRED before analysis of an uploaded, ERP, WFERP, or otherwise unfamiliar dataset. Use for data profiling, schema/ontology inspection, descriptive or diagnostic analysis, data quality review, choosing whether ML is appropriate, and any request to understand a dataset before prediction.
++---
++
++# Ontology-guided data understanding
++
++This skill is data-first and evidence-bound. It does not prescribe a fixed chart list, analysis DAG, model, or report layout. Tool schemas, authorized refs, the approved ontology, and the user's current intent are authoritative.
++
++## Non-negotiable rules
++
++- Use only real tool results from the current session. Never use mock, fixture, fabricated, guessed, copied, or fallback data.
++- Keep the original result grain and row count. Do not sample, truncate, down-select rows, or create a derived dataset for profiling or ML. Chart bins and time buckets are visual-only aggregations.
++- Dataset IDs, field names, date semantics, relations, query refs, and ontology hashes must come from inspect/classify/plan evidence. Never translate, rename, concatenate, or hardcode physical field names.
++- An uploaded ontology is an observed candidate. Say `inferred` or `observed` unless an approved ontology snapshot explicitly says `approved`; never promote a candidate by wording.
++- Before any query or sandbox execution, show an Analysis Preview containing the dataset, grain/date meaning, exact fields, row bounds, ontology status, and intended operation. Wait for user confirmation.
++- Do not call ML tools merely because numeric columns exist. Without explicit predictive intent, default to ontology-guided profiling and descriptive/diagnostic/comparative analysis. Ask which decision the user wants if intent is ambiguous.
++- Recovery is native LLM reasoning: read the complete error, current tool schema, opaque refs, and contract/evidence; repair only what the evidence requires and retry. Do not invent IDs/fields, fill missing values with guesses, switch to a mock/fallback, or add a fixed retry state machine.
++
++## Data-first sequence (adapt to intent, not a fixed DAG)
++
++1. Discover or inspect the authorized dataset. Reuse the returned opaque `dataset_metadata_ref`, dataset ID, datasource identity, fields, row hint, and date range. For an upload, use its session-owned ID and the observed field classification; do not search only organization-approved ontology.
++2. For WFERP/ERP, call `search_wferp_schema` first, then author one bounded legacy-compatible `SELECT` through `plan_wferp_query`. Verify joins do not multiply grain, keys are not silently lost, and date semantics distinguish document date, posting date, production date, and event date. Never execute SQL directly.
++3. Ask the user to confirm the exact preview. The confirmation authorizes this analysis only; it does not approve ontology promotion or dashboard publication.
++4. Call the authorized Planner with exact physical fields and bounded full-data row requirements. Then call Grafana Query. The query must return the complete authorized population at its declared grain; stop if validation reports missing fields, row loss, truncation, or an unexpected grain.
++5. For a non-ML understanding request, call `profile_dataset(frame_ref)` rather than writing model-authored Python. The deterministic profile covers every row and every returned field and returns bounded facts plus visual-only assets for distributions, missingness, relationships, and any time trend supported by the data. It never chooses an ML method.
++6. Read the profile manifest, facts, warnings, ontology status, and all returned asset metadata. Decide the next action from the user's question and evidence: descriptive/WFERP analysis, a separate authorized statistical analysis, or an ML preview. Do not silently escalate from profile to prediction.
++
++## Profile interpretation
++
++- Report row/field coverage and whether `full_data=true`, `sampling=false`, and `derived_dataset=false`.
++- Distinguish missingness, low variance, type inference, temporal ordering, categorical concentration, and association. Association/correlation is not causation.
++- Treat visual grouping, histogram bins, and time aggregation as presentation only. Do not use them as a training or query input.
++- If a field has unknown or inferred semantics, state that limitation and ask for ontology confirmation instead of asserting a role.
++- For a profile dashboard, use `prepare_ml_report`, `inspect_report_artifacts`, and `compose_ml_dashboard` as generic report tools: inspect all bounded facts and all artifact/view specs (and PNGs when vision is available), produce one cross-artifact synthesis with independent per-view narratives, then resolve opaque bindings before the sole approved Grafana writer. Do not author asset URLs, raw figure data, datasource targets, or scripts.
++
++## Moving to ML
++
++Only after the user explicitly asks for prediction, estimation, forecasting, or model comparison:
++
++- Select the ML/statistics skill and create an ontology-pinned analysis contract from the observed/approved evidence. Preserve the full-data invariant.
++- Explain target, features, excluded/leakage/proxy fields, grain, split/date semantics, preprocessing fit scope, and baseline before execution. `Timestamp` or another time field may define chronological order but must not enter model features unless the approved contract explicitly allows it.
++- Keep Dummy as the baseline gate. If it wins, report that result and data-quality/feature recommendations; do not fabricate candidate settings or optimization bounds.
++- For WFERP with no explicit predictive intent, remain descriptive/diagnostic/comparative; do not force a model.
++
++## Dashboard/report safety
++
++A dashboard is a presentation of completed evidence, not a substitute for profiling. A Preview still requires explicit write intent. For a report, the LLM may choose sections, ordering, titles, collapsed state, and relevant views dynamically, but every numeric claim must reference a deterministic fact and every selected view needs its own data observation, visual observation (or `null` for spec-only), interpretation, limitation, next step, and evidence. The compositor/validator is authoritative; if it rejects a synthesis, repair the synthesis from its exact error without rerunning successful work. `compose_ml_dashboard` returns an opaque `refs.dashboard_ref`; pass it to the sole writer as `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` instead of copying the full dashboard JSON.
+diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
+--- a/pkg/plugin/prompt_defaults.go
++++ b/pkg/plugin/prompt_defaults.go
+@@ -75,0 +76,5 @@
++### Data-first analysis
++
++Before analyzing an unfamiliar upload, ERP/WFERP dataset, or numeric table, use the data-understanding skill and the available inspect/schema tools. Keep dataset IDs, physical fields, date semantics, grain, relations, and opaque refs dynamic from tool evidence. Show an Analysis Preview and wait for confirmation before query or sandbox execution. If the user did not explicitly ask for prediction/modeling, profile the complete authorized frame with ` + "`profile_dataset`" + ` and prefer descriptive, diagnostic, or comparative analysis; do not invoke ML merely because columns are numeric. Profile charts are visual-only aggregations, never a derived dataset or training input. An uploaded ontology remains inferred/observed unless an approved snapshot says otherwise.
++
++When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. For completed profile/analysis results, use ` + "`prepare_ml_report`" + `, ` + "`inspect_report_artifacts`" + `, and ` + "`compose_ml_dashboard`" + ` generically: inspect all bounded facts and artifact/view evidence, then synthesize once with evidence-bound per-view narratives before the sole approved Grafana writer.

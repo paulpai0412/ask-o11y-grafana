@@ -44,6 +44,7 @@ type Narrative = {
 };
 
 type Options = {
+  renderMode?: "image" | "plotly";
   figure?: PlotlyFigure;
   fallbackUrl?: string;
   alt?: string;
@@ -154,31 +155,36 @@ function ViewNarrativeBlock({ narrative }: { narrative?: ViewNarrative }) {
   );
 }
 
-function Fallback({ options }: { options: Options }) {
+function ImagePanel({ options }: { options: Options }) {
   if (!options.fallbackUrl) {
     return (
-      <div style={{ padding: 16 }}>互动图无法显示，且没有 PNG fallback。</div>
+      <div role="alert" style={{ padding: 16 }}>
+        缺少已授權的圖片。
+      </div>
     );
   }
-  const showPanelNarrative = shouldShowPanelNarrative(options.selectedViewIds?.length ?? options.viewSpecs?.length ?? 1);
+  const showPanelNarrative = shouldShowPanelNarrative(
+    options.selectedViewIds?.length ?? options.viewSpecs?.length ?? 1,
+  );
   return (
     <figure
       style={{
         margin: 0,
         height: "100%",
-        display: "grid",
-        gridTemplateRows: showPanelNarrative && options.narrative
-          ? "minmax(220px, 3fr) minmax(140px, 2fr)"
-          : "1fr",
-        overflow: "hidden",
+        overflow: "auto",
       }}
     >
       <img
         src={options.fallbackUrl}
         alt={options.alt || "分析图表"}
-        style={{ width: "100%", height: "100%", objectFit: "contain" }}
+        style={{ width: "100%", maxHeight: "65%", objectFit: "contain" }}
       />
-      {showPanelNarrative ? <NarrativeBlock narrative={options.narrative} /> : null}
+      {options.viewNarratives?.map((narrative) => (
+        <ViewNarrativeBlock key={narrative.view_id} narrative={narrative} />
+      ))}
+      {showPanelNarrative || !options.viewNarratives?.length ? (
+        <NarrativeBlock narrative={options.narrative} />
+      ) : null}
     </figure>
   );
 }
@@ -240,8 +246,9 @@ function PlotView({
 
 function PlotlyPanel({ options }: { options: Options }) {
   const theme = useTheme2();
-  const [failed, setFailed] = useState(false);
-  const mode = failed ? "fallback" : resolveRenderMode(options);
+  const [failedFigure, setFailedFigure] = useState<PlotlyFigure | null>(null);
+  const failed = !!options.figure && failedFigure === options.figure;
+  const mode = failed ? "error" : resolveRenderMode(options);
   const views = useMemo(
     () =>
       options.figure
@@ -254,8 +261,15 @@ function PlotlyPanel({ options }: { options: Options }) {
     [options.figure, options.selectedViewIds, options.viewSpecs],
   );
 
-  if (mode === "fallback" || views.length === 0) {
-    return <Fallback options={options} />;
+  if (mode === "image") {
+    return <ImagePanel options={options} />;
+  }
+  if (mode === "error" || views.length === 0) {
+    return (
+      <div role="alert" style={{ padding: 16 }}>
+        圖表無法呈現。請檢查 figure／artifact；未自動降級或修改資料。
+      </div>
+    );
   }
   const showPanelNarrative = shouldShowPanelNarrative(views.length);
   return (
@@ -263,9 +277,10 @@ function PlotlyPanel({ options }: { options: Options }) {
       style={{
         height: "100%",
         display: "grid",
-        gridTemplateRows: showPanelNarrative && options.narrative
-          ? "minmax(260px, 3fr) minmax(140px, 2fr)"
-          : "1fr",
+        gridTemplateRows:
+          showPanelNarrative && options.narrative
+            ? "minmax(260px, 3fr) minmax(140px, 2fr)"
+            : "1fr",
         overflow: "hidden",
       }}
     >
@@ -292,7 +307,7 @@ function PlotlyPanel({ options }: { options: Options }) {
             <PlotView
               view={view}
               theme={theme}
-              onFailure={() => setFailed(true)}
+              onFailure={() => setFailedFigure(options.figure ?? null)}
             />
             <ViewNarrativeBlock
               narrative={options.viewNarratives?.find(
@@ -302,7 +317,9 @@ function PlotlyPanel({ options }: { options: Options }) {
           </section>
         ))}
       </div>
-      {showPanelNarrative ? <NarrativeBlock narrative={options.narrative} /> : null}
+      {showPanelNarrative ? (
+        <NarrativeBlock narrative={options.narrative} />
+      ) : null}
     </div>
   );
 }
@@ -311,5 +328,5 @@ export const plugin = new PanelPlugin<Options>(PlotlyPanel).setPanelOptions(
   (builder) =>
     builder
       .addTextInput({ path: "alt", name: "替代文字" })
-      .addTextInput({ path: "fallbackUrl", name: "PNG fallback URL" }),
+      .addTextInput({ path: "fallbackUrl", name: "Authorized image URL" }),
 );

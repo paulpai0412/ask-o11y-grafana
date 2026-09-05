@@ -49,10 +49,16 @@ def main() -> int:
         "ontology_snapshot_sha256": identity["sha256"],
     }
 
+    # The registered kind enum is classification-only. Classification must use a
+    # stratified split; U1's chronological policy is a regression-only fixture.
+    classification = {
+        **safe,
+        "task_kind": "binary_classification",
+        "split": {"kind": "stratified_holdout", "test_fraction": 0.25, "preprocessing_fit_scope": "training_only"},
+        "algorithms": ["random_forest_shap"],
+    }
     for kind in KINDS:
-        candidate = {**safe, "kind": kind}
-        result = contract.validate_analysis_contract(snapshot, candidate)
-        assert result["conforms"], f"{kind}: {result['rejection_codes']}"
+        candidate = {**classification, "kind": kind, "algorithms": [kind]}
         template = planner.execution_template_for_kind(kind)
         assert template == f"ask_o11y_{kind}_v1", template
         enforced = sandbox.validate_ml_execution_contract(
@@ -60,14 +66,18 @@ def main() -> int:
         )
         assert enforced["preprocessing_fit_scope"] == "training_only"
 
-    no_scope = {**safe, "split": {k: v for k, v in safe["split"].items() if k != "preprocessing_fit_scope"}}
-    rejected = contract.validate_analysis_contract(snapshot, no_scope)
-    assert not rejected["conforms"] and "SPLIT_POLICY_VIOLATION" in rejected["rejection_codes"]
+    # A classification request against a chronological ontology policy fails before compute.
+    rejected_classification = contract.validate_analysis_contract(snapshot, {**safe, "kind": "random_forest_shap"})
+    assert not rejected_classification["conforms"] and "SPLIT_POLICY_VIOLATION" in rejected_classification["rejection_codes"]
 
-    bad = contract.validate_analysis_contract(snapshot, {**safe, "kind": "arbitrary_python"})
+    no_scope = {**classification, "split": {k: v for k, v in classification["split"].items() if k != "preprocessing_fit_scope"}}
+    with_scope_rejected = contract.validate_analysis_contract(snapshot, no_scope)
+    assert not with_scope_rejected["conforms"] and "SPLIT_POLICY_VIOLATION" in with_scope_rejected["rejection_codes"]
+
+    bad = contract.validate_analysis_contract(snapshot, {**classification, "kind": "arbitrary_python"})
     assert not bad["conforms"] and "ANALYSIS_CONTRACT_INVALID" in bad["rejection_codes"]
     try:
-        sandbox.validate_ml_execution_contract({"execution_template": "ask_o11y_logistic_regression_v1"}, {**safe, "kind": "logistic_regression"})
+        sandbox.validate_ml_execution_contract({"execution_template": "ask_o11y_logistic_regression_v1"}, {**classification, "kind": "logistic_regression"})
     except sandbox.WorkflowContractError:
         pass
     else:
@@ -89,7 +99,7 @@ def main() -> int:
         "execution_template": "ask_o11y_gradient_boosting_v1",
         "preprocessing_fit_scope": "training_only",
         "autoresearch": {"objective": "accuracy", "search_budget": 20},
-    }, {**safe, "kind": "gradient_boosting"})
+    }, {**classification, "kind": "gradient_boosting", "algorithms": ["gradient_boosting"]})
     assert enforced["autoresearch"]["search_budget"] == 20
 
     print("ok: contract kind enum + training-only fit scope")

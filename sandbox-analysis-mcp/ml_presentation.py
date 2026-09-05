@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ml_execution import GENERALIZATION_LIMITS
 from typing import Any, Callable
 
 FORBIDDEN_KEYS = {"raw_rows", "frame", "physical_path", "signed_url", "python_code", "credentials"}
@@ -141,7 +144,7 @@ def build_manifest(
     verdict = str(guards.get("verdict") or "unknown")
     model_status = "模型驗證：通過" if verdict == "accepted" else "模型驗證：未通過"
     operational_ready = bool(objective.get("threshold_cost_approved")) and verdict == "accepted"
-    operational_status = "營運使用：可依已核准門檻部署" if operational_ready else "營運使用：尚待確認誤判與漏判成本"
+    operational_status = "營運使用：可依已核准門檻部署" if operational_ready else ("營運使用：模型驗證未通過，不可部署" if verdict != "accepted" else "營運使用：尚待確認誤判與漏判成本")
     minority_rate = data.get("minority_rate")
     cost_matrix = objective.get("cost_matrix")
     metric_guidance = _compose_metric_guidance(objective, cost_matrix, minority_rate)
@@ -173,7 +176,7 @@ def build_manifest(
             "accuracy": f"每 1,000 筆約 {correct} 筆判對、{errors} 筆判錯。",
             "improvement": f"比舊模型每 1,000 筆少錯約 {fewer_errors} 筆；錯誤量降低約 {relative_reduction:.1f}%。",
             "generalization": f"換成未見資料，每 1,000 筆的表現差約 {_round_count(gap * 1000)} 筆。",
-            "stability": "換不同資料分組，前十大關鍵因素約八成仍相同。" if stability >= 0.75 else f"換不同資料分組，關鍵因素一致程度約 {stability * 100:.0f}%，需要進一步確認。",
+            "stability": f"換不同資料分組，關鍵因素一致程度約 {stability * 100:.0f}%；是否通過以驗證收據為準。",
             "drift": "本次訓練與測試資料結構非常接近；不代表未來月份不會改變。" if psi < 0.1 else "訓練與測試資料已有明顯差異，使用前需調查資料變化。",
         },
         "trials": trials,
@@ -194,8 +197,14 @@ def _walk(value: Any, key: str = "") -> None:
     elif isinstance(value, list):
         for child in value:
             _walk(child, key)
-    elif isinstance(value, str) and (value.startswith("/") or "?token=" in value):
-        raise ValueError("manifest contains a physical path or signed URL")
+    elif isinstance(value, str):
+        if value.startswith("/") or "?token=" in value:
+            raise ValueError("manifest contains a physical path or signed URL")
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("manifest contains a non-finite number")
+    elif value is not None and not isinstance(value, (bool, int)):
+        raise ValueError("manifest contains a non-JSON-primitive value")
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
@@ -367,11 +376,11 @@ def build_data_atlas(
         if not available:
             fields.append(entry)
             continue
-        series = frame[name]
+        series: Any = frame[name]
         missing_rate = round(number(series.isna().mean(), f"{name} missing rate"), 4)
         entry["missing_rate"] = missing_rate
         if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
-            values = pd.to_numeric(series, errors="coerce").dropna().astype(float)
+            values = pd.Series(pd.to_numeric(pd.Series(series), errors="coerce")).dropna().astype(float)
             if values.empty:
                 numeric = {"mean": None, "std": None, "cv": None, "skew": None, "q1": None, "median": None, "q3": None, "outlier_share": None}
             else:
@@ -531,7 +540,7 @@ def _group_feature(series: Any, *, bins: int) -> Any:
     import pandas as pd  # type: ignore[reportMissingImports]
 
     if pd.api.types.is_numeric_dtype(series) and series.nunique(dropna=True) > 10:
-        grouped = pd.qcut(series, q=min(bins, series.nunique(dropna=True)), duplicates="drop")
+        grouped: Any = pd.qcut(series, q=min(bins, series.nunique(dropna=True)), duplicates="drop")
         return grouped.astype(str).where(series.notna(), "缺失")
     values = series.astype("string").fillna("缺失")
     keep = set(values.value_counts().head(8).index.tolist())
@@ -811,9 +820,9 @@ def render_assets(
     # 3. Generalization health cards.
     figure, axis = plt.subplots(figsize=(11, 4)); axis.axis("off")
     cards = [
-        ("換新資料會掉很多嗎？", f"每 1,000 筆差約 {_round_count(guards['generalization_gap'] * 1000)} 筆", green if guards["generalization_gap"] <= 0.03 else red),
-        ("關鍵因素穩定嗎？", f"前十大重疊約 {guards['importance_stability'] * 100:.0f}%", green if guards["importance_stability"] >= 0.75 else orange),
-        ("資料結構相近嗎？", f"PSI {guards['max_psi']:.4f}", green if guards["max_psi"] < 0.1 else orange),
+        ("換新資料會掉很多嗎？", f"每 1,000 筆差約 {_round_count(guards['generalization_gap'] * 1000)} 筆", green if guards["generalization_gap"] <= GENERALIZATION_LIMITS["generalization_gap"] else red),
+        ("關鍵因素穩定嗎？", f"前十大重疊約 {guards['importance_stability'] * 100:.0f}%", green if guards["importance_stability"] >= GENERALIZATION_LIMITS["importance_stability"] else orange),
+        ("資料結構相近嗎？", f"PSI {guards['max_psi']:.4f}", green if guards["max_psi"] <= GENERALIZATION_LIMITS["max_psi"] else orange),
     ]
     for index, (title, value, color) in enumerate(cards):
         x = index / 3 + 0.015
@@ -823,7 +832,7 @@ def render_assets(
     axis.set_title("換一批資料後，模型還可靠嗎？", loc="left", fontsize=18, weight="bold")
     _explain(figure, "三張卡片回答：換新資料會不會變差、關鍵因素穊不穩定、資料結構有沒有改變；綠色代表通過。")
     _save_figure(figure, output_dir / "generalization_health.png", emit_figure)
-    register_artifact(manifest, name="generalization_health.png", caption="模型在未見資料、不同資料分組及本次資料分布檢查皆通過。", alt_text="三張卡片顯示新資料差異、關鍵因素穩定度與資料分布差異")
+    register_artifact(manifest, name="generalization_health.png", caption=manifest["decision"]["model_evidence_status"] + "；各項檢查數值如圖，通過不保證未來資料仍相同。", alt_text="三張卡片顯示新資料差異、關鍵因素穩定度與資料分布差異")
 
     # 6. Grouped ontology-property importance.
     features = manifest["features"]
@@ -874,7 +883,7 @@ def render_assets(
         figure, axis = plt.subplots(figsize=(6, 5))
         axis.plot([0, 1], [0, 1], "--", color=grey, label="理想校正")
         axis.plot(predicted_rate, observed_rate, marker="o", color=blue, label="Holdout 校正")
-        axis.set(xlim=(0, 1), ylim=(0, 1), xlabel="預測流失機率", ylabel="實際流失比例")
+        axis.set(xlim=(0, 1), ylim=(0, 1), xlabel="預測正類機率", ylabel="實際正類比例")
         axis.set_title(f"機率可信度（Brier {brier:.3f}，越低越好）", fontsize=15, weight="bold")
         axis.legend(frameon=False)
         _save_figure(figure, output_dir / "calibration_curve.png", emit_figure)
@@ -882,7 +891,7 @@ def render_assets(
             manifest,
             name="calibration_curve.png",
             caption=f"校正器只用 train OOF 預測建立；本圖在 holdout 評估機率可信度，Brier score 為 {brier:.3f}，未用來重選校正器。",
-            alt_text="Holdout 預測機率與實際流失比例的可靠度曲線",
+            alt_text="Holdout 預測機率與實際正類比例的可靠度曲線",
         )
 
         cost_matrix = manifest["objective"].get("cost_matrix") or {}
@@ -951,7 +960,7 @@ def render_assets(
         figure, cost_axis = plt.subplots(figsize=(8, 5))
         cost_axis.plot(thresholds, costs, color=red, label="加權成本 / 1,000")
         cost_axis.axvline(threshold, color=blue, linestyle="--", label=f"train OOF 門檻 {threshold:.3f}")
-        cost_axis.set(xlabel="判斷門檻", ylabel="3:1 加權成本 / 1,000")
+        cost_axis.set(xlabel="判斷門檻", ylabel=f"FN:FP={fn_cost:g}:{fp_cost:g} 加權成本 / 1,000")
         metric_axis = cost_axis.twinx()
         metric_axis.plot(thresholds, recalls, color=green, alpha=0.8, label="Recall")
         metric_axis.plot(thresholds, precisions, color=orange, alpha=0.8, label="Precision")
@@ -971,6 +980,24 @@ def render_assets(
     return list(manifest["artifacts"])
 
 
+def _shap_density(shap_values: Any, feature_names: list[str], sample_values: Any) -> tuple[Any, Any, list[str]]:
+    """Display-only histograms include every input row; never feed bins into ML."""
+    import numpy as np
+
+    values = np.asarray(shap_values, dtype=float)
+    if values.ndim == 3:
+        values = values[:, :, -1]
+    if values.ndim != 2 or not values.size or values.shape != np.asarray(sample_values).shape or values.shape[1] != len(feature_names):
+        raise ValueError("shap values shape must match sample values and feature names")
+    if not np.isfinite(values).all():
+        raise ValueError("shap values must be finite; no rows may be silently dropped")
+    order = np.argsort(-np.abs(values).mean(axis=0), kind="stable")[:10]
+    shown = values[:, order]
+    edges = np.histogram_bin_edges(shown, bins=40)
+    counts = np.asarray([np.histogram(shown[:, index], bins=edges)[0] for index in range(len(order))])
+    return counts, edges, [str(feature_names[index]) for index in order]
+
+
 def render_shap_summary(
     manifest: dict[str, Any],
     shap_values: Any,
@@ -980,25 +1007,21 @@ def render_shap_summary(
     *,
     emit_figure: Callable[[Any, str], None] | None = None,
 ) -> list[dict[str, str]]:
-    """Render a SHAP beeswarm with plain-language guidance."""
-    import numpy as np  # type: ignore[reportMissingImports]
-    import shap  # type: ignore[reportMissingImports]
-
+    """Render the same full-row SHAP density used by the bounded Plotly view."""
     validate_manifest(manifest)
-    values = np.asarray(shap_values, dtype=float)
-    if values.ndim == 3:
-        values = values[:, :, -1]
-    sample = np.asarray(sample_values, dtype=float)
-    if values.shape[0] != sample.shape[0] or values.shape[1] != len(feature_names):
-        raise ValueError("shap values shape must match sample values and feature names")
+    counts, edges, names = _shap_density(shap_values, feature_names, sample_values)
     plt, *_ = _plot_modules()
-    shap.summary_plot(values, features=sample, feature_names=list(feature_names), max_display=10, show=False)
-    figure = plt.gcf()
-    figure.set_size_inches(9, 5.5)
-    figure.suptitle("模型為什麼這樣判斷？（SHAP 歸因）", fontsize=16, weight="bold")
+    figure, axis = plt.subplots(figsize=(9, 5.5))
+    image = axis.imshow(counts, aspect="auto", extent=[edges[0], edges[-1], len(names) - 0.5, -0.5], cmap="Blues")
+    axis.set_yticks(range(len(names)), names)
+    axis.set_xlabel("SHAP 值（關聯非因果）")
+    axis.set_title("SHAP 全量分布（顏色＝筆數）")
+    figure.colorbar(image, ax=axis, label="筆數")
+    rows = counts[0].sum().item()
+    manifest["data"].update({"shap_aggregated_rows": rows, "shap_display_features": len(names), "shap_histogram_bins": counts.shape[1]})
     output_dir.mkdir(parents=True, exist_ok=True)
     _save_figure(figure, output_dir / "shap_summary.png", emit_figure)
-    register_artifact(manifest, name="shap_summary.png", caption="每個點是一位樣本：顏色代表欄位數值高低，左右位置代表這個值把預測往哪個方向推；這是關聯不是因果。", alt_text="SHAP 摘要圖，顯示各欄位對預測的推力方向與強度")
+    register_artifact(manifest, name="shap_summary.png", caption=f"全部 {rows} 筆 SHAP 列依貢獻值分箱，只展示平均絕對貢獻最高的 {len(names)} 個特徵；顏色代表筆數，不是特徵值。展示聚合不回流模型，關聯不代表因果。", alt_text="SHAP 全量分箱筆數熱圖，呈現主要特徵的貢獻值分布")
     return list(manifest["artifacts"])
 
 
@@ -1008,31 +1031,26 @@ def render_model_comparison(
     *,
     emit_figure: Callable[[Any, str], None] | None = None,
 ) -> list[dict[str, str]]:
-    """Render a bar chart comparing all models + baseline."""
+    """Compare training-CV candidates; never mix their selection with holdout scores."""
     validate_manifest(manifest)
     output_dir.mkdir(parents=True, exist_ok=True)
     comparison = manifest.get("model_comparison") or []
     if not comparison:
         return list(manifest["artifacts"])
     plt, *_ = _plot_modules()
-    blue, green, orange, grey = "#3274D9", "#56A64B", "#FF9830", "#6B7280"
-
-    labels = ["簡單基準"] + [item["kind"] for item in comparison]
-    accuracies = [manifest["results"]["baseline"]["accuracy"] * 100] + [item["accuracy"] * 100 for item in comparison]
-    best_index = next((i + 1 for i, item in enumerate(comparison) if item.get("is_best")), None)
-
+    labels = [item["kind"] for item in comparison]
+    scores = [item["cv_score"] for item in comparison]
     figure, axis = plt.subplots(figsize=(9, 4.5))
-    colors = [grey] + [green if i + 1 == best_index else blue for i in range(len(comparison))]
-    bars = axis.barh(labels, accuracies, color=colors)
-    for bar, value in zip(bars, accuracies, strict=True):
-        axis.text(value + 0.3, bar.get_y() + bar.get_height() / 2, f"{value:.1f}%", va="center", fontsize=12, weight="bold")
-    axis.set_xlabel("答對率（%）")
-    axis.set_title("哪個模型表現最好？", loc="left", fontsize=16, weight="bold")
-    axis.set_xlim(0, max(accuracies) * 1.15)
+    colors = ["#56A64B" if item.get("is_best") else "#3274D9" for item in comparison]
+    bars = axis.barh(labels, scores, color=colors)
+    axis.bar_label(bars, fmt="%.3f", padding=3)
+    axis.set_xlabel("Training CV: " + manifest["objective"]["primary_metric"])
+    axis.set_title("訓練交叉驗證的模型比較", loc="left", fontsize=16, weight="bold")
+    axis.margins(x=0.15)
     _save_figure(figure, output_dir / "model_comparison.png", emit_figure)
     register_artifact(manifest, name="model_comparison.png",
-                      caption="比較簡單基準與各模型的答對率；綠色代表推薦的模型。",
-                      alt_text="各模型答對率的水平長條圖，綠色標示推薦模型")
+                      caption="僅比較訓練 CV；綠色是評估 holdout 前鎖定的模型，不代表可部署。",
+                      alt_text="各候選模型訓練 CV 分數，綠色標示鎖定模型")
 
     validate_manifest(manifest)
     return list(manifest["artifacts"])
@@ -1094,15 +1112,15 @@ def recommend_spec_values(
                                       f"（平均推力 {best['mean_shap_high']:+.2f}；僅為關聯，非因果）")
                 recommendations.append(best)
         else:
-            grouped = (pd.DataFrame({"value": series.astype(str), "shap": values})
-                       .groupby("value")["shap"].agg(["mean", "count"])
-                       .sort_values("mean", ascending=False))
-            positive = grouped[grouped["mean"] > 0].head(3)
+            grouped = pd.DataFrame(pd.DataFrame({"value": series.astype(str), "shap": values})
+                       .groupby("value").agg(mean=("shap", "mean"), count=("shap", "count")))
+            grouped = grouped.sort_values("mean", ascending=False)
+            positive = grouped.loc[grouped["mean"] > 0].head(3)
             if positive.empty:
                 continue
-            categories = list(positive.index)
+            categories = [str(value) for value in positive.index]
             try:
-                top_mean = float(positive["mean"].max())
+                top_mean = float(pd.Series(positive["mean"]).max())
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"{column} categorical shap means are invalid") from exc
             recommendations.append({
@@ -1398,7 +1416,7 @@ def build_plotly_figures(
         _finish("confusion_matrix", [{
             "type": "heatmap",
             "z": [[_count(cell, "confusion") for cell in row] for row in matrix],
-            "x": ["判為留存", "判為流失"], "y": ["實際留存", "實際流失"],
+            "x": ["判為負類", "判為正類"], "y": ["實際負類", "實際正類"],
             "coloraxis": "coloraxis",
         }], {
             "title": f"混淆矩陣（holdout，門檻 {threshold:.3f}）",
@@ -1417,7 +1435,7 @@ def build_plotly_figures(
             "xaxis": axis(title="誤報比例", domain=[0.06, 0.46]),
             "yaxis": axis(title="找出比例", domain=[0.08, 0.95]),
             "xaxis2": axis(title="找出比例", domain=[0.56, 0.96]),
-            "yaxis2": axis(title="判為流失時有多準", domain=[0.08, 0.95]),
+            "yaxis2": axis(title="判為正類時有多準", domain=[0.08, 0.95]),
             "showlegend": True,
         })
 
@@ -1427,7 +1445,7 @@ def build_plotly_figures(
         _finish("calibration_curve", [
             {"type": "scatter", "mode": "lines", "name": "理想校正", "x": [0.0, 1.0], "y": [0.0, 1.0], "line": {"color": "#9aaab8", "width": 2}},
             {"type": "scatter", "mode": "lines+markers", "name": "Holdout 校正", "x": [round(_number(v, "predicted_rate"), 4) for v in predicted_rate], "y": [round(_number(v, "observed_rate"), 4) for v in observed_rate], "line": {"color": "#4fd1c5", "width": 3}},
-        ], {"title": "機率校正（train OOF 選、holdout 評估）", "xaxis": axis(title="預測流失機率", range=[0, 1]), "yaxis": axis(title="實際流失比例", range=[0, 1])})
+        ], {"title": "機率校正（train OOF 選、holdout 評估）", "xaxis": axis(title="預測正類機率", range=[0, 1]), "yaxis": axis(title="實際正類比例", range=[0, 1])})
 
         # 12. Threshold-cost curve (cost + recall/precision, locked threshold annotated).
         cost_matrix = objective.get("cost_matrix") or {}
@@ -1458,30 +1476,18 @@ def build_plotly_figures(
             "showlegend": True,
         })
 
-    # 13. SHAP summary (beeswarm scatter, binned color, no sample IDs).
+    # 13. Fixed-size display bins preserve every row without oversized scatter payloads.
     if shap_values is not None and feature_names and sample_values is not None:
-        shap_array = np.asarray(shap_values, dtype=float)
-        mean_abs = np.abs(shap_array).mean(axis=0)
-        order = np.argsort(mean_abs)[::-1][:10]
-        rng = np.random.default_rng(0)
-        sample_array = np.asarray(sample_values)
-        data = []
-        for slot, column_index in enumerate(order):
-            values = shap_array[:, column_index]
-            feature_column = sample_array[:, column_index]
-            quantiles = np.quantile(feature_column, [0.2, 0.4, 0.6, 0.8])
-            color_bins = np.searchsorted(quantiles, feature_column, side="right") + 1
-            jitter = rng.uniform(-0.28, 0.28, size=values.shape[0])
-            data.append({
-                "type": "scatter", "mode": "markers", "name": str(feature_names[column_index])[:40],
-                "x": [round(_number(value, "shap"), 4) for value in values],
-                "y": [round(_number(slot + 1 + offset, "shap_y"), 4) for offset in jitter],
-                "marker": {"color": [_count(bin_index, "shap bin") for bin_index in color_bins], "colorscale": [[0.0, "#1f3a4d"], [1.0, "#4fd1c5"]], "cmin": 1, "cmax": 5, "opacity": 0.75, "size": 5},
-            })
-        _finish("shap_summary", data, {
-            "title": "SHAP 影響（顏色＝特徵值分箱；關聯非因果）",
-            "xaxis": axis(title="SHAP 值"),
-            "yaxis": axis(title="特徵（上→下依重要性）", tickvals=list(range(1, len(order) + 1)), ticktext=[str(feature_names[index])[:30] for index in order]),
+        counts, edges, names = _shap_density(shap_values, feature_names, sample_values)
+        _finish("shap_summary", [{
+            "type": "heatmap", "name": "全量 SHAP 分箱筆數",
+            "x": ((edges[:-1] + edges[1:]) / 2).tolist(),
+            "y": list(range(len(names))), "z": counts.tolist(),
+            "colorscale": [[0.0, "#1f3a4d"], [1.0, "#4fd1c5"]],
+        }], {
+            "title": "SHAP 全量分布（顏色＝筆數；關聯非因果）",
+            "xaxis": axis(title="SHAP 值（分箱中心）"),
+            "yaxis": axis(title="特徵（依平均絕對貢獻）", tickvals=list(range(len(names))), ticktext=[name[:30] for name in names], range=[len(names) - 0.5, -0.5]),
             "showlegend": False,
         })
 

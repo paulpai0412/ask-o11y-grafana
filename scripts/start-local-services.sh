@@ -18,20 +18,23 @@ set +a
 : "${U1_OPERATING_CSV_URL:?U1_OPERATING_CSV_URL is required in .env}"
 
 mkdir -p "$RUNTIME_DIR"
-docker compose up -d
-docker compose --env-file wferp/test_db/.env -f wferp/test_db/docker-compose.testdb.yml up -d
-for _ in {1..40}; do
-	[[ $(docker inspect wferp-mssql-test --format '{{.State.Health.Status}}' 2>/dev/null || true) == healthy ]] && break
-	sleep 3
-done
-[[ $(docker inspect wferp-mssql-test --format '{{.State.Health.Status}}' 2>/dev/null || true) == healthy ]] || {
-	echo 'WFERP test DB did not become healthy' >&2
-	exit 1
-}
-set -a
-. wferp/test_db/.env
-set +a
-docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -i /init/01_create_wferp_test.sql >/dev/null
+# MCP-only deploys preserve existing databases and their data.
+if [[ ${1:-} != --mcp-only ]]; then
+	docker compose up -d
+	docker compose --env-file wferp/test_db/.env -f wferp/test_db/docker-compose.testdb.yml up -d
+	for _ in {1..40}; do
+		[[ $(docker inspect wferp-mssql-test --format '{{.State.Health.Status}}' 2>/dev/null || true) == healthy ]] && break
+		sleep 3
+	done
+	[[ $(docker inspect wferp-mssql-test --format '{{.State.Health.Status}}' 2>/dev/null || true) == healthy ]] || {
+		echo 'WFERP test DB did not become healthy' >&2
+		exit 1
+	}
+	set -a
+	. wferp/test_db/.env
+	set +a
+	docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -i /init/01_create_wferp_test.sql >/dev/null
+fi
 
 start() {
 	local name=$1 log=$2 restart=$3

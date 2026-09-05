@@ -66,6 +66,12 @@ def execution_template_for_kind(kind: str) -> str:
     if kind not in ANALYSIS_KINDS:
         raise ValueError(f"unsupported analysis kind: {kind}")
     return f"ask_o11y_{kind}_v1"
+
+
+def execution_template_for_contract(contract: dict[str, Any]) -> str:
+    if contract.get("task_kind") == "regression":
+        return "ask_o11y_regression_v1"
+    return execution_template_for_kind(str(contract.get("kind")))
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
 
@@ -75,7 +81,7 @@ def context_from_headers(headers) -> dict[str, str] | None:
     org = headers.get("X-Grafana-Org-Id") or headers.get("X-Org-Id")
     user = headers.get("X-Grafana-Actor-User-Id") or headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
     if org and user:
-        return {"org_id": str(org), "user_id": str(user)}
+        return {"org_id": str(org), "user_id": str(user), "session_id": str(headers.get("X-Grafana-Session-Id") or "")}
     return None
 
 def inject_header_context(msg: dict[str, Any], headers) -> dict[str, Any]:
@@ -99,12 +105,14 @@ def inject_header_context(msg: dict[str, Any], headers) -> dict[str, Any]:
 def context_from_args(args: dict[str, Any]) -> dict[str, str]:
     raw_context = args.get("_server_context")
     if isinstance(raw_context, dict) and raw_context.get("org_id") and raw_context.get("user_id"):
-        return {"org_id": str(raw_context["org_id"]), "user_id": str(raw_context["user_id"])}
+        return {"org_id": str(raw_context["org_id"]), "user_id": str(raw_context["user_id"]), "session_id": str(raw_context.get("session_id") or "")}
     raise workflow_node.WorkflowContractError("verified artifact context is required")
 
 
 def bounded_metadata_time_range(metadata: dict[str, Any]) -> dict[str, str]:
     raw = metadata.get("date_range")
+    if isinstance(raw, dict) and raw.get("kind") == "unbounded" and metadata.get("query_kind") == "uploaded_csv":
+        return {"from": "now-367d", "to": "now"}
     if not isinstance(raw, dict):
         raise workflow_node.WorkflowContractError("authorized metadata must include a bounded date_range")
     start, end = raw.get("all_from") or raw.get("valid_from"), raw.get("all_to") or raw.get("valid_to")
@@ -156,17 +164,37 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
             raise workflow_node.WorkflowContractError("selected fields are not in authorized metadata: " + ", ".join(unknown))
         requested_fields = list(selected_fields)
         semantic_validation = None
+        generic_upload_snapshot = None
+        upload_metadata: dict[str, Any] = {}
+        field_views = [
+            {
+                key: field[key]
+                for key in ("name", "physical_name", "type", "data_type", "semantic_kind", "unit", "analysis_role", "status")
+                if key in field and field[key] is not None
+            }
+            for field in available.values()
+        ]
+        population_filter: dict[str, Any] = {}
+        metadata_dataset_id = str(metadata.get("dataset_id") or "")
+        if metadata_dataset_id.startswith("upload_"):
+            upload_metadata = uploaded_datasets.inspect_upload(context, metadata_dataset_id, context.get("session_id"))
+            generic_upload_snapshot = {"sha256": upload_metadata["source_sha256"], "snapshot_id": f"candidate:{metadata_dataset_id}"}
         analysis_contract = args.get("analysis_contract")
         if analysis_contract is not None:
             if not isinstance(analysis_contract, dict):
                 raise workflow_node.WorkflowContractError("analysis_contract must be an object")
             if analysis_contract.get("autotune"):
                 budget = analysis_contract.get("search_budget", 20)
-                objective = analysis_contract.get("objective", "roc_auc")
+                regression = analysis_contract.get("task_kind") == "regression"
+                objective = analysis_contract.get("objective", "mae" if regression else "roc_auc")
                 minimum = analysis_contract.get("objective_minimum")
-                if isinstance(budget, bool) or not isinstance(budget, int) or not 1 <= budget <= 40 or objective not in {"accuracy", "roc_auc", "pr_auc"} or (minimum is not None and (isinstance(minimum, bool) or not isinstance(minimum, (int, float)) or not 0 <= minimum <= 1)):
+                objectives = {"mae"} if regression else {"accuracy", "roc_auc", "pr_auc"}
+                maximum = None if regression else 1
+                if isinstance(budget, bool) or not isinstance(budget, int) or not 1 <= budget <= 40 or objective not in objectives or (minimum is not None and (isinstance(minimum, bool) or not isinstance(minimum, (int, float)) or minimum < 0 or (maximum is not None and minimum > maximum))):
                     raise workflow_node.WorkflowContractError("autoresearch contract bounds are invalid")
             contract_dataset_id = str(analysis_contract.get("dataset_id"))
+            if contract_dataset_id != metadata_dataset_id:
+                raise workflow_node.WorkflowContractError("analysis dataset must match the authorized metadata")
             if contract_dataset_id.startswith("upload_"):
                 upload_metadata = uploaded_datasets.inspect_upload(context, contract_dataset_id, context.get("session_id"))
                 hints = upload_semantics.load_hints(uploaded_datasets.UPLOAD_ROOT / contract_dataset_id)
@@ -176,6 +204,11 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
                     semantic_validation["conforms"] = False
                     semantic_validation["rejection_codes"].append("SNAPSHOT_HASH_MISMATCH")
                 required_projection = {str(analysis_contract.get("target")), *semantic_validation["included_fields"]}
+                split = analysis_contract.get("split") or {}
+                split_field = split.get("time_field") if split.get("kind") == "chronological_holdout" else split.get("group_field")
+                if isinstance(split_field, str):
+                    required_projection.add(split_field)
+                population_filter = analysis_contract.get("population_filter") or {}
                 quality_fields: set[str] = set()
                 minimum_valid_rows = int(hints["quality_policy"]["minimum_valid_rows"])
             else:
@@ -185,6 +218,7 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
                 if dataset is None:
                     raise workflow_node.WorkflowContractError("ontology dataset does not match authorized metadata")
                 required_projection = {dataset["time_identity"], dataset["target"], *semantic_validation["included_fields"]}
+                population_filter = analysis_contract.get("population_filter") or {}
                 quality_fields = {field["physical_name"] for field in dataset["fields"] if field["status"] == "approved" and field["analysis_role"] == "quality"}
                 minimum_valid_rows = int(dataset["quality_policy"]["minimum_valid_rows"])
             if not semantic_validation["conforms"]:
@@ -195,7 +229,8 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
                     instruction="Stop before Grafana Query; resolve every semantic rejection and create a new preview/plan hash.",
                     evidence={"rejection_codes": semantic_validation["rejection_codes"], "failed_rules": semantic_validation["failed_rules"], "limitations": semantic_validation.get("limitations", []), "downstream_call_counts": {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}},
                 )
-            requested_projection = set(requested_fields) - quality_fields
+            filter_names = set(population_filter) if isinstance(population_filter, dict) else set()
+            requested_projection = set(requested_fields) - quality_fields - filter_names
             if requested_projection != required_projection:
                 return error_response(
                     step=step,
@@ -212,6 +247,10 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
                     instruction="Stop before Grafana Query; use the approved minimum valid row requirement.",
                     evidence={"rejection_codes": ["QUALITY_POLICY_VIOLATION"], "downstream_call_counts": {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}},
                 )
+        filter_fields = list(population_filter) if isinstance(population_filter, dict) else []
+        for field_name in filter_fields:
+            if field_name not in selected_fields:
+                selected_fields.append(field_name)
         validity_rules = []
         for field_name, field in available.items():
             applies_to = field.get("validity_for")
@@ -229,8 +268,11 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
         if len(query["columns"]) != len(selected_fields):
             raise workflow_node.WorkflowContractError("query template cannot project every selected field")
         time_range = bounded_metadata_time_range(metadata)
+        # A new plan revision must never overwrite the plan of an existing frame.
+        run_id = ARTIFACTS.create_run(context)
         plan = {
             "dataset_id": metadata.get("dataset_id"),
+            "field_views": field_views,
             "datasource_uid": metadata.get("datasource_uid"),
             "datasource_type": metadata.get("datasource_type"),
             "query_language": "csv",
@@ -241,6 +283,11 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
             "analysis_input_contract": {"required_fields": selected_fields, "optional_fields": [], "validity_rules": validity_rules, "minimum_rows": minimum_rows, "maximum_rows": maximum_rows, "maximum_fields": MAX_PLAN_FIELDS, "maximum_response_bytes": MAX_PLAN_RESPONSE_BYTES},
             "provenance": {"dataset_metadata_ref": metadata_ref, "dataset_id": metadata.get("dataset_id"), "datasource_uid": metadata.get("datasource_uid"), "requested_fields": requested_fields, "selected_fields": selected_fields, "time_range": time_range},
         }
+        if generic_upload_snapshot is not None:
+            expected_rows = upload_metadata["rows"]
+            if isinstance(expected_rows, bool) or not isinstance(expected_rows, int) or not minimum_rows <= expected_rows <= maximum_rows:
+                raise workflow_node.WorkflowContractError("row limits cannot cover the complete uploaded dataset")
+            plan["analysis_input_contract"]["expected_rows"] = expected_rows
         if semantic_validation is not None and isinstance(analysis_contract, dict):
             plan["ontology"] = semantic_validation["snapshot"]
             plan["analysis_contract"] = {
@@ -250,18 +297,24 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
                 "field_views": semantic_validation.get("field_views", []),
                 "interpretation": "predictive_association_not_causation",
             }
+            plan["field_views"] = semantic_validation.get("field_views", field_views)
             plan["analysis_input_contract"]["ontology_snapshot_sha256"] = semantic_validation["snapshot"]["sha256"]
-            plan["analysis_input_contract"]["analysis_kind"] = analysis_contract["kind"]
-            plan["analysis_input_contract"]["execution_template"] = execution_template_for_kind(str(analysis_contract["kind"]))
+            plan["analysis_input_contract"]["analysis_kind"] = analysis_contract.get("task_kind") or analysis_contract.get("kind")
+            plan["analysis_input_contract"]["execution_template"] = execution_template_for_contract(analysis_contract)
             plan["analysis_input_contract"]["preprocessing_fit_scope"] = analysis_contract["split"]["preprocessing_fit_scope"]
-            if analysis_contract.get("autotune"):
+            if analysis_contract.get("autotune") or analysis_contract.get("search_budget") is not None:
                 plan["analysis_input_contract"]["autoresearch"] = {
-                    "objective": analysis_contract.get("objective", "roc_auc"),
+                    "objective": analysis_contract.get("objective", "mae" if analysis_contract.get("task_kind") == "regression" else "roc_auc"),
                     "objective_minimum": analysis_contract.get("objective_minimum"),
                     "search_budget": analysis_contract.get("search_budget", 20),
                     "max_search_budget": 40,
                 }
             plan["provenance"].update({"ontology_snapshot_id": semantic_validation["snapshot"]["snapshot_id"], "ontology_snapshot_sha256": semantic_validation["snapshot"]["sha256"]})
+            plan["plan_sha256"] = hashlib.sha256(json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        elif generic_upload_snapshot is not None:
+            plan["ontology"] = generic_upload_snapshot
+            plan["analysis_input_contract"]["ontology_snapshot_sha256"] = generic_upload_snapshot["sha256"]
+            plan["provenance"].update({"ontology_snapshot_id": generic_upload_snapshot["snapshot_id"], "ontology_snapshot_sha256": generic_upload_snapshot["sha256"]})
             plan["plan_sha256"] = hashlib.sha256(json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         plan_ref = ARTIFACTS.write_json(context, run_id, "query-plan", plan)
     except ArtifactAuthError as exc:
@@ -457,6 +510,117 @@ TOOLS = [
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
+                    "task_kind": {
+                        "type": "string",
+                        "enum": [
+                            "binary_classification",
+                            "regression"
+                        ],
+                        "default": "binary_classification"
+                    },
+                    "algorithms": {
+                        "type": "array",
+                        "minItems": 1,
+                        "uniqueItems": True,
+                        "items": {
+                            "enum": [
+                                "dummy",
+                                "ridge",
+                                "random_forest",
+                                "extra_trees",
+                                "hist_gradient_boosting",
+                                "logistic_regression",
+                                "random_forest_shap",
+                                "gradient_boosting",
+                                "catboost",
+                                "xgboost"
+                            ]
+                        }
+                    },
+                    "analysis_mode": {
+                        "type": "string",
+                        "enum": ["retrospective_association", "forward_prediction"]
+                    },
+                    "include_treatment_candidates": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Explicitly opt in to using ontology treatment_candidate fields as model features; this does not authorize operational changes."
+                    },
+                    "target_direction": {
+                        "type": "string",
+                        "enum": ["minimize", "maximize"],
+                        "description": "Legacy business target direction, NOT the metric direction. Prefer optimization.direction; omit for pure prediction."
+                    },
+                    "optimization": {
+                        "type": "object", "additionalProperties": False,
+                        "description": "Only for explicitly requested business optimization, never inferred from the metric.",
+                        "properties": {"direction": {"type": "string", "enum": ["minimize", "maximize"]}},
+                        "required": ["direction"]
+                    },
+                    "controllable_fields": {
+                        "type": "array",
+                        "uniqueItems": True,
+                        "items": {"type": "string"}
+                    },
+                    "context_fields": {
+                        "type": "array",
+                        "uniqueItems": True,
+                        "items": {"type": "string"}
+                    },
+                    "forbidden_fields": {
+                        "type": "array",
+                        "uniqueItems": True,
+                        "items": {"type": "string"}
+                    },
+                    "population_filter": {
+                        "type": "object",
+                        "description": "Exact scalar equality filters applied to the authorized frame before split; filter fields are not model features.",
+                        "additionalProperties": {"type": ["string", "number", "boolean"]}
+                    },
+                    "feature_sets": {
+                        "type": "array",
+                        "description": "Optional nested feature-set comparison. Every set shares the parent split and one global search budget across all sets/models. Select by training CV only; holdout is evaluated only for the locked winner.",
+                        "minItems": 1,
+                        "maxItems": 6,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,80}$"},
+                                "features": {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"type": "string"}},
+                                "controllable_fields": {"type": "array", "uniqueItems": True, "items": {"type": "string"}},
+                                "context_fields": {"type": "array", "uniqueItems": True, "items": {"type": "string"}}
+                            },
+                            "required": ["id", "features", "controllable_fields", "context_fields"]
+                        }
+                    },
+                    "constrained_search": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "enabled": {"type": "boolean", "default": False},
+                            "minimum_support": {"type": "integer", "minimum": 2, "maximum": 100000},
+                            "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
+                            "fixed_context": {"type": "object"},
+                            "support_group_fields": {
+                                "type": "array",
+                                "description": "Optional observed-support grouping fields. Every item must come from context_fields (for example source, position, or batch), never controllable_fields.",
+                                "uniqueItems": True,
+                                "items": {"type": "string"}
+                            },
+                            "bounds": {
+                                "type": "object",
+                                "description": "Observed or explicitly user-approved numeric bounds for controllable fields. Use an empty object when bounds are unavailable; never guess sentinel or infinite limits.",
+                                "additionalProperties": {
+                                    "type": "array",
+                                    "prefixItems": [{"type": "number"}, {"type": "number"}],
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                }
+                            }
+                        },
+                        "required": ["enabled", "minimum_support", "top_k", "bounds"]
+                    },
                     "kind": {
                         "enum": [
                             "catboost",
@@ -534,11 +698,10 @@ TOOLS = [
                         "type": "string",
                         "enum": [
                             "balanced",
-                            "scale_pos_weight",
-                            "smote",
                             "none"
                         ]
                     },
+                    "sample_weight_fields": {"type": "array", "maxItems": 0, "description": "No sample-weight execution is supported; omit or pass an empty array."},
                     "positive_class": {
                         "type": "string",
                         "maxLength": 64
@@ -560,14 +723,14 @@ TOOLS = [
                         "enum": [
                             "accuracy",
                             "roc_auc",
-                            "pr_auc"
+                            "pr_auc",
+                            "mae"
                         ],
                         "default": "roc_auc"
                     },
                     "objective_minimum": {
                         "type": "number",
-                        "minimum": 0,
-                        "maximum": 1
+                        "minimum": 0
                     },
                     "search_budget": {
                         "type": "integer",
@@ -610,14 +773,19 @@ TOOLS = [
                     }
                 },
                 "required": [
-                    "kind",
                     "dataset_id",
                     "target",
                     "features",
-                    "as_of",
                     "split",
                     "seed",
                     "ontology_snapshot_sha256"
+                ],
+                "allOf": [
+                    {
+                        "if": {"properties": {"task_kind": {"const": "regression"}}, "required": ["task_kind"]},
+                        "then": {"required": ["algorithms", "controllable_fields", "context_fields", "forbidden_fields"]},
+                        "else": {"required": ["kind", "as_of"]}
+                    }
                 ]
             }
         },
@@ -714,69 +882,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def self_check() -> None:
-    context = {"org_id": "1", "user_id": "planner-self-check"}
-    run_id = ARTIFACTS.create_run(context)
-    metadata_ref = ARTIFACTS.write_json(context, run_id, "dataset-metadata", {"dataset_id": "self-check-dataset", "datasource_uid": "self-check", "datasource_type": "yesoreyeram-infinity-datasource", "fields": [{"name": "timestamp", "type": "date"}, {"name": "metric", "type": "number"}, {"name": "feature", "type": "number"}], "date_range": {"all_from": "2026-01-01", "all_to": "2026-12-31"}, "query_template": {"refId": "A", "datasource": {"uid": "self-check", "type": "yesoreyeram-infinity-datasource"}, "type": "csv", "source": "url", "url": "http://example.invalid/data.csv", "parser": "backend", "columns": [{"selector": "timestamp", "text": "timestamp", "type": "timestamp"}, {"selector": "metric", "text": "metric", "type": "number"}, {"selector": "feature", "text": "feature", "type": "number"}]}})
-    plan = tool_plan_query({"dataset_metadata_ref": metadata_ref, "selected_fields": ["timestamp", "metric", "feature"], "minimum_rows": 20, "_server_context": context})
-    if not plan.get("ok") or plan.get("datasource_uid") != "self-check" or not plan.get("plan_ref", "").startswith("artifact://"):
-        raise RuntimeError(str(plan))
-    plan_artifact = ARTIFACTS.read_json(context, plan["plan_ref"])
-    if plan_artifact["analysis_input_contract"] != {"required_fields": ["timestamp", "metric", "feature"], "optional_fields": [], "validity_rules": [], "minimum_rows": 20, "maximum_rows": 100000, "maximum_fields": 200, "maximum_response_bytes": 52428800} or plan_artifact.get("time_range") != {"from": "2026-01-01T00:00:00Z", "to": "2026-12-31T23:59:59Z"}:
-        raise RuntimeError(str(plan_artifact))
-    if "next_step" in plan or "request" in plan_artifact:
-        raise RuntimeError("query plan must not contain a fixed workflow or natural-language routing")
-    invalid_field = tool_plan_query({"dataset_metadata_ref": metadata_ref, "selected_fields": ["missing"], "_server_context": context})
-    natural_language = tool_plan_query({"request": "fixed intent must not be routed", "_server_context": context})
-    if invalid_field.get("ok") or natural_language.get("ok"):
-        raise RuntimeError("invalid planner inputs must fail")
-    validation = tool_validate_query({"plan_ref": plan["plan_ref"], "_server_context": context})
-    if not validation["ok"]:
-        raise RuntimeError(str(validation))
-    wide_names = [f"field_{index}" for index in range(MAX_PLAN_FIELDS)]
-    wide_run_id = ARTIFACTS.create_run(context)
-    wide_metadata_ref = ARTIFACTS.write_json(context, wide_run_id, "dataset-metadata", {"dataset_id": "upload_00000000000000000000000000000000", "datasource_uid": "self-check", "datasource_type": "yesoreyeram-infinity-datasource", "fields": [{"name": name, "type": "number"} for name in wide_names], "date_range": {"all_from": "2000-01-01", "all_to": "2000-12-31"}, "query_template": {"refId": "A", "datasource": {"uid": "self-check", "type": "yesoreyeram-infinity-datasource"}, "type": "csv", "source": "url", "url": "http://example.invalid/wide.csv", "parser": "backend", "columns": [{"selector": name, "text": name, "type": "number"} for name in wide_names]}})
-    wide_plan = tool_plan_query({"dataset_metadata_ref": wide_metadata_ref, "selected_fields": wide_names, "_server_context": context})
-    too_wide = tool_plan_query({"dataset_metadata_ref": wide_metadata_ref, "selected_fields": [*wide_names, "field_200"], "_server_context": context})
-    if not wide_plan.get("ok") or too_wide.get("ok"):
-        raise RuntimeError(f"200-field planner boundary failed: {wide_plan} {too_wide}")
-    snapshot = ontology_contract.load_snapshot()
-    identity = ontology_contract.snapshot_identity(snapshot)
-    u1_run_id = ARTIFACTS.create_run(context)
-    u1_names = ["date", "heat_rate", "avg_generation_mw", "main_steam_temp_c", "reheat_steam_temp_c", "scr_temp_c", "condenser_outlet_water_temp", "coal_avg_heat_value_kcal_kg", "raw_coal_consumption_g"]
-    u1_fields = [{"name": name, "type": "date" if name == "date" else "number"} for name in u1_names] + [{"name": "heat_rate_valid", "type": "boolean", "validity_for": ["heat_rate"], "accepted_values": [True]}]
-    u1_query_columns = [{"selector": item["name"], "text": item["name"], "type": "timestamp" if item["type"] == "date" else item["type"]} for item in u1_fields]
-    u1_metadata_ref = ARTIFACTS.write_json(context, u1_run_id, "dataset-metadata", {"dataset_id": "u1-operating-daily", "datasource_uid": "csv-poc", "datasource_type": "yesoreyeram-infinity-datasource", "fields": u1_fields, "date_range": {"all_from": "2026-01-01", "all_to": "2026-12-31"}, "query_template": {"refId": "A", "datasource": {"uid": "csv-poc", "type": "yesoreyeram-infinity-datasource"}, "type": "csv", "source": "url", "url": "http://example.invalid/u1.csv", "parser": "backend", "columns": u1_query_columns}})
-    safe_contract = {"kind": "random_forest_shap", "dataset_id": "u1-operating-daily", "target": "heat_rate", "features": ["avg_generation_mw", "main_steam_temp_c", "reheat_steam_temp_c", "scr_temp_c", "condenser_outlet_water_temp", "coal_avg_heat_value_kcal_kg"], "as_of": "2026-07-28", "split": {"kind": "chronological_holdout", "time_field": "date", "test_fraction": 0.25, "preprocessing_fit_scope": "training_only"}, "seed": 42, "ontology_snapshot_sha256": identity["sha256"]}
-    safe_projection = ["date", "heat_rate", *safe_contract["features"]]
-    safe_plan = tool_plan_query({"dataset_metadata_ref": u1_metadata_ref, "selected_fields": safe_projection, "minimum_rows": 100, "analysis_contract": safe_contract, "_server_context": context})
-    if not safe_plan.get("ok"):
-        raise RuntimeError(str(safe_plan))
-    safe_artifact = ARTIFACTS.read_json(context, safe_plan["plan_ref"])
-    if safe_artifact.get("ontology", {}).get("sha256") != identity["sha256"] or not safe_artifact.get("plan_sha256") or safe_artifact.get("analysis_contract", {}).get("split", {}).get("kind") != "chronological_holdout":
-        raise RuntimeError("safe ontology plan did not pin the semantic contract")
-    unsafe = {
-        "target_as_feature": {**safe_contract, "features": ["heat_rate"]},
-        "unknown_feature": {**safe_contract, "features": ["missing_feature"]},
-        "target_proxy": {**safe_contract, "features": ["raw_coal_consumption_g"]},
-        "random_split": {**safe_contract, "split": {**safe_contract["split"], "kind": "random"}},
-    }
-    expected_codes = {"target_as_feature": "TARGET_USED_AS_FEATURE", "unknown_feature": "UNKNOWN_FIELD", "target_proxy": "TARGET_PROXY_UNRESOLVED", "random_split": "SPLIT_POLICY_VIOLATION"}
-    negative_codes = {}
-    for name, bad_contract in unsafe.items():
-        result = tool_plan_query({"dataset_metadata_ref": u1_metadata_ref, "selected_fields": safe_projection, "minimum_rows": 100, "analysis_contract": bad_contract, "_server_context": context})
-        codes = result.get("evidence", {}).get("rejection_codes", [])
-        if result.get("ok") or expected_codes[name] not in codes or result.get("evidence", {}).get("downstream_call_counts") != {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}:
-            raise RuntimeError(f"unsafe semantic fixture escaped: {name} {result}")
-        negative_codes[name] = codes
-    wferp_context = wferp_sql.build_context("科目/部門預算單身檔的已耗與可用預算", WFERP_METADATA, top_k=8, ontology_snapshot=ontology_contract.load_snapshot(dataset_id="wferp"))
-    if not {"ACTMI", "ACTMJ", "ACTMK"}.issubset({table["id"] for table in wferp_context["tables"]}) or len(wferp_context["relationships"]) < 2:
-        raise RuntimeError(str(wferp_context))
-    wferp_ontology = ontology_contract.load_snapshot(dataset_id="wferp")
-    approved_relations = [relation for dataset in wferp_ontology["registry"]["datasets"] for relation in dataset.get("relations", []) if relation.get("status") == "approved" and bool(relation.get("executable"))]
-    if not approved_relations:
-        raise RuntimeError("WFERP ontology has no reviewed executable relation fixture")
-    print(json.dumps({"ok": True, "generic_plan_ref": plan["plan_ref"], "ontology_plan_ref": safe_plan["plan_ref"], "ontology_snapshot_sha256": identity["sha256"], "runtime_tools": [tool["name"] for tool in TOOLS], "wferp_context_tables": [table["id"] for table in wferp_context["tables"]], "wferp_ontology": {"snapshot": ontology_contract.snapshot_identity(wferp_ontology), "datasets": len(wferp_ontology["registry"]["datasets"]), "approved_relations": len(approved_relations)}, "negative_checks": {"generic": ["invalid_field", "natural_language_routing"], "ontology": negative_codes}}, ensure_ascii=False, indent=2))
+    # Keep dataset fixtures out of the production request handlers.
+    import runpy
 
+    runpy.run_path(str(ROOT / "scripts/check-query-planner.py"), run_name="__main__")
 
 def main() -> int:
     parser = argparse.ArgumentParser()

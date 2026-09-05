@@ -25,5 +25,8 @@ RUN /bin/bash -lc 'source /opt/code-interpreter/code-interpreter-env.sh python 3
 COPY ml_plotly_contract.py /opt/ask-o11y/ml_plotly_contract.py
 COPY capture.py /opt/ask-o11y/capture.py
 COPY ml_preprocessing.py /opt/ask-o11y/ml_preprocessing.py
+COPY ml_execution.py /opt/ask-o11y/ml_execution.py
 COPY ml_autoresearch.py /opt/ask-o11y/ml_autoresearch.py
+COPY ml_regression.py /opt/ask-o11y/ml_regression.py
 COPY ml_presentation.py /opt/ask-o11y/ml_presentation.py
+COPY data_profile.py /opt/ask-o11y/data_profile.py

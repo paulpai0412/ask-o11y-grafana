@@ -74,7 +74,7 @@ QUERY_PLACEHOLDER_KEYS = {"$plan_ref", "fields", "refId", "datasource"}
 def context_from_headers(headers) -> dict[str, str] | None:
     org = headers.get("X-Grafana-Org-Id") or headers.get("X-Org-Id")
     user = headers.get("X-Grafana-Actor-User-Id") or headers.get("X-Grafana-User-Id") or headers.get("X-Grafana-User") or headers.get("X-Forwarded-User") or headers.get("X-User-Id")
-    return {"org_id": str(org), "user_id": str(user)} if org and user else None
+    return {"org_id": str(org), "user_id": str(user), "session_id": str(headers.get("X-Grafana-Session-Id") or "")} if org and user else None
 
 
 def inject_header_context(msg: dict[str, Any], headers) -> dict[str, Any]:
@@ -87,6 +87,7 @@ def inject_header_context(msg: dict[str, Any], headers) -> dict[str, Any]:
     if not isinstance(args, dict):
         return msg
     context = context_from_headers(headers)
+    args.pop("_server_context", None)
     if context:
         args["_server_context"] = context
     return msg
@@ -96,7 +97,7 @@ def context_from_args(args: dict[str, Any]) -> dict[str, str]:
     context = args.get("_server_context")
     if not isinstance(context, dict) or not context.get("org_id") or not context.get("user_id"):
         raise PermissionError("trusted execution context is required")
-    return {"org_id": str(context["org_id"]), "user_id": str(context["user_id"])}
+    return {"org_id": str(context["org_id"]), "user_id": str(context["user_id"]), "session_id": str(context.get("session_id") or "")}
 
 
 def json_clone(value: Any) -> Any:
@@ -328,6 +329,10 @@ def resolve_panels(context: dict[str, str], panels: Any, counters: dict[str, int
             raise WorkflowContractError(f"dashboard has more than {MAX_PANELS} panels")
         if not isinstance(panel, dict):
             raise WorkflowContractError("dashboard panel is invalid")
+        if panel.get("askO11yAssetBindings") and panel.get("type") != ml_dashboard_contract.PLOTLY_PLUGIN_ID:
+            raise WorkflowContractError("all analysis images must use asko11y-plotly-panel")
+        if panel.get("type") == "text":
+            ml_dashboard_contract.validate_narrative_content((panel.get("options") or {}).get("content", ""))
         raw_item = json_clone(panel)
         nested_panels = raw_item.pop("panels", None)
         item = resolve_asset_bindings(context, raw_item, counters)
@@ -348,6 +353,23 @@ def resolve_panels(context: dict[str, str], panels: Any, counters: dict[str, int
     return resolved
 
 
+def resolve_dashboard_payload(context: dict[str, str], dashboard: dict[str, Any]) -> dict[str, Any]:
+    if "$dashboard_ref" not in dashboard:
+        return dashboard
+    if set(dashboard) != {"$dashboard_ref"}:
+        raise WorkflowContractError("dashboard ref must be the only dashboard field")
+    dashboard_ref = dashboard["$dashboard_ref"]
+    if not isinstance(dashboard_ref, str) or not dashboard_ref.startswith("artifact://"):
+        raise WorkflowContractError("dashboard ref is invalid")
+    _, parts = parse_artifact_ref(dashboard_ref)
+    if parts != ("dashboard",):
+        raise WorkflowContractError("dashboard ref must reference a composed dashboard")
+    resolved = ARTIFACTS.read_json(context, dashboard_ref)
+    if not isinstance(resolved, dict):
+        raise WorkflowContractError("composed dashboard is invalid")
+    return resolved
+
+
 def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
     step = "resolve_dashboard_refs"
     try:
@@ -355,6 +377,7 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
         dashboard = args.get("dashboard")
         if not isinstance(dashboard, dict):
             raise WorkflowContractError("dashboard is required")
+        dashboard = resolve_dashboard_payload(context, dashboard)
         if len(json.dumps(dashboard, ensure_ascii=False).encode()) > MAX_DASHBOARD_BYTES:
             raise WorkflowContractError("dashboard exceeds resolver size limit")
         output = json_clone(dashboard)
@@ -364,7 +387,7 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
         counters = {"panels": 0, "targets": 0, "assets": 0, "plotly": 0}
         output["panels"] = resolve_panels(context, output.get("panels", []), counters)
         if counters["assets"] and counters["targets"]:
-            raise WorkflowContractError("analysis dashboards may only contain image/text panels, not Grafana data targets")
+            raise WorkflowContractError("analysis dashboards may only contain plugin evidence and narrative panels, not Grafana data targets")
     except (ArtifactAuthError, PermissionError) as exc:
         return error_response(step=step, error=f"unauthorized artifact access: {exc}", recoverable=False, instruction="Stop; the opaque dashboard binding is not authorized for this context.")
     except (WorkflowContractError, OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
@@ -418,6 +441,28 @@ def _report_material(args: dict[str, Any]) -> tuple[dict[str, str], str, dict[st
         raise WorkflowContractError("manifest output is unavailable or invalid") from exc
     if not isinstance(manifest, dict):
         raise WorkflowContractError("manifest output must be an object")
+    if manifest.get("format") == "ask-o11y-ml-presentation-v1":
+        run_id, parts = parse_artifact_ref(execution_ref)
+        if parts != ("sandbox-execution",) or execution.get("error"):
+            raise WorkflowContractError("ML report requires a successful trusted execution")
+        provenance = ARTIFACTS.read_json(context, f"artifact://{run_id}/sandbox-provenance")
+        trusted = provenance.get("trusted_ml_contract")
+        if not isinstance(trusted, bool) or not trusted or provenance.get("executor_kind") != "execute_ml_contract":
+            raise WorkflowContractError("arbitrary Python output cannot claim verified ML; use the trusted contract executor")
+        data = manifest.get("data") or {}
+        counts: list[int] = []
+        for key in ("source_rows", "rows", "train_rows", "holdout_rows", "explained_rows"):
+            value = data.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise WorkflowContractError("ML row accounting is incomplete")
+            counts.append(value)
+        source_rows, eligible_rows, train_rows, holdout_rows, explained_rows = counts
+        if source_rows != (provenance.get("validity") or {}).get("valid_rows") or eligible_rows != train_rows + holdout_rows or eligible_rows > source_rows or explained_rows != holdout_rows:
+            raise WorkflowContractError("ML row accounting does not cover the complete authorized split")
+        if eligible_rows < source_rows and not (provenance.get("analysis_contract") or {}).get("population_filter"):
+            raise WorkflowContractError("ML excluded rows without an approved population filter")
+        if (manifest.get("identity") or {}).get("contract_sha256") != provenance.get("plan_sha256"):
+            raise WorkflowContractError("ML report and approved plan digests differ")
     by_name = {
         str(result.get("display_name")): index
         for index, result in enumerate(results)
@@ -453,6 +498,20 @@ def _report_material(args: dict[str, Any]) -> tuple[dict[str, str], str, dict[st
     if not artifacts:
         raise WorkflowContractError("manifest contains no renderable artifacts")
     return context, execution_ref, manifest, artifacts, outputs
+
+
+def grant_artifact_reuse(args: dict[str, Any]) -> dict[str, Any]:
+    step = "grant_artifact_reuse"
+    try:
+        context = context_from_args(args)
+        execution_ref, target_session = args.get("execution_ref"), args.get("target_session_id")
+        if set(args) - {"execution_ref", "target_session_id", "_server_context"} or not isinstance(execution_ref, str) or not isinstance(target_session, str):
+            raise WorkflowContractError("pass only an execution ref and the user-specified target session")
+        grant = ARTIFACTS.grant_reuse(context, execution_ref, target_session)
+        run_id, _ = parse_artifact_ref(execution_ref)
+        return success_response(step=step, run_id=run_id, refs={"execution_ref": execution_ref, "grant_ref": grant["grant_ref"]}, instruction="The same org/user may reuse existing results in the explicitly approved target session. Upload ownership and new execution authority did not change.", evidence=grant)
+    except (PermissionError, OSError, ValueError, TypeError, WorkflowContractError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=False, instruction="Reuse must be granted by the original owner session after explicit approval.")
 
 
 def prepare_ml_report(args: dict[str, Any]) -> dict[str, Any]:
@@ -561,9 +620,12 @@ def inspect_report_artifacts(args: dict[str, Any]) -> dict[str, Any]:
 def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
     step = "compose_ml_dashboard"
     try:
-        unexpected = sorted(set(args) - {"report_context_ref", "inspection_refs", "synthesis", "uid", "title", "_server_context"})
+        unexpected = sorted(set(args) - {"report_context_ref", "inspection_refs", "synthesis", "uid", "title", "output_mode", "_server_context"})
         if unexpected:
             raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
+        output_mode = args.get("output_mode", "ref")
+        if output_mode not in {"ref", "full"}:
+            raise WorkflowContractError("output_mode must be ref or full")
         context, report_context_ref, report_context = _read_report_context(args)
         inspection_refs = args.get("inspection_refs")
         if not isinstance(inspection_refs, list) or not 1 <= len(inspection_refs) <= 8 or len(set(inspection_refs)) != len(inspection_refs):
@@ -619,13 +681,94 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
         ml_dashboard_contract.validate_preview_dashboard(dashboard)
     except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
         return error_response(step=step, error=str(exc), recoverable=True, instruction="Revise only the LLM report synthesis; do not rerun query or analysis.")
-    return success_response(
-        step=step, run_id="run_" + uuid.uuid4().hex, refs={},
-        instruction="The evidence-bound opaque dashboard is ready. Resolve bindings, then dispatch only to the approved Grafana writer.",
+    dashboard_run_id = ARTIFACTS.create_run(context)
+    dashboard_ref = ARTIFACTS.write_json(context, dashboard_run_id, "dashboard", dashboard)
+    result = success_response(
+        step=step, run_id="run_" + uuid.uuid4().hex, refs={"dashboard_ref": dashboard_ref},
+        instruction="The evidence-bound opaque dashboard is ready. Send {dashboard: {$dashboard_ref: dashboard_ref}} to the approved Grafana writer; the host resolves the ref and keeps the full dashboard out of the model context.",
         evidence={"sections": len(synthesis["sections"]), "artifacts": sum(len(section["panels"]) for section in synthesis["sections"]), "inspection_modes": sorted(modes)},
-        dashboard=dashboard,
+        dashboard_ref=dashboard_ref,
     )
+    if output_mode == "full":
+        result["dashboard"] = dashboard
+    return result
 
+
+EVIDENCE_SCHEMA = {
+    "type": "array", "minItems": 1, "maxItems": ml_report_contract.MAX_EVIDENCE,
+    "items": {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "fact_ref": {"type": "string"},
+            "format": {"type": "string", "enum": sorted(ml_report_contract.EVIDENCE_FORMATS)},
+            "label": {"type": "string", "minLength": 1, "maxLength": ml_report_contract.MAX_TEXT},
+        },
+        "required": ["fact_ref", "format"],
+    },
+}
+VIEW_NARRATIVE_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "view_id": {"type": "string"},
+        "headline": {"type": "string"},
+        "data_observation": {"type": "string"},
+        "visual_observation": {"type": ["string", "null"]},
+        "interpretation": {"type": "string"},
+        "limitation": {"type": "string"},
+        "next_step": {"type": "string"},
+        "evidence": EVIDENCE_SCHEMA,
+    },
+    "required": ["view_id", "headline", "data_observation", "visual_observation", "interpretation", "limitation", "next_step", "evidence"],
+}
+PANEL_SYNTHESIS_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "artifact_id": {"type": "string"},
+        "view_ids": {"type": "array", "minItems": 1, "maxItems": 12, "uniqueItems": True, "items": {"type": "string"}},
+        "view_narratives": {"type": "array", "minItems": 1, "maxItems": 12, "items": VIEW_NARRATIVE_SCHEMA},
+        "headline": {"type": "string"},
+        "observation": {"type": "string"},
+        "interpretation": {"type": "string"},
+        "cross_chart_context": {"type": "string"},
+        "limitation": {"type": "string"},
+        "next_step": {"type": "string"},
+        "evidence": EVIDENCE_SCHEMA,
+        "priority": {"type": "string", "enum": sorted(ml_report_contract.PRIORITIES)},
+        "preferred_width": {"type": "string", "enum": sorted(ml_report_contract.WIDTHS)},
+    },
+    "required": ["artifact_id", "view_ids", "view_narratives", "headline", "observation", "interpretation", "cross_chart_context", "limitation", "next_step", "evidence", "priority", "preferred_width"],
+}
+NARRATIVE_BLOCK_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "block_id": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"},
+        "evidence": EVIDENCE_SCHEMA,
+        "priority": {"type": "string", "enum": sorted(ml_report_contract.PRIORITIES)},
+    },
+    "required": ["block_id", "title", "body", "evidence", "priority"],
+}
+SECTION_SYNTHESIS_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "section_id": {"type": "string"}, "title": {"type": "string"}, "purpose": {"type": "string"},
+        "collapsed": {"type": "boolean"},
+        "narrative_blocks": {"type": "array", "maxItems": 8, "items": NARRATIVE_BLOCK_SCHEMA},
+        "panels": {"type": "array", "items": PANEL_SYNTHESIS_SCHEMA},
+    },
+    "required": ["section_id", "title", "purpose", "collapsed", "narrative_blocks", "panels"],
+}
+REPORT_SYNTHESIS_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "description": "Exact evidence-bound report shape. Narrative text must contain no digits; put every number in evidence using fact_ref and an allowed format.",
+    "properties": {
+        "format": {"const": ml_report_contract.REPORT_FORMAT},
+        "report_title": {"type": "string"},
+        "thesis": {"type": "string"},
+        "thesis_evidence": EVIDENCE_SCHEMA,
+        "sections": {"type": "array", "minItems": 1, "maxItems": ml_report_contract.MAX_SECTIONS, "items": SECTION_SYNTHESIS_SCHEMA},
+    },
+    "required": ["format", "report_title", "thesis", "thesis_evidence", "sections"],
+}
 
 TOOLS = [{
     "name": "resolve_dashboard_refs",
@@ -636,6 +779,11 @@ TOOLS = [{
         "properties": {"dashboard": {"type": "object"}},
         "required": ["dashboard"],
     },
+}, {
+    "name": "grant_artifact_reuse",
+    "description": "After explicit user approval in the original source session, grant reuse of existing execution results to one user-specified session of the same org/user. Does not grant uploads, input datasets, or new computation.",
+    "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
+    "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"execution_ref": {"type": "string"}, "target_session_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{16,128}$"}}, "required": ["execution_ref", "target_session_id"]},
 }, {
     "name": "prepare_ml_report",
     "description": "Return a bounded artifact and deterministic fact catalog for one complete report so the host LLM can synthesize flow and per-chart narratives without raw rows or signed URLs.",
@@ -658,13 +806,16 @@ TOOLS = [{
     },
 }, {
     "name": "compose_ml_dashboard",
-    "description": "Validate one whole-report LLM synthesis against deterministic facts/artifacts and compose an opaque Grafana dashboard without choosing or hardcoding its flow or content.",
+    "description": "Validate one whole-report LLM synthesis against deterministic facts/artifacts and persist an opaque Grafana dashboard reference without choosing or hardcoding its flow or content.",
     "inputSchema": {
         "type": "object", "additionalProperties": False,
         "properties": {
             "report_context_ref": {"type": "string"},
             "inspection_refs": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True, "items": {"type": "string"}},
-            "synthesis": {"type": "object"}, "uid": {"type": "string"}, "title": {"type": "string"},
+            "synthesis": REPORT_SYNTHESIS_SCHEMA,
+            "uid": {"type": "string", "maxLength": 40, "description": "A new unique Preview dashboard UID for this analysis session; include a short session/upload suffix, keep it at most 40 characters, and never reuse another session's UID."},
+            "title": {"type": "string"},
+            "output_mode": {"type": "string", "enum": ["ref", "full"], "default": "ref", "description": "ref keeps the composed dashboard opaque and small; full is only for local contract tests."},
         },
         "required": ["report_context_ref", "inspection_refs", "synthesis", "uid", "title"],
     },
@@ -692,9 +843,10 @@ def handle_rpc(msg: dict[str, Any]):
         name = params.get("name")
         handlers = {
             "resolve_dashboard_refs": (resolve_dashboard_refs, {"dashboard", "_server_context"}),
+            "grant_artifact_reuse": (grant_artifact_reuse, {"execution_ref", "target_session_id", "_server_context"}),
             "prepare_ml_report": (prepare_ml_report, {"execution_ref", "manifest_output_index", "_server_context"}),
             "inspect_report_artifacts": (inspect_report_artifacts, {"report_context_ref", "artifact_ids", "mode", "_server_context"}),
-            "compose_ml_dashboard": (compose_ml_dashboard, {"report_context_ref", "inspection_refs", "synthesis", "uid", "title", "_server_context"}),
+            "compose_ml_dashboard": (compose_ml_dashboard, {"report_context_ref", "inspection_refs", "synthesis", "uid", "title", "output_mode", "_server_context"}),
         }
         if name not in handlers:
             return rpc_error(rid, -32602, f"unknown tool: {name}")
