@@ -188,6 +188,58 @@ def build_manifest(
     return manifest
 
 
+def build_report_source(manifest: dict[str, Any], *, plotly_names: set[str] | None = None) -> dict[str, Any]:
+    """Adapt a bounded presentation into the generic Host report-source contract."""
+    candidates: list[tuple[str, str, Any]] = []
+    for section_name in ("data", "process", "results", "decision", "guards"):
+        section = manifest.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for key, value in section.items():
+            if isinstance(value, bool):
+                candidates.append((str(key), "boolean", value))
+            elif isinstance(value, (int, float)):
+                try:
+                    finite = math.isfinite(float(value))
+                except (TypeError, ValueError, OverflowError):
+                    finite = False
+                if finite:
+                    candidates.append((str(key), "number", value))
+            if len(candidates) >= 32:
+                break
+        if len(candidates) >= 32:
+            break
+    facts: dict[str, dict[str, Any]] = {}
+    for key, kind, value in candidates:
+        fact_id = key.replace(" ", "_").replace(".", "_")
+        if not fact_id.isidentifier():
+            fact_id = f"fact_{len(facts) + 1}"
+        fact_id = fact_id[:80]
+        if fact_id in facts:
+            fact_id = f"{fact_id}_{len(facts) + 1}"
+        facts[fact_id] = {"kind": kind, "label": key[:120], "value": value}
+    if not facts:
+        facts["artifact_count"] = {"kind": "number", "label": "Artifact count", "value": len(manifest.get("artifacts") or [])}
+    first_fact = next(iter(facts))
+    selected_plotly = plotly_names or set()
+    artifacts = []
+    for item in manifest.get("artifacts") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].endswith(".png"):
+            continue
+        artifact_id = Path(item["name"]).stem.replace(" ", "_")
+        render = {"artifact_id": artifact_id, "fact_refs": [first_fact], "png_output_name": item["name"]}
+        if artifact_id in selected_plotly:
+            render["plotly_output_name"] = f"ml-plotly-{artifact_id}.json"
+        artifacts.append(render)
+    return {
+        "format": "ask-o11y-report-source-v1",
+        "purpose": str(manifest.get("purpose") or "bounded analysis evidence"),
+        "conclusion": str(manifest.get("conclusion") or "evidence is ready for review"),
+        "facts": facts,
+        "artifacts": artifacts,
+    }
+
+
 def _walk(value: Any, key: str = "") -> None:
     if key in FORBIDDEN_KEYS or key.endswith("_path") or key.endswith("_url"):
         raise ValueError(f"forbidden manifest key: {key}")

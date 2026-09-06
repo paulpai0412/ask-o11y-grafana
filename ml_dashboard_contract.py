@@ -180,34 +180,46 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
         _validate_narrative(panel)
         _validate_view_narratives(panel, view_ids)
         panel_placeholders: set[str] = set()
-        bindings = panel.get("askO11yAssetBindings")
-        if not isinstance(bindings, list) or not bindings:
-            raise ValueError("evidence panel requires an opaque PNG binding")
+        bindings = panel.get("askO11yAssetBindings") or []
+        if not isinstance(bindings, list):
+            raise ValueError("asset bindings must be an array")
         for binding in bindings:
-            if not isinstance(binding, dict) or set(binding) != {"placeholder", "$execution_ref", "output_index"}:
+            if not isinstance(binding, dict) or set(binding) not in ({"placeholder", "$execution_ref", "output_index"}, {"placeholder", "$report_manifest_ref", "artifact_id"}):
                 raise ValueError("asset binding shape is invalid")
             placeholder = binding.get("placeholder")
             if not isinstance(placeholder, str) or not placeholder.startswith("$asset_url_"):
                 raise ValueError("asset binding placeholder is invalid")
-            if not str(binding.get("$execution_ref") or "").startswith("artifact://"):
-                raise ValueError("asset binding execution ref is invalid")
-            output_index = binding.get("output_index")
-            if isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
-                raise ValueError("asset binding output index is invalid")
+            if "$execution_ref" in binding:
+                if not str(binding.get("$execution_ref") or "").startswith("artifact://"):
+                    raise ValueError("asset binding execution ref is invalid")
+                output_index = binding.get("output_index")
+                if isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
+                    raise ValueError("asset binding output index is invalid")
+            elif not str(binding.get("$report_manifest_ref") or "").startswith("artifact://") or not isinstance(binding.get("artifact_id"), str):
+                raise ValueError("asset binding report manifest ref is invalid")
             panel_placeholders.add(placeholder)
-        serialized_options = json.dumps(panel.get("options") or {}, ensure_ascii=False)
-        if not any(placeholder in serialized_options for placeholder in panel_placeholders):
+        options = panel.get("options") or {}
+        serialized_options = json.dumps(options, ensure_ascii=False)
+        if panel_placeholders and not any(placeholder in serialized_options for placeholder in panel_placeholders):
             raise ValueError("asset binding placeholder is not used by its panel")
         if panel.get("type") == PLOTLY_PLUGIN_ID:
-            plotly_bindings = panel.get("askO11yPlotlyBindings")
-            options = panel.get("options") or {}
+            plotly_bindings = panel.get("askO11yPlotlyBindings") or []
+            if not isinstance(plotly_bindings, list):
+                raise ValueError("Plotly bindings must be an array")
             mode = options.get("renderMode")
-            if mode not in {"image", "plotly"} or options.get("fallbackUrl") not in panel_placeholders or "narrative" not in options:
-                raise ValueError("image evidence requires an explicit mode, asset, and narrative")
-            if mode == "plotly" and (not isinstance(plotly_bindings, list) or not plotly_bindings):
+            if mode not in {"image", "plotly"} or "narrative" not in options:
+                raise ValueError("image evidence requires an explicit mode and narrative")
+            if mode == "image" and (not panel_placeholders or options.get("fallbackUrl") not in panel_placeholders or plotly_bindings or "figure" in options):
+                raise ValueError("image mode requires an opaque PNG binding")
+            if mode == "plotly" and not plotly_bindings:
                 raise ValueError("Plotly mode requires a sanitized figure binding")
-            if mode == "image" and (plotly_bindings or "figure" in options):
-                raise ValueError("image mode cannot claim a Plotly figure")
+            plotly_placeholders = {binding.get("placeholder") for binding in plotly_bindings if isinstance(binding, dict)}
+            if mode == "plotly" and not any(isinstance(item, str) and item in serialized_options for item in plotly_placeholders):
+                raise ValueError("Plotly binding placeholder is not used by its panel")
+            if mode == "plotly" and panel_placeholders and options.get("fallbackUrl") not in panel_placeholders:
+                raise ValueError("Plotly fallback must use its opaque PNG binding")
+            if mode == "plotly" and not panel_placeholders and "fallbackUrl" in options:
+                raise ValueError("Plotly fallback requires an opaque PNG binding")
             if options.get("selectedViewIds") != view_ids or options.get("viewNarratives") != panel.get("askO11yViewNarratives"):
                 raise ValueError("Plotly selected views and narratives must match the evidence panel metadata")
             view_specs = options.get("viewSpecs")

@@ -8,6 +8,8 @@ writes Grafana. Ask O11y's built-in Grafana MCP remains the only writer.
 from __future__ import annotations
 
 import argparse
+import binascii
+import hashlib
 import importlib.util
 import json
 import os
@@ -221,6 +223,78 @@ def replace_plotly_placeholder(value: Any, placeholder: str, figure: dict[str, A
     return value, 0
 
 
+def _read_report_binding(context: dict[str, str], report_manifest_ref: Any, artifact_id: Any, expected_mode: str) -> tuple[str, int, dict[str, Any]]:
+    if not isinstance(report_manifest_ref, str) or not report_manifest_ref.startswith("artifact://"):
+        raise WorkflowContractError("report manifest ref is invalid")
+    manifest_run_id, parts = parse_artifact_ref(report_manifest_ref)
+    if parts != ("report-manifest",):
+        raise WorkflowContractError("report binding requires a canonical report manifest ref")
+    manifest = ARTIFACTS.read_json(context, report_manifest_ref)
+    if not isinstance(manifest, dict) or manifest.get("format") != ml_report_contract.REPORT_MANIFEST_FORMAT:
+        raise WorkflowContractError("report manifest format is invalid")
+    execution_ref = manifest.get("execution_ref")
+    if not isinstance(execution_ref, str) or not execution_ref.startswith("artifact://"):
+        raise WorkflowContractError("report manifest execution ref is invalid")
+    execution_run_id, execution_parts = parse_artifact_ref(execution_ref)
+    if execution_run_id != manifest_run_id or execution_parts != ("sandbox-execution",):
+        raise WorkflowContractError("report manifest execution ref is not paired with its manifest")
+    execution = ARTIFACTS.read_json(context, execution_ref)
+    if not isinstance(execution, dict) or execution.get("error"):
+        raise WorkflowContractError("report manifest execution is unavailable")
+    if not isinstance(artifact_id, str):
+        raise WorkflowContractError("report artifact id is required")
+    item = next((item for item in manifest.get("artifacts", []) if isinstance(item, dict) and item.get("artifact_id") == artifact_id), None)
+    if item is None:
+        raise WorkflowContractError("report artifact id is unknown")
+    render = item.get("render")
+    if not isinstance(render, dict):
+        raise WorkflowContractError("report artifact render is invalid")
+    render_mode = render.get("mode")
+    if expected_mode == "plotly" and render_mode != "plotly":
+        raise WorkflowContractError("report artifact render mode must be plotly")
+    if expected_mode == "image":
+        if render_mode == "image":
+            output_index = render.get("output_index")
+            expected_digest = render.get("sha256")
+        elif render_mode == "plotly":
+            output_index = render.get("png_output_index")
+            expected_digest = render.get("png_sha256")
+            if output_index is None:
+                raise WorkflowContractError("report artifact has no PNG fallback")
+        else:
+            raise WorkflowContractError("report artifact render mode must be image or plotly with a PNG fallback")
+    else:
+        output_index = render.get("output_index")
+        expected_digest = render.get("sha256")
+    if isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
+        raise WorkflowContractError("report artifact output index is invalid")
+    try:
+        result = execution["results"][output_index]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise WorkflowContractError("report artifact output index does not exist") from exc
+    if not isinstance(result, dict) or not isinstance(result.get("mime"), dict):
+        raise WorkflowContractError("report artifact output is invalid")
+    mime_type = "image/png" if expected_mode == "image" else render.get("mime_type")
+    payload = result["mime"].get(mime_type)
+    if not isinstance(payload, str):
+        raise WorkflowContractError("report artifact MIME output is unavailable")
+    if expected_mode == "plotly":
+        figure = _plotly_figure(result)
+        digest = hashlib.sha256(json.dumps(figure, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+        if expected_digest != digest:
+            raise WorkflowContractError("report Plotly digest does not match the manifest")
+        return execution_ref, output_index, figure
+    if mime_type != "image/png":
+        raise WorkflowContractError("report image render must use image/png")
+    try:
+        encoded = ml_report_contract._validate_png(payload)
+    except (ValueError, binascii.Error) as exc:
+        raise WorkflowContractError("report PNG output is invalid") from exc
+    if expected_digest != hashlib.sha256(encoded).hexdigest():
+        raise WorkflowContractError("report PNG digest does not match the manifest")
+    return execution_ref, output_index, {"payload": payload}
+
+
 def resolve_plotly_bindings(context: dict[str, str], panel: dict[str, Any], counters: dict[str, int]) -> dict[str, Any]:
     """Resolve askO11yPlotlyBindings into static, sanitized panel options."""
     bindings = panel.pop("askO11yPlotlyBindings", [])
@@ -230,36 +304,31 @@ def resolve_plotly_bindings(context: dict[str, str], panel: dict[str, Any], coun
     if counters["plotly"] > MAX_PLOTLY_BINDINGS:
         raise WorkflowContractError(f"dashboard has more than {MAX_PLOTLY_BINDINGS} plotly bindings")
     for binding in bindings:
-        if not isinstance(binding, dict) or set(binding) != {"placeholder", "$execution_ref", "output_index", "plugin_id"}:
-            raise WorkflowContractError("plotly binding requires only placeholder, $execution_ref, output_index, and plugin_id")
-        placeholder = binding["placeholder"]
-        execution_ref = binding["$execution_ref"]
-        output_index = binding["output_index"]
-        plugin_id = binding["plugin_id"]
+        if not isinstance(binding, dict):
+            raise WorkflowContractError("plotly binding is invalid")
+        if set(binding) == {"placeholder", "$report_manifest_ref", "artifact_id", "plugin_id"}:
+            placeholder = binding["placeholder"]
+            plugin_id = binding["plugin_id"]
+            _execution_ref, _output_index, sanitized = _read_report_binding(context, binding["$report_manifest_ref"], binding["artifact_id"], "plotly")
+        elif set(binding) == {"placeholder", "$execution_ref", "output_index", "plugin_id"}:
+            placeholder = binding["placeholder"]
+            execution_ref = binding["$execution_ref"]
+            output_index = binding["output_index"]
+            plugin_id = binding["plugin_id"]
+            if not isinstance(execution_ref, str) or isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
+                raise WorkflowContractError("plotly binding requires an opaque execution ref and non-negative output index")
+            execution = ARTIFACTS.read_json(context, execution_ref)
+            try:
+                result = execution["results"][output_index]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise WorkflowContractError("plotly output index does not exist") from exc
+            sanitized = _plotly_figure(result)
+        else:
+            raise WorkflowContractError("plotly binding requires only placeholder, report manifest ref, artifact id, and plugin id")
         if not isinstance(placeholder, str) or not placeholder.startswith("$plotly_") or not placeholder.removeprefix("$plotly_").replace("_", "").isalnum():
             raise WorkflowContractError("plotly placeholder must start with $plotly_ and contain only letters, digits, or underscores")
         if plugin_id != ml_plotly_contract.PLOTLY_PLUGIN_ID:
             raise WorkflowContractError(f"plotly binding plugin id is not the approved {ml_plotly_contract.PLOTLY_PLUGIN_ID}")
-        if not isinstance(execution_ref, str) or isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
-            raise WorkflowContractError("plotly binding requires an opaque execution ref and non-negative output index")
-        execution = ARTIFACTS.read_json(context, execution_ref)
-        try:
-            result = execution["results"][output_index]
-            mime = result.get("mime") if isinstance(result, dict) else None
-        except (KeyError, IndexError, TypeError) as exc:
-            raise WorkflowContractError("plotly output index does not exist") from exc
-        payload = None
-        for mime_type in ("application/vnd.plotly.v1+json", "application/json"):
-            if isinstance(mime, dict) and isinstance(mime.get(mime_type), str):
-                payload = mime[mime_type]
-                break
-        if payload is None:
-            raise WorkflowContractError("plotly binding requires an application/json or plotly output")
-        try:
-            figure = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise WorkflowContractError("plotly output is not valid JSON") from exc
-        sanitized = ml_plotly_contract.sanitize_figure(figure)
         panel, replacements = replace_plotly_placeholder(panel, placeholder, sanitized)
         if replacements == 0:
             raise WorkflowContractError("plotly placeholder is not used by the panel")
@@ -269,7 +338,7 @@ def resolve_plotly_bindings(context: dict[str, str], panel: dict[str, Any], coun
     for forbidden in ("script", "onclick", "callback", "new function", "eval("):
         if forbidden in serialized_options:
             raise WorkflowContractError(f"plotly panel options must not contain {forbidden!r}")
-    if bindings:
+    if bindings and (panel.get("options") or {}).get("renderMode") != "plotly":
         fallback_url = str((panel.get("options") or {}).get("fallbackUrl") or "")
         if not fallback_url.startswith("http"):
             raise WorkflowContractError("plotly panel requires a resolved PNG fallbackUrl (askO11yAssetBindings)")
@@ -286,23 +355,29 @@ def resolve_asset_bindings(context: dict[str, str], panel: dict[str, Any], count
     if counters["assets"] > MAX_ASSET_BINDINGS:
         raise WorkflowContractError(f"dashboard has more than {MAX_ASSET_BINDINGS} asset bindings")
     for binding in bindings:
-        if not isinstance(binding, dict) or set(binding) != {"placeholder", "$execution_ref", "output_index"}:
-            raise WorkflowContractError("asset binding requires only placeholder, $execution_ref, and output_index")
-        placeholder = binding["placeholder"]
-        execution_ref = binding["$execution_ref"]
-        output_index = binding["output_index"]
+        if not isinstance(binding, dict):
+            raise WorkflowContractError("asset binding is invalid")
+        if set(binding) == {"placeholder", "$report_manifest_ref", "artifact_id"}:
+            placeholder = binding["placeholder"]
+            execution_ref, output_index, _image = _read_report_binding(context, binding["$report_manifest_ref"], binding["artifact_id"], "image")
+        elif set(binding) == {"placeholder", "$execution_ref", "output_index"}:
+            placeholder = binding["placeholder"]
+            execution_ref = binding["$execution_ref"]
+            output_index = binding["output_index"]
+            if not isinstance(execution_ref, str) or isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
+                raise WorkflowContractError("asset binding requires an opaque execution ref and non-negative output index")
+            execution = ARTIFACTS.read_json(context, execution_ref)
+            try:
+                result = execution["results"][output_index]
+                mime = result.get("mime") if isinstance(result, dict) else None
+            except (KeyError, IndexError, TypeError) as exc:
+                raise WorkflowContractError("asset output index does not exist") from exc
+            if not isinstance(mime, dict) or not isinstance(mime.get("image/png"), str):
+                raise WorkflowContractError("dashboard asset binding currently requires image/png")
+        else:
+            raise WorkflowContractError("asset binding requires only placeholder, report manifest ref, and artifact id")
         if not isinstance(placeholder, str) or not placeholder.startswith("$asset_url_") or not placeholder.removeprefix("$asset_url_").replace("_", "").isalnum():
             raise WorkflowContractError("asset placeholder must start with $asset_url_ and contain only letters, digits, or underscores")
-        if not isinstance(execution_ref, str) or isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
-            raise WorkflowContractError("asset binding requires an opaque execution ref and non-negative output index")
-        execution = ARTIFACTS.read_json(context, execution_ref)
-        try:
-            result = execution["results"][output_index]
-            mime = result.get("mime") if isinstance(result, dict) else None
-        except (KeyError, IndexError, TypeError) as exc:
-            raise WorkflowContractError("asset output index does not exist") from exc
-        if not isinstance(mime, dict) or not isinstance(mime.get("image/png"), str):
-            raise WorkflowContractError("dashboard asset binding currently requires image/png")
         asset_url = artifact_assets.sign_output_url(
             public_base=ARTIFACT_PUBLIC_BASE,
             secret=os.environ.get("MCP_SHARED_TOKEN", ""),
@@ -329,8 +404,14 @@ def resolve_panels(context: dict[str, str], panels: Any, counters: dict[str, int
             raise WorkflowContractError(f"dashboard has more than {MAX_PANELS} panels")
         if not isinstance(panel, dict):
             raise WorkflowContractError("dashboard panel is invalid")
-        if panel.get("askO11yAssetBindings") and panel.get("type") != ml_dashboard_contract.PLOTLY_PLUGIN_ID:
+        asset_bindings = panel.get("askO11yAssetBindings")
+        if asset_bindings and panel.get("type") != ml_dashboard_contract.PLOTLY_PLUGIN_ID:
             raise WorkflowContractError("all analysis images must use asko11y-plotly-panel")
+        if asset_bindings and not panel.get("askO11yPlotlyBindings"):
+            options = panel.get("options")
+            placeholders = {binding.get("placeholder") for binding in asset_bindings if isinstance(binding, dict)}
+            if not isinstance(options, dict) or options.get("renderMode") != "image" or options.get("fallbackUrl") not in placeholders:
+                raise WorkflowContractError("image panels require options.renderMode='image' and options.fallbackUrl set to an asset placeholder")
         if panel.get("type") == "text":
             ml_dashboard_contract.validate_narrative_content((panel.get("options") or {}).get("content", ""))
         raw_item = json_clone(panel)
@@ -404,9 +485,10 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
 
 def _plotly_figure(result: Any) -> dict[str, Any]:
     try:
-        payload = result["mime"]["application/json"]
+        mime = result["mime"]
+        payload = mime.get("application/vnd.plotly.v1+json") or mime.get("application/json")
         figure = json.loads(payload)
-    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+    except (AttributeError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise WorkflowContractError("Plotly output is invalid") from exc
     try:
         return ml_plotly_contract.sanitize_figure(figure)
@@ -423,8 +505,95 @@ def _plotly_capability(spec: dict[str, Any]) -> dict[str, Any]:
     return {"recommended_width": "full" if full else "half", "min_height": min_height}
 
 
+def _canonical_report_material(context: dict[str, str], report_manifest_ref: str) -> tuple[dict[str, str], str, dict[str, Any], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    if not isinstance(report_manifest_ref, str) or not report_manifest_ref.startswith("artifact://"):
+        raise WorkflowContractError("report manifest ref is invalid")
+    try:
+        manifest_run_id, parts = parse_artifact_ref(report_manifest_ref)
+    except ValueError as exc:
+        raise WorkflowContractError("report manifest ref is missing or invalid") from exc
+    if parts != ("report-manifest",):
+        raise WorkflowContractError("report manifest ref must reference a canonical report manifest")
+    manifest = ARTIFACTS.read_json(context, report_manifest_ref)
+    if not isinstance(manifest, dict) or manifest.get("format") != ml_report_contract.REPORT_MANIFEST_FORMAT:
+        raise WorkflowContractError("report manifest format is invalid")
+    execution_ref = manifest.get("execution_ref")
+    if not isinstance(execution_ref, str) or not execution_ref.startswith("artifact://"):
+        raise WorkflowContractError("report manifest execution ref is invalid")
+    execution_run_id, execution_parts = parse_artifact_ref(execution_ref)
+    if execution_run_id != manifest_run_id or execution_parts != ("sandbox-execution",):
+        raise WorkflowContractError("report manifest execution ref is not paired with its manifest")
+    execution = ARTIFACTS.read_json(context, execution_ref)
+    if not isinstance(execution, dict) or execution.get("error") or not isinstance(execution.get("results"), list):
+        raise WorkflowContractError("report manifest execution is unavailable")
+    results = execution["results"]
+    artifacts: list[dict[str, Any]] = []
+    outputs: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    for item in manifest.get("artifacts") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("artifact_id"), str):
+            raise WorkflowContractError("report manifest artifact is invalid")
+        artifact_id = item["artifact_id"]
+        if artifact_id in seen:
+            raise WorkflowContractError("report manifest artifact ids must be unique")
+        seen.add(artifact_id)
+        render = item.get("render")
+        if not isinstance(render, dict) or render.get("mode") not in {"plotly", "image"}:
+            raise WorkflowContractError("report manifest render is invalid")
+        output_index = render.get("output_index")
+        if isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0 or output_index >= len(results):
+            raise WorkflowContractError("report manifest output index is invalid")
+        result = results[output_index]
+        if render["mode"] == "plotly":
+            figure = _plotly_figure(result)
+            digest = hashlib.sha256(json.dumps(figure, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+            if render.get("mime_type") not in {"application/vnd.plotly.v1+json", "application/json"} or render.get("sha256") != digest:
+                raise WorkflowContractError("report Plotly manifest digest is invalid")
+            output = {"plotly_index": output_index, "figure": figure}
+            png_index = render.get("png_output_index")
+            if png_index is not None:
+                if isinstance(png_index, bool) or not isinstance(png_index, int) or png_index < 0 or png_index >= len(results):
+                    raise WorkflowContractError("report PNG fallback index is invalid")
+                png_result = results[png_index]
+                png_mime = png_result.get("mime") if isinstance(png_result, dict) else None
+                png_payload = png_mime.get("image/png") if isinstance(png_mime, dict) else None
+                if not isinstance(png_payload, str):
+                    raise WorkflowContractError("report PNG fallback output is invalid")
+                try:
+                    encoded_png = ml_report_contract._validate_png(png_payload)
+                except (ValueError, binascii.Error) as exc:
+                    raise WorkflowContractError("report PNG fallback output is invalid") from exc
+                if render.get("png_sha256") != hashlib.sha256(encoded_png).hexdigest():
+                    raise WorkflowContractError("report PNG fallback digest is invalid")
+                output["png_index"] = png_index
+            figure_spec = ml_figure_inspection.inspect_figure(artifact_id, figure)
+            output.update({"figure_spec": figure_spec, "recommended_width": figure_spec.get("recommended_width"), "min_height": figure_spec.get("min_height")})
+        else:
+            if render.get("mime_type") != "image/png" or not isinstance(result, dict) or not isinstance(result.get("mime"), dict) or not isinstance(result["mime"].get("image/png"), str):
+                raise WorkflowContractError("report PNG manifest output is invalid")
+            try:
+                encoded = ml_report_contract._validate_png(result["mime"]["image/png"])
+            except (ValueError, binascii.Error) as exc:
+                raise WorkflowContractError("report PNG manifest output is invalid") from exc
+            if render.get("sha256") != hashlib.sha256(encoded).hexdigest():
+                raise WorkflowContractError("report PNG manifest digest is invalid")
+            figure_spec = ml_figure_inspection.inspect_png_only(artifact_id, str(item.get("caption") or artifact_id))
+            output = {"png_index": output_index, "figure_spec": figure_spec}
+        outputs[artifact_id] = output
+        public_artifact = {"artifact_id": artifact_id, "figure_spec": figure_spec}
+        if "recommended_width" in output:
+            public_artifact.update({"recommended_width": output["recommended_width"], "min_height": output["min_height"]})
+        artifacts.append(public_artifact)
+    if not artifacts:
+        raise WorkflowContractError("report manifest contains no renderable artifacts")
+    return context, execution_ref, manifest, artifacts, outputs
+
+
 def _report_material(args: dict[str, Any]) -> tuple[dict[str, str], str, dict[str, Any], list[dict[str, Any]], dict[str, dict[str, Any]]]:
     context = context_from_args(args)
+    report_manifest_ref = args.get("report_manifest_ref")
+    if report_manifest_ref is not None:
+        return _canonical_report_material(context, report_manifest_ref)
     execution_ref = args.get("execution_ref")
     manifest_index = args.get("manifest_output_index")
     if not isinstance(execution_ref, str) or not execution_ref.startswith("artifact://"):
@@ -517,14 +686,17 @@ def grant_artifact_reuse(args: dict[str, Any]) -> dict[str, Any]:
 def prepare_ml_report(args: dict[str, Any]) -> dict[str, Any]:
     step = "prepare_ml_report"
     try:
-        unexpected = sorted(set(args) - {"execution_ref", "manifest_output_index", "_server_context"})
+        unexpected = sorted(set(args) - {"execution_ref", "manifest_output_index", "report_manifest_ref", "_server_context"})
         if unexpected:
             raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
+        if args.get("report_manifest_ref") is not None and ("execution_ref" in args or "manifest_output_index" in args):
+            raise WorkflowContractError("pass either report_manifest_ref or the legacy execution manifest coordinates")
         context, execution_ref, manifest, artifacts, outputs = _report_material(args)
         facts = ml_report_contract.build_fact_catalog(manifest)
         execution_run_id, _parts = parse_artifact_ref(execution_ref)
         report_context = {
             "execution_ref": execution_ref,
+            "report_manifest_ref": args.get("report_manifest_ref"),
             "manifest": manifest,
             "artifacts": artifacts,
             "outputs": outputs,
@@ -535,12 +707,16 @@ def prepare_ml_report(args: dict[str, Any]) -> dict[str, Any]:
                 "inspection": "Inspect every artifact in bounded vision or spec batches before composing.",
             },
         }
-        report_context_ref = ARTIFACTS.write_json(context, execution_run_id, f"report-context-{args['manifest_output_index']}", report_context)
+        context_name = f"report-context-{args.get('manifest_output_index', 'manifest')}"
+        report_context_ref = ARTIFACTS.write_json(context, execution_run_id, context_name, report_context)
     except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; keep successful analysis outputs and correct only the opaque report reference.")
+    refs = {"execution_ref": execution_ref, "report_context_ref": report_context_ref}
+    if isinstance(args.get("report_manifest_ref"), str):
+        refs["report_manifest_ref"] = args["report_manifest_ref"]
     return success_response(
-        step=step, run_id="run_" + uuid.uuid4().hex, refs={"execution_ref": execution_ref, "report_context_ref": report_context_ref},
-        instruction="Inspect every artifact through inspect_report_artifacts in bounded batches, then author one whole-report synthesis without inventing numbers. Pass report_context_ref and all inspection refs to compose_ml_dashboard.",
+        step=step, run_id="run_" + uuid.uuid4().hex, refs=refs,
+        instruction="Inspect every artifact through inspect_report_artifacts in bounded batches (use spec when no PNG capability exists), then author one whole-report synthesis without inventing numbers. Pass report_context_ref and all inspection refs to compose_ml_dashboard.",
         evidence={"artifact_count": len(artifacts), "fact_count": len(facts)},
         report_context={
             "purpose": manifest.get("purpose"), "conclusion": manifest.get("conclusion"),
@@ -586,13 +762,6 @@ def inspect_report_artifacts(args: dict[str, Any]) -> dict[str, Any]:
         coverage: dict[str, list[str]] = {}
         for artifact_id in artifact_ids:
             output = report_context["outputs"][artifact_id]
-            try:
-                png_result = results[output["png_index"]]
-                png_data = png_result["mime"]["image/png"]
-            except (KeyError, IndexError, TypeError) as exc:
-                raise WorkflowContractError("artifact PNG output is unavailable") from exc
-            if not isinstance(png_data, str):
-                raise WorkflowContractError("artifact PNG output is invalid")
             detail = {"artifact_id": artifact_id, "figure_spec": output["figure_spec"]}
             if "plotly_index" in output:
                 detail["figure"] = _plotly_figure(results[output["plotly_index"]])
@@ -600,6 +769,15 @@ def inspect_report_artifacts(args: dict[str, Any]) -> dict[str, Any]:
             view_ids = [view["view_id"] for view in output["figure_spec"]["views"]]
             coverage[artifact_id] = view_ids
             if mode == "vision":
+                if "png_index" not in output:
+                    raise WorkflowContractError("artifact has no PNG fallback; use spec inspection")
+                try:
+                    png_result = results[output["png_index"]]
+                    png_data = png_result["mime"]["image/png"]
+                except (KeyError, IndexError, TypeError) as exc:
+                    raise WorkflowContractError("artifact PNG output is unavailable") from exc
+                if not isinstance(png_data, str):
+                    raise WorkflowContractError("artifact PNG output is invalid")
                 image_content.append({"type": "image", "data": png_data, "mimeType": "image/png"})
         receipt_run_id = ARTIFACTS.create_run(context)
         inspection_ref = ARTIFACTS.write_json(context, receipt_run_id, "report-inspection", {
@@ -676,6 +854,7 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
                         raise WorkflowContractError("spec-only view cannot claim a visual observation")
         dashboard = ml_dashboard_compositor.compose_dashboard(
             report_context["manifest"], validated, execution_ref=report_context["execution_ref"], outputs=report_context["outputs"],
+            report_manifest_ref=report_context.get("report_manifest_ref"),
             uid=str(args.get("uid") or ""), title=str(args.get("title") or ""),
         )
         ml_dashboard_contract.validate_preview_dashboard(dashboard)
@@ -789,8 +968,8 @@ TOOLS = [{
     "description": "Return a bounded artifact and deterministic fact catalog for one complete report so the host LLM can synthesize flow and per-chart narratives without raw rows or signed URLs.",
     "inputSchema": {
         "type": "object", "additionalProperties": False,
-        "properties": {"execution_ref": {"type": "string"}, "manifest_output_index": {"type": "integer", "minimum": 0}},
-        "required": ["execution_ref", "manifest_output_index"],
+        "properties": {"report_manifest_ref": {"type": "string", "description": "Host-owned opaque report-manifest-v1 ref returned by Sandbox."}},
+        "required": ["report_manifest_ref"],
     },
 }, {
     "name": "inspect_report_artifacts",
@@ -844,7 +1023,7 @@ def handle_rpc(msg: dict[str, Any]):
         handlers = {
             "resolve_dashboard_refs": (resolve_dashboard_refs, {"dashboard", "_server_context"}),
             "grant_artifact_reuse": (grant_artifact_reuse, {"execution_ref", "target_session_id", "_server_context"}),
-            "prepare_ml_report": (prepare_ml_report, {"execution_ref", "manifest_output_index", "_server_context"}),
+            "prepare_ml_report": (prepare_ml_report, {"report_manifest_ref", "_server_context"}),
             "inspect_report_artifacts": (inspect_report_artifacts, {"report_context_ref", "artifact_ids", "mode", "_server_context"}),
             "compose_ml_dashboard": (compose_ml_dashboard, {"report_context_ref", "inspection_refs", "synthesis", "uid", "title", "output_mode", "_server_context"}),
         }

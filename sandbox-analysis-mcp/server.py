@@ -44,6 +44,7 @@ mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 artifact_assets = load_module("artifact_assets", ROOT / "artifact_assets.py")
 uploaded_datasets = load_module("uploaded_datasets", ROOT / "uploaded_datasets.py")
 ontology_contract = load_module("ontology_contract", ROOT / "ontology_contract.py")
+ml_report_contract = load_module("ml_report_contract", ROOT / "ml_report_contract.py")
 data_profile = load_module("data_profile", ROOT / "sandbox-analysis-mcp/data_profile.py")
 ArtifactStore = artifact_store.ArtifactStore
 WorkflowContractError = workflow_node.WorkflowContractError
@@ -69,6 +70,7 @@ MAX_OUTPUT_BYTES = 5 * 1024 * 1024
 MAX_LOG_BYTES = 256 * 1024
 MAX_INLINE_RESULT_BYTES = 32 * 1024
 MAX_OUTPUT_FIELDS = 200
+MAX_OUTPUT_ITEMS = 64
 MAX_DERIVED_ROWS = 5_000
 MAX_DERIVED_BYTES = 4 * 1024 * 1024
 DERIVED_FRAME_MIME = "application/vnd.ask-o11y.dataframe+json"
@@ -441,8 +443,8 @@ def read_captured_outputs(filesystem: Any) -> list[dict[str, Any]]:
         manifest = json.loads(manifest_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WorkflowContractError("sandbox output manifest is invalid") from exc
-    if not isinstance(manifest, list) or len(manifest) > 20:
-        raise WorkflowContractError("sandbox output manifest must contain at most 20 items")
+    if not isinstance(manifest, list) or len(manifest) > MAX_OUTPUT_ITEMS:
+        raise WorkflowContractError(f"sandbox output manifest must contain at most {MAX_OUTPUT_ITEMS} items")
     allowed_mime = {"text/plain", "text/csv", "text/html", "image/png", "application/json", "application/vnd.plotly.v1+json", DERIVED_FRAME_MIME}
     outputs = []
     total = len(manifest_bytes)
@@ -761,6 +763,7 @@ def compose_regression_template(plan: dict[str, Any], contract: dict[str, Any], 
     return f'''import math
 import matplotlib.pyplot as plt
 import pandas as pd
+from ml_presentation import build_report_source
 from ml_regression import apply_population_filter, run_multi_model_regression, evaluate_regression_candidate, search_candidate_settings
 from ml_execution import outer_split, sum_fit_counts
 
@@ -897,6 +900,7 @@ manifest = {{
         {{"name": "regression_candidate_settings.png", "caption": "觀察支持範圍內的候選設定與不確定區間", "alt_text": "候選設定預測值與 bootstrap 不確定區間"}},
     ],
 }}
+emit(build_report_source(manifest), name="report-source.json")
 emit(manifest, name="ml-regression.json")
 '''
 
@@ -938,7 +942,7 @@ def compose_profile_template(plan: dict[str, Any], seed: int) -> str:
     purpose = str(analysis_contract.get("purpose") or "了解授權資料的完整形狀、缺失、關係與時間結構。")
     conclusion = str(analysis_contract.get("conclusion") or "這是描述性資料概況；任何預測或因果判斷都必須另行取得使用者意圖與核准契約。")
     return f'''from pathlib import Path
-from data_profile import build_profile_manifest, profile_dataframe, render_profile_assets
+from data_profile import build_profile_manifest, build_profile_plotly_figures, build_profile_report_source, profile_dataframe, render_profile_assets
 
 FIELDS_VIEW = {field_views!r}
 ONTOLOGY_STATUS = {str(ontology.get("status") or "inferred")!r}
@@ -949,6 +953,10 @@ CONCLUSION = {conclusion!r}
 profile = profile_dataframe(df, fields_view=FIELDS_VIEW, ontology_status=ONTOLOGY_STATUS)
 manifest = build_profile_manifest(profile, identity=IDENTITY, purpose=PURPOSE, conclusion=CONCLUSION)
 render_profile_assets(manifest, Path("/tmp/data-profile"), frame=df, emit_figure=emit)
+plotly_figures = build_profile_plotly_figures(manifest, frame=df)
+for plotly_name, plotly_figure in plotly_figures.items():
+    emit(plotly_figure, name=f"ml-plotly-{{plotly_name}}.json")
+emit(build_profile_report_source(manifest, plotly_names=set(plotly_figures)), name="report-source.json")
 emit(manifest, name="data-profile.json")
 '''
 
@@ -1012,7 +1020,7 @@ import numpy as np
 import pandas as pd
 from ml_execution import outer_split
 from ml_autoresearch import run_multi_model_comparison
-from ml_presentation import build_manifest, render_assets, render_shap_summary, render_model_comparison, build_plotly_figures
+from ml_presentation import build_manifest, build_report_source, render_assets, render_shap_summary, render_model_comparison, build_plotly_figures
 import shap
 
 TARGET = {target!r}
@@ -1037,6 +1045,7 @@ MIN_RECALL = {minimum_recall!r}
 PURPOSE = {purpose!r}
 CONCLUSION = {conclusion!r}
 FIELDS_VIEW = {fields_view!r}
+PLOTLY_FIELDS_VIEW = FIELDS_VIEW
 
 if TARGET not in df.columns:
     raise ValueError("target column missing from authorized frame")
@@ -1095,6 +1104,11 @@ manifest["operating_scenarios"] = result["operating_scenarios"]
 manifest["model_comparison"] = [{{**row, "is_best": row["kind"] == KIND}} for row in comparison["comparison"]]
 render_assets(manifest, Path("/tmp/ml-presentation"), y_true=y_hold.tolist(), probabilities=probs, emit_figure=emit, frame=work[FEATURES + [TARGET]], target=TARGET, fields_view=FIELDS_VIEW, evaluation_frame=X_hold, target_values=y.tolist())
 render_model_comparison(manifest, Path("/tmp/ml-presentation"), emit_figure=emit)
+PLOTLY_EVALUATION_FRAME = X_hold
+PLOTLY_TARGET_VALUES = y.tolist()
+plotly_figures = build_plotly_figures(manifest, y_true=y_hold.tolist(), probabilities=probs, frame=work[FEATURES + [TARGET]], target=TARGET, fields_view=PLOTLY_FIELDS_VIEW, evaluation_frame=PLOTLY_EVALUATION_FRAME, target_values=PLOTLY_TARGET_VALUES)
+for plotly_name, plotly_figure in plotly_figures.items():
+    emit(plotly_figure, name=f"ml-plotly-{{plotly_name}}.json")
 emit({{"source_rows": int(len(df)), "eligible_rows": int(len(work)), "train_rows": int(len(X_train)), "test_rows": int(len(X_hold)), "explained_rows": int(len(X_hold)), "target": TARGET, "plan_sha256": PLAN_SHA}}, name="dataset-summary.json")
 
 '''
@@ -1124,9 +1138,12 @@ if KIND in ("catboost", "gradient_boosting", "random_forest_shap", "xgboost"):
         else:
             shap_by_column[target_column] = shap_values[:, column_index].copy()
     render_shap_summary(manifest, shap_values, transformed_names, transformed, Path("/tmp/ml-presentation"), emit_figure=emit)
-    plotly_figures = build_plotly_figures(manifest, y_true=y_hold.tolist(), probabilities=probs, frame=work[FEATURES + [TARGET]], target=TARGET, shap_values=shap_values, feature_names=transformed_names, sample_values=transformed, fields_view=FIELDS_VIEW, evaluation_frame=X_hold, target_values=y.tolist())
-    for plotly_name, plotly_figure in plotly_figures.items():
-        emit(plotly_figure, name=f"ml-plotly-{plotly_name}.json")
+    shap_figures = build_plotly_figures(manifest, y_true=y_hold.tolist(), probabilities=probs, frame=work[FEATURES + [TARGET]], target=TARGET, shap_values=shap_values, feature_names=transformed_names, sample_values=transformed, fields_view=FIELDS_VIEW, evaluation_frame=X_hold, target_values=y.tolist())
+    for plotly_name, plotly_figure in shap_figures.items():
+        if plotly_name not in plotly_figures:
+            emit(plotly_figure, name=f"ml-plotly-{{plotly_name}}.json")
+    plotly_figures.update(shap_figures)
+emit(build_report_source(manifest, plotly_names=set(plotly_figures)), name="report-source.json")
 emit(manifest, name="ml-presentation.json")
 """
     return template + shap_block
@@ -1303,9 +1320,32 @@ def _execute_python_analysis(
         "parent_provenance_ref": parent_provenance_ref,
     }
     execution_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-execution", execution)
+    execution_error = execution.get("error")
+    report_manifest_ref = None
+    if not execution_error:
+        source_present = False
+        for result in execution.get("results", []):
+            display_name = result.get("display_name") if isinstance(result, dict) else None
+            payload = result.get("mime", {}).get("application/json") if isinstance(result, dict) and isinstance(result.get("mime"), dict) else None
+            if display_name == "report-source.json":
+                source_present = True
+                break
+            if isinstance(payload, str):
+                try:
+                    value = json.loads(payload)
+                except json.JSONDecodeError:
+                    value = None
+                if isinstance(value, dict) and value.get("format") == ml_report_contract.REPORT_SOURCE_FORMAT:
+                    source_present = True
+                    break
+        if source_present:
+            try:
+                report_manifest = ml_report_contract.normalize_report_manifest(execution_ref=execution_ref, results=execution.get("results", []))
+                report_manifest_ref = ARTIFACTS.write_json(context, output_run_id, "report-manifest", report_manifest)
+            except (ValueError, TypeError, KeyError, OSError) as exc:
+                return error_response(step=step, error=f"report manifest rejected: {exc}", recoverable=False, instruction="Stop; keep the successful execution receipt but do not synthesize a report from an invalid report source.", evidence={"execution_ref": execution_ref})
     summary["assets"] = output_asset_summary(execution, execution_ref)
     summary["downloads"] = output_download_summary(execution, execution_ref, context)
-    execution_error = execution.get("error")
     try:
         derived_refs, derived_summary = ({}, None) if execution_error else persist_derived_data(context, execution, output_run_id)
     except (OSError, PermissionError, ValueError, WorkflowContractError) as exc:
@@ -1314,6 +1354,8 @@ def _execute_python_analysis(
         summary["derived_data"] = derived_summary
     provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
     refs = {"execution_ref": execution_ref, "provenance_ref": provenance_ref, **derived_refs}
+    if report_manifest_ref:
+        refs["report_manifest_ref"] = report_manifest_ref
     if execution_error:
         error_name = execution_error.get("name") if isinstance(execution_error, dict) else None
         if error_name in {"SyntaxError", "IndentationError"}:
@@ -1335,7 +1377,7 @@ def _execute_python_analysis(
         step=step,
         run_id=output_run_id,
         refs=refs,
-        instruction="Use the opaque execution_ref and output metadata as analysis evidence. A Grafana Dashboard exists only after the approved built-in Grafana writer returns a URL.",
+        instruction="Use report_manifest_ref for report synthesis when present; otherwise use the opaque execution_ref and output metadata. A Grafana Dashboard exists only after the approved built-in Grafana writer returns a URL.",
         evidence={"validity": validity},
         output_summary=summary,
         provenance={key: value for key, value in provenance.items() if key != "code_ref"},
@@ -1696,7 +1738,7 @@ def self_check() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ARTIFACTS = ArtifactStore(Path(tmp) / "runs")
         setattr(uploaded_datasets, "UPLOAD_ROOT", Path(tmp) / "uploads")
-        context = {"org_id": "1", "user_id": "self-check"}
+        context = {"org_id": "1", "user_id": "self-check", "session_id": "session-self-check"}
         source_run = ARTIFACTS.create_run(context)
         frame_ref = ARTIFACTS.write_json(
             context,
@@ -1770,17 +1812,13 @@ def self_check() -> None:
             return {"execution_id": "document", "results": [{"text": None, "mime": {DERIVED_FRAME_MIME: derived_payload}, "display_name": "cleaned-data"}], "stdout": [], "stderr": [], "error": None, "complete": {}, "input_audit": {"input_rows": 0, "valid_rows": 0, "excluded_rows": 0, "rules": []}}
 
         preprocessed = execute_python_preprocessing({"document_ref": document_ref, "python_code": "emit_frame(cleaned)", "seed": 9, "_server_context": context}, executor=fake_document_executor)
-        assert preprocessed["ok"] and preprocessed["derived_frame_ref"].endswith("/grafana-frame") and preprocessed["derived_dataset_id"].startswith("upload_")
+        assert not preprocessed["ok"] and "derived frame rejected" in preprocessed["error"] and "derived datasets are disabled" in preprocessed["error"]
         foreign_document = execute_python_preprocessing({"document_ref": document_ref, "python_code": "emit_frame(cleaned)", "_server_context": {"org_id": "2", "user_id": "attacker"}}, executor=lambda *_: (_ for _ in ()).throw(AssertionError("must not execute")))
         assert not foreign_document["ok"]
         invalid_frame_execution = fake_document_executor(b"old_a,old_b\n1,3\n2,4\n", "csv", "emit_frame(cleaned)", 9)
         invalid_frame_execution["results"][0]["mime"][DERIVED_FRAME_MIME] = json.dumps({"format": "ask-o11y-dataframe-v1", "columns": ["x"], "types": ["number"], "data": [[1, 2]]})
         invalid_derived = execute_python_preprocessing({"document_ref": document_ref, "python_code": "emit_frame(cleaned)", "seed": 9, "_server_context": context}, executor=lambda *_: invalid_frame_execution)
         assert not invalid_derived["ok"] and "derived frame rejected" in invalid_derived["error"]
-        derived_upload = uploaded_datasets.inspect_upload(context, preprocessed["derived_dataset_id"], "session-self-check")
-        assert derived_upload["parent_upload_id"] == source["id"] and [field["name"] for field in derived_upload["fields"]] == ["clean_a", "clean_b"]
-        chained = execute_python_analysis({"frame_ref": preprocessed["derived_frame_ref"], "python_code": "display(df)", "seed": 7, "_server_context": context}, executor=fake_executor)
-        assert chained["ok"] and chained["provenance"]["input_fields"] == ["clean_a", "clean_b"], chained
 
         listed = list_python_analyses({"_server_context": context})
         assert listed["ok"] and any(item["provenance_ref"] == result["refs"]["provenance_ref"] for item in listed["analyses"]), listed
@@ -1788,7 +1826,7 @@ def self_check() -> None:
         assert inspected["ok"] and inspected["python_code"] == "display(df)" and "values" not in inspected
         revised = revise_python_analysis({"provenance_ref": result["refs"]["provenance_ref"], "python_code": "display(df.head())", "seed": 8, "_server_context": context}, executor=fake_executor)
         assert revised["ok"] and revised["step"] == "revise_python_analysis" and revised["provenance"]["parent_provenance_ref"] == result["refs"]["provenance_ref"]
-        foreign = execute_python_analysis({**args, "_server_context": {"org_id": "2", "user_id": "attacker"}}, executor=lambda *_: (_ for _ in ()).throw(AssertionError("must not execute")))
+        foreign = execute_python_analysis({**args, "_server_context": {"org_id": "2", "user_id": "attacker", "session_id": "attacker-session"}}, executor=lambda *_: (_ for _ in ()).throw(AssertionError("must not execute")))
         assert not foreign["ok"] and "mismatch" in foreign["error"]
         oversized = execute_python_analysis({**args, "python_code": "x" * (MAX_CODE_BYTES + 1)}, executor=lambda *_: (_ for _ in ()).throw(AssertionError("must not execute")))
         assert not oversized["ok"] and "exceeds" in oversized["error"]
@@ -1803,7 +1841,7 @@ def self_check() -> None:
         assert not payload["ok"] and "unsupported tool arguments" in payload["error"]
     ARTIFACTS = original
     setattr(uploaded_datasets, "UPLOAD_ROOT", original_upload_root)
-    print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "document_preprocessing", "foreign_document_rejected", "invalid_derived_frame_rejected", "derived_frame_chaining", "derived_session_dataset", "bounded_inline_results", "signed_csv_download", "200_field_output_summary", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))
+    print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "document_derived_output_rejected", "foreign_document_rejected", "invalid_derived_frame_rejected", "bounded_inline_results", "signed_csv_download", "200_field_output_summary", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))
 
 
 def main() -> int:

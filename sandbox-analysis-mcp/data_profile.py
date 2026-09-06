@@ -5,8 +5,10 @@ are presentation-only aggregations; no sampled or derived dataset is emitted.
 """
 from __future__ import annotations
 
+import importlib.util
 import math
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -360,6 +362,111 @@ def build_profile_manifest(
         "artifacts": [],
         "limitations": limitations or ["描述性資料概況不代表因果關係或預測能力。"],
     }
+
+
+def build_profile_plotly_figures(manifest: dict[str, Any], *, frame: Any) -> dict[str, dict[str, Any]]:
+    """Build bounded generic Plotly figures for profile PNG counterparts."""
+    contract = sys.modules.get("ml_plotly_contract")
+    if contract is None:
+        contract_path = Path(__file__).with_name("ml_plotly_contract.py")
+        if not contract_path.exists():
+            contract_path = Path(__file__).resolve().parents[1] / "ml_plotly_contract.py"
+        spec = importlib.util.spec_from_file_location("ml_plotly_contract", contract_path)
+        if spec is None or spec.loader is None:
+            raise ImportError("cannot load ml_plotly_contract")
+        contract = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = contract
+        spec.loader.exec_module(contract)
+
+    profile = manifest.get("profile") or {}
+    fields = profile.get("fields") or []
+    figures: dict[str, dict[str, Any]] = {}
+
+    def finish(name: str, data: list[dict[str, Any]], layout: dict[str, Any]) -> None:
+        figures[name] = contract.sanitize_figure({"data": data, "layout": layout})
+
+    def missing_rate(item: dict[str, Any]) -> float:
+        try:
+            value = float(item.get("missing_rate") or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("profile missing rate is invalid") from exc
+        if not math.isfinite(value):
+            raise ValueError("profile missing rate is invalid")
+        return round(value * 100, 3)
+
+    if fields:
+        finish("profile_field_map", [{"type": "scatter", "mode": "markers", "x": [missing_rate(item) for item in fields], "y": [str(item.get("name") or "") for item in fields]}], {"title": "欄位缺失率與語義角色", "xaxis": {"title": "缺失率 %", "range": [0, 100]}})
+
+    available = [item for item in fields if item.get("available")][:MAX_DISTRIBUTION_FIELDS]
+    traces: list[dict[str, Any]] = []
+    for item in available:
+        name = str(item.get("name") or "")
+        try:
+            values = list(frame[name])
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f"profile field is unavailable: {name}") from exc
+        counts: dict[str, int] = {}
+        for value in values:
+            if _is_missing(value):
+                continue
+            key = _value_key(value)
+            counts[key] = counts.get(key, 0) + 1
+        top = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))[:8]
+        traces.append({"type": "bar", "name": name, "x": [pair[0] for pair in top], "y": [pair[1] for pair in top]})
+    if traces:
+        finish("profile_distributions", traces, {"title": "欄位分布與集中性", "showlegend": True})
+
+    correlation = profile.get("correlation") or {}
+    columns = correlation.get("columns") or []
+    matrix = correlation.get("matrix") or []
+    if len(columns) >= 2 and len(matrix) == len(columns) and all(isinstance(row, list) and len(row) == len(columns) and all(_number(cell) is not None for cell in row) for row in matrix):
+        finish("profile_correlation", [{"type": "heatmap", "x": columns, "y": columns, "z": matrix}], {"title": "數值欄位相關性（相關非因果）"})
+
+    temporal = profile.get("temporal_fields") or []
+    numeric = [item for item in fields if item.get("available") and isinstance(item.get("numeric"), dict) and item["numeric"].get("count", 0) > 0][:MAX_TREND_FIELDS]
+    if temporal and numeric:
+        time_name = str(temporal[0].get("name") or "") if isinstance(temporal[0], dict) else str(temporal[0])
+        try:
+            times = [_datetime(value) for value in frame[time_name]]
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f"profile temporal field is unavailable: {time_name}") from exc
+        order = sorted((index, value) for index, value in enumerate(times) if value is not None)
+        traces = []
+        for item in numeric:
+            name = str(item.get("name") or "")
+            values = list(frame[name])
+            points = []
+            for bucket in range(min(MAX_TREND_POINTS, len(order))):
+                start = bucket * len(order) // min(MAX_TREND_POINTS, len(order))
+                end = (bucket + 1) * len(order) // min(MAX_TREND_POINTS, len(order))
+                complete = [_number(values[index]) for index, _ in order[start:end]]
+                complete = [value for value in complete if value is not None]
+                if complete:
+                    points.append(sum(complete) / len(complete))
+            traces.append({"type": "scatter", "mode": "lines", "name": name, "x": list(range(len(points))), "y": points})
+        if traces:
+            finish("profile_temporal_trend", traces, {"title": "時間欄位與數值欄位趨勢", "xaxis": {"title": time_name}})
+    return figures
+
+
+def build_profile_report_source(manifest: dict[str, Any], *, plotly_names: set[str] | None = None) -> dict[str, Any]:
+    facts = {
+        "rows": {"kind": "number", "label": "Rows", "value": manifest["data"]["rows"]},
+        "columns": {"kind": "number", "label": "Columns", "value": manifest["data"]["columns"]},
+    }
+    if manifest["data"].get("profiled_rows") is not None:
+        facts["profiled_rows"] = {"kind": "number", "label": "Profiled rows", "value": manifest["data"]["profiled_rows"]}
+    selected = plotly_names or set()
+    artifacts = []
+    for item in manifest.get("artifacts") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            continue
+        artifact_id = Path(item["name"]).stem
+        render = {"artifact_id": artifact_id, "fact_refs": ["rows"], "png_output_name": item["name"]}
+        if artifact_id in selected:
+            render["plotly_output_name"] = f"ml-plotly-{artifact_id}.json"
+        artifacts.append(render)
+    return {"format": "ask-o11y-report-source-v1", "purpose": manifest["purpose"], "conclusion": manifest["conclusion"], "facts": facts, "artifacts": artifacts}
 
 
 def validate_profile_manifest(manifest: dict[str, Any]) -> None:

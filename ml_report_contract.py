@@ -1,13 +1,38 @@
 """Flow-agnostic LLM report synthesis contract over bounded deterministic facts."""
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
+import hashlib
+import importlib.util
+import json
 import math
 import re
+import struct
+import sys
+from pathlib import Path
 from typing import Any
 
+_plotly_module: Any = sys.modules.get("ml_plotly_contract")
+if _plotly_module is None:
+    _plotly_spec = importlib.util.spec_from_file_location("ml_plotly_contract", Path(__file__).with_name("ml_plotly_contract.py"))
+    if _plotly_spec is None or _plotly_spec.loader is None:
+        raise ImportError("cannot load ml_plotly_contract")
+    _plotly_module = importlib.util.module_from_spec(_plotly_spec)
+    sys.modules[_plotly_spec.name] = _plotly_module
+    _plotly_spec.loader.exec_module(_plotly_module)
+ml_plotly_contract: Any = _plotly_module
+
 REPORT_FORMAT = "ask-o11y-report-synthesis-v1"
+REPORT_SOURCE_FORMAT = "ask-o11y-report-source-v1"
+REPORT_MANIFEST_FORMAT = "ask-o11y-report-manifest-v1"
 MAX_FACTS = 1024
+MAX_REPORT_FACTS = 64
+MAX_REPORT_ARTIFACTS = 16
+MAX_REPORT_TEXT = 600
+MAX_REPORT_OUTPUT_NAME = 200
+MAX_REPORT_PNG_BYTES = 4 * 1024 * 1024
 MAX_SECTIONS = 8
 MAX_PANELS = 24
 MAX_EVIDENCE = 8
@@ -31,6 +56,219 @@ def _list_segment(item: Any, index: int) -> str:
             if item.get(key) not in (None, ""):
                 return _safe_segment(item[key], str(index))
     return str(index)
+
+
+def _report_text(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > MAX_REPORT_TEXT:
+        raise ValueError(f"{where} text is invalid")
+    text = value.strip()
+    lowered = text.lower()
+    if any(token in lowered for token in ("<", ">", "http://", "https://", "javascript:", "?token=")) or text.startswith("/"):
+        raise ValueError(f"{where} contains unsafe content")
+    return text
+
+
+def _report_name(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > MAX_REPORT_OUTPUT_NAME or "/" in value or "\\" in value:
+        raise ValueError(f"{where} output name is invalid")
+    return value
+
+
+def _report_fact_value(value: Any, kind: str, where: str) -> Any:
+    if kind == "boolean":
+        if not isinstance(value, bool):
+            raise ValueError(f"{where} fact value is invalid")
+        return value
+    if kind == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{where} fact value is invalid")
+        try:
+            finite = math.isfinite(float(value))
+        except (OverflowError, TypeError, ValueError):
+            finite = False
+        if not finite:
+            raise ValueError(f"{where} fact value is invalid")
+        return value
+    if kind == "text":
+        return _report_text(value, f"{where} fact")
+    raise ValueError(f"{where} fact kind is invalid")
+
+
+def _validate_report_facts(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict) or not value:
+        raise ValueError("report facts are required")
+    if len(value) > MAX_REPORT_FACTS:
+        raise ValueError("report facts exceed bound")
+    facts: dict[str, dict[str, Any]] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", key):
+            raise ValueError("report fact id is invalid")
+        where = f"facts.{key}"
+        if not isinstance(item, dict) or set(item) != {"kind", "label", "value"}:
+            raise ValueError(f"{where} fact is invalid")
+        kind = item.get("kind")
+        if kind not in {"boolean", "number", "text"}:
+            raise ValueError(f"{where} fact kind is invalid")
+        facts[key] = {"kind": kind, "label": _report_text(item.get("label"), f"{where}.label"), "value": _report_fact_value(item.get("value"), kind, where)}
+    return facts
+
+
+def _validate_png(value: Any) -> bytes:
+    if not isinstance(value, str):
+        raise ValueError("png output is not base64 text")
+    try:
+        payload = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("png output is invalid base64") from exc
+    if len(payload) > MAX_REPORT_PNG_BYTES or len(payload) < 33 or payload[:8] != b"\x89PNG\r\n\x1a\n" or payload[12:16] != b"IHDR":
+        raise ValueError("png output is invalid")
+    width, height = struct.unpack(">II", payload[16:24])
+    if not width or not height:
+        raise ValueError("png output dimensions are invalid")
+    return payload
+
+
+def _mime_value(result: Any, mime_type: str) -> str | None:
+    mime = result.get("mime") if isinstance(result, dict) else None
+    value = mime.get(mime_type) if isinstance(mime, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def _is_plotly_output(result: Any) -> bool:
+    if _mime_value(result, "application/vnd.plotly.v1+json") is not None:
+        return True
+    payload = _mime_value(result, "application/json")
+    if payload is None:
+        return False
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(value, dict) and set(value) == {"data", "layout", "config"}
+
+
+def normalize_report_manifest(*, execution_ref: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a bounded Host-owned manifest from captured execution outputs."""
+    if not isinstance(execution_ref, str) or not execution_ref.startswith("artifact://"):
+        raise ValueError("execution_ref is invalid")
+    if not isinstance(results, list) or not results:
+        raise ValueError("report results are required")
+    names: dict[str, list[int]] = {}
+    parsed_json: list[tuple[int, dict[str, Any]]] = []
+    for index, result in enumerate(results):
+        name = result.get("display_name") if isinstance(result, dict) else None
+        if not isinstance(name, str) or not name:
+            raise ValueError("report output name is invalid")
+        names.setdefault(name, []).append(index)
+        payload = _mime_value(result, "application/json")
+        if payload is not None:
+            try:
+                value = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                raise ValueError("report JSON output is invalid") from exc
+            if isinstance(value, dict):
+                parsed_json.append((index, value))
+    duplicate_names = [name for name, indexes in names.items() if len(indexes) > 1]
+    if duplicate_names:
+        raise ValueError("ambiguous report output name")
+    sources = [(index, value) for index, value in parsed_json if value.get("format") == REPORT_SOURCE_FORMAT]
+    if len(sources) > 1:
+        raise ValueError("report source format is invalid")
+    if not sources:
+        raise ValueError("report source format is required")
+    source_index, source = sources[0]
+    allowed_source_keys = {"format", "purpose", "conclusion", "facts", "artifacts"}
+    if set(source) != allowed_source_keys:
+        raise ValueError("report source contains unsupported fields")
+    purpose = _report_text(source.get("purpose"), "report purpose")
+    conclusion = _report_text(source.get("conclusion"), "report conclusion")
+    facts = _validate_report_facts(source.get("facts"))
+    source_artifacts = source.get("artifacts")
+    if not isinstance(source_artifacts, list) or not source_artifacts:
+        raise ValueError("report artifact list is required")
+    if len(source_artifacts) > MAX_REPORT_ARTIFACTS:
+        raise ValueError("report artifacts exceed bound")
+    declared: set[str] = set()
+    artifact_ids: set[str] = set()
+    normalized_artifacts: list[dict[str, Any]] = []
+    for item in source_artifacts:
+        if not isinstance(item, dict):
+            raise ValueError("report artifact is invalid")
+        allowed = {"artifact_id", "fact_refs", "plotly_output_name", "png_output_name"}
+        if not set(item).issubset(allowed):
+            raise ValueError("report artifact contains unsupported fields")
+        artifact_id = item.get("artifact_id")
+        if not isinstance(artifact_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", artifact_id):
+            raise ValueError("report artifact id is invalid")
+        if artifact_id in artifact_ids:
+            raise ValueError("duplicate report artifact id")
+        artifact_ids.add(artifact_id)
+        fact_refs = item.get("fact_refs")
+        if not isinstance(fact_refs, list) or not 1 <= len(fact_refs) <= 8 or any(ref not in facts for ref in fact_refs):
+            raise ValueError("report artifact fact refs are invalid")
+        plotly_name = item.get("plotly_output_name")
+        png_name = item.get("png_output_name")
+        if plotly_name is None and png_name is None:
+            raise ValueError("report artifact has no output")
+        if plotly_name is not None:
+            plotly_name = _report_name(plotly_name, f"artifact {artifact_id}")
+            if plotly_name in declared:
+                raise ValueError("duplicate report artifact output")
+            declared.add(plotly_name)
+        if png_name is not None:
+            png_name = _report_name(png_name, f"artifact {artifact_id}")
+            if png_name in declared:
+                raise ValueError("duplicate report artifact output")
+            declared.add(png_name)
+        normalized_artifacts.append({"artifact_id": artifact_id, "fact_refs": list(fact_refs), "plotly_output_name": plotly_name, "png_output_name": png_name})
+    output_indexes = {name: indexes[0] for name, indexes in names.items()}
+    for name, index in output_indexes.items():
+        if index == source_index:
+            continue
+        result = results[index]
+        if _is_plotly_output(result) or _mime_value(result, "image/png") is not None:
+            if name not in declared:
+                raise ValueError("orphan report output")
+    manifest_artifacts: list[dict[str, Any]] = []
+    for item in normalized_artifacts:
+        plotly_name = item["plotly_output_name"]
+        png_name = item["png_output_name"]
+        if plotly_name is not None:
+            if plotly_name not in output_indexes:
+                raise ValueError("report artifact output is missing")
+            plotly_mime_type = "application/vnd.plotly.v1+json"
+            figure_payload = _mime_value(results[output_indexes[plotly_name]], plotly_mime_type)
+            if figure_payload is None:
+                plotly_mime_type = "application/json"
+                figure_payload = _mime_value(results[output_indexes[plotly_name]], plotly_mime_type)
+            if figure_payload is None:
+                raise ValueError("report Plotly output is invalid")
+            try:
+                figure = json.loads(figure_payload)
+            except json.JSONDecodeError as exc:
+                raise ValueError("report Plotly output is invalid") from exc
+            clean_figure = ml_plotly_contract.sanitize_figure(figure)
+            render = {"mode": "plotly", "output_index": output_indexes[plotly_name], "mime_type": plotly_mime_type, "sha256": hashlib.sha256(json.dumps(clean_figure, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()}
+            if png_name is not None:
+                if png_name not in output_indexes:
+                    raise ValueError("report artifact output is missing")
+                paired_png = _mime_value(results[output_indexes[png_name]], "image/png")
+                if paired_png is None:
+                    raise ValueError("report paired PNG output is invalid")
+                encoded_png = _validate_png(paired_png)
+                render["png_output_index"] = output_indexes[png_name]
+                render["png_sha256"] = hashlib.sha256(encoded_png).hexdigest()
+        else:
+            if png_name not in output_indexes:
+                raise ValueError("report artifact output is missing")
+            png_payload = _mime_value(results[output_indexes[png_name]], "image/png")
+            if png_payload is None:
+                raise ValueError("report PNG output is invalid")
+            encoded = _validate_png(png_payload)
+            render = {"mode": "image", "output_index": output_indexes[png_name], "mime_type": "image/png", "sha256": hashlib.sha256(encoded).hexdigest()}
+        manifest_artifacts.append({"artifact_id": item["artifact_id"], "fact_refs": item["fact_refs"], "render": render})
+    manifest = {"format": REPORT_MANIFEST_FORMAT, "execution_ref": execution_ref, "source": {"format": REPORT_SOURCE_FORMAT, "output_index": source_index, "display_name": results[source_index]["display_name"]}, "purpose": purpose, "conclusion": conclusion, "facts": facts, "artifacts": manifest_artifacts}
+    return manifest
 
 
 def build_fact_catalog(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -74,7 +312,15 @@ def build_fact_catalog(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 walk(child, [*path, _list_segment(child, index)])
 
     for key, value in manifest.items():
-        if key in {"artifacts", "narrative", "plain_language"} or key in FORBIDDEN_FACT_KEYS:
+        if key in {"artifacts", "narrative", "plain_language", "source", "execution_ref", "format"} or key in FORBIDDEN_FACT_KEYS:
+            continue
+        if key == "facts" and isinstance(value, dict):
+            for fact_key, fact in value.items():
+                if isinstance(fact, dict) and set(fact) == {"kind", "label", "value"} and fact.get("kind") in {"boolean", "number", "text"}:
+                    fact_id = f"facts.{_safe_segment(fact_key, 'fact')}"
+                    catalog[fact_id] = {"value": fact["value"], "kind": fact["kind"], "label": str(fact["label"])}
+                else:
+                    walk(fact, ["facts", _safe_segment(fact_key, "fact")])
             continue
         walk(value, [_safe_segment(key, "section")])
     if len(catalog) > MAX_FACTS:
@@ -103,7 +349,13 @@ def _artifact_ids(manifest: dict[str, Any]) -> set[str]:
         raise ValueError("manifest artifacts are required")
     output = set()
     for item in artifacts:
-        name = item.get("name") if isinstance(item, dict) else None
+        if not isinstance(item, dict):
+            continue
+        artifact_id = item.get("artifact_id")
+        if isinstance(artifact_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", artifact_id):
+            output.add(artifact_id)
+            continue
+        name = item.get("name")
         if isinstance(name, str) and name.endswith(".png") and "/" not in name:
             output.add(name.removesuffix(".png"))
     return output

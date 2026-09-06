@@ -138,6 +138,12 @@ def _clean_colorscale(value: Any, where: str) -> list[list[Any]]:
     return cleaned
 
 
+def _count_trace_points(budget: dict[str, int], values: list[Any], where: str) -> None:
+    budget["points"] += len(values)
+    if budget["points"] > MAX_POINTS_PER_FIGURE:
+        _reject(f"points budget exceeded for figure: {budget['points']} > {MAX_POINTS_PER_FIGURE}")
+
+
 def _clean_trace(trace: Any, budget: dict[str, int]) -> dict[str, Any]:
     _check_mapping_keys(trace, ALLOWED_TRACE_KEYS, "trace")
     trace_type = str(trace.get("type") or "")
@@ -151,6 +157,7 @@ def _clean_trace(trace: Any, budget: dict[str, int]) -> dict[str, Any]:
         if key in {"x", "y", "text", "labels"}:
             numbers_only = key in {"x", "y"} and _looks_numeric(value)
             cleaned[key] = _check_array(value, where, max_items=MAX_ITEMS_PER_ARRAY, numbers=numbers_only)
+            _count_trace_points(budget, cleaned[key], where)
             continue
         if key in {"z"}:
             if not isinstance(value, list) or not value:
@@ -164,6 +171,7 @@ def _clean_trace(trace: Any, budget: dict[str, int]) -> dict[str, Any]:
             continue
         if key in {"values", "source", "target"}:
             cleaned[key] = _check_array(value, where, max_items=MAX_ITEMS_PER_ARRAY, numbers=True)
+            _count_trace_points(budget, cleaned[key], where)
             continue
         if key in {"name"}:
             cleaned[key] = _check_string(str(value), where)

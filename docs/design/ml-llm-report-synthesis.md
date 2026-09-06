@@ -1,8 +1,8 @@
 # Generic LLM Report Synthesis + Grafana-native Plotly
 
-状态：既有实现与历史 E2E 已有记录；2026-09-05 全图片 plugin 与原始证据验收修订待实现。
+状态：既有实现与历史 E2E 已有记录；2026-09-06 capability-driven report manifest、Plotly/image presentation 與 TDD vertical slices 已完成，localhost/browser 手測待使用者驗收。
 
-当前规范见 [平台架构修订](natural-language-analysis-platform.md) NLAP-01、07、10。下方历史结果不代表当前全部路径已符合新规范。
+当前规范见 [平台架构修订](natural-language-analysis-platform.md) NLAP-01、07、10。本輪待辦为 `TODO-9ae85041` 及其子项。下方历史结果不代表当前全部路径已符合新规范。
 
 ## Generic profile amendment
 
@@ -20,9 +20,11 @@ Telco 专用 builder 只可作为 E2E fixture，production contract/compositor �
 
 ```text
 Sandbox deterministic analysis
-  → manifest + PNG + sanitized Plotly JSON
+  → report-source-v1 + PNG and/or sanitized Plotly JSON
+Host-owned report normalizer
+  → report-manifest-v1 + opaque report_manifest_ref
 Artifact Bridge.prepare_ml_report
-  → opaque report_context_ref + artifact catalog + bounded fact catalog + figure/view specs
+  → report_manifest_ref → opaque report_context_ref + artifact catalog + bounded fact catalog + figure/view specs
 Artifact Bridge.inspect_report_artifacts
   → PNG MCP image blocks + sanitized Plotly JSON + inspection_ref（vision 不可用时仍有完整 spec）
 Ask O11y LLM（分 bounded 批次看完完整报告与全部图）
@@ -33,9 +35,19 @@ Artifact Bridge.resolve_dashboard_refs
   → resolve dashboard_ref + asset/query bindings → Grafana writer
 ```
 
+## Host-owned report manifest
+
+报告 source 是 producer 对图表与 bounded facts 的显式声明，不是任意 summary JSON。Host 从成功 execution 的已捕获 MIME 输出建立 `report-manifest-v1`：
+
+- 每个 artifact 以稳定 `artifact_id` 声明 fact refs 与可选 figure/PNG output name；Host 自己计算 output coordinates、MIME、digest，不把它们暴露给模型。
+- 有效 sanitized Plotly figure 优先产生 `render.mode="plotly"`；只有没有 figure 时才可选择合法 PNG 的 `render.mode="image"`。
+- figure 存在但 sanitizer 失败时拒绝 manifest，即使 PNG 合法；不得静默降级。
+- purpose/conclusion/facts 与 artifacts 有大小、字符、数量上限；禁止 raw rows、路径、URL、token、HTML 与 code carriers。
+- Manifest ref 继承 execution 的 org/user/session 授权与 retention；普通 summary、legacy index 或未声明输出不能获得 report 成功身份。
+
 ## LLM inspection transport
 
-`prepare_ml_report` 不只列出 artifact 名称；它会持久化 bounded report context，并为每张 Plotly 图提供 deterministic `figure_spec`：trace types/count、subplot `view_id`、title、X/Y label、unit/tickformat、scale/range、point count 与 min/max。它返回 opaque `report_context_ref`，不暴露 raw rows 或 signed URL。
+`prepare_ml_report` 不只列出 artifact 名称；它先消费 Host-owned `report_manifest_ref`，不再让模型选择 `manifest_output_index`。Host 会持久化 bounded report context，并为每张 Plotly 图提供 deterministic `figure_spec`：trace types/count、subplot `view_id`、title、X/Y label、unit/tickformat、scale/range、point count 与 min/max。它返回 opaque `report_context_ref`，不暴露 raw rows、output index 或 signed URL。Legacy `execution_ref + manifest_output_index` 仅供既有产物的相容 adapter 使用。
 
 `inspect_report_artifacts(report_context_ref, artifact_ids, mode)`：
 
@@ -153,9 +165,11 @@ LLM 必须先读取 deterministic facts、sanitized Plotly JSON 与 figure/view 
 
 ## TDD slices
 
-### A. Report synthesis contract
+### A. Report manifest and synthesis contract
 
-RED：不同 section 形状的 valid synthesis、unknown artifact/fact、数字幻觉、HTML/URL、重复 section id、越界 sections/panels。GREEN：`ml_report_contract.py` + fact catalog；不得出现 required role/order。
+RED：Plotly-only、PNG-only、valid pair selects Plotly、invalid figure + PNG rejects、missing/duplicate/orphan output、普通 summary + 错误 index rejects、bounded facts/raw-carrier rejection。GREEN：`ml_report_contract.py` 的 Host normalizer、immutable manifest ref 与 fact catalog；不得出现 required role/order。
+
+RED：不同 section 形状的 valid synthesis、unknown artifact/fact、数字幻觉、HTML/URL、重复 section id、越界 sections/panels。GREEN：报告 synthesis 仍只依赖 manifest/ref 提供的 capability 与 facts。
 
 ### B. Figure inspection + Bridge tools
 

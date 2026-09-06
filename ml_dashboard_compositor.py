@@ -167,10 +167,17 @@ def _evidence_panel(
     execution_ref: str,
     output: dict[str, Any],
     grid_pos: dict[str, int],
+    report_manifest_ref: str | None = None,
 ) -> dict[str, Any]:
     artifact_id = panel["artifact_id"]
     asset_placeholder = f"$asset_url_{artifact_id}"
-    asset_binding = {"placeholder": asset_placeholder, "$execution_ref": execution_ref, "output_index": output["png_index"]}
+    has_png = "png_index" in output
+    if report_manifest_ref:
+        asset_binding = {"placeholder": asset_placeholder, "$report_manifest_ref": report_manifest_ref, "artifact_id": artifact_id}
+    else:
+        if not has_png:
+            raise ValueError("dashboard output mapping is incomplete")
+        asset_binding = {"placeholder": asset_placeholder, "$execution_ref": execution_ref, "output_index": output["png_index"]}
     base = {
         "id": panel_id,
         "title": panel["headline"],
@@ -179,8 +186,9 @@ def _evidence_panel(
         "askO11yViewIds": panel["view_ids"],
         "askO11yNarrative": narrative,
         "askO11yViewNarratives": view_narratives,
-        "askO11yAssetBindings": [asset_binding],
     }
+    if has_png:
+        base["askO11yAssetBindings"] = [asset_binding]
     if "plotly_index" in output:
         plotly_placeholder = f"$plotly_{artifact_id}"
         return {
@@ -189,7 +197,7 @@ def _evidence_panel(
             "options": {
                 "renderMode": "plotly",
                 "figure": plotly_placeholder,
-                "fallbackUrl": asset_placeholder,
+                **({"fallbackUrl": asset_placeholder} if has_png else {}),
                 "alt": panel["headline"],
                 "narrative": narrative,
                 "selectedViewIds": panel["view_ids"],
@@ -198,8 +206,7 @@ def _evidence_panel(
             },
             "askO11yPlotlyBindings": [{
                 "placeholder": plotly_placeholder,
-                "$execution_ref": execution_ref,
-                "output_index": output["plotly_index"],
+                **({"$report_manifest_ref": report_manifest_ref, "artifact_id": artifact_id} if report_manifest_ref else {"$execution_ref": execution_ref, "output_index": output["plotly_index"]}),
                 "plugin_id": PLOTLY_PLUGIN_ID,
             }],
         }
@@ -223,6 +230,7 @@ def compose_dashboard(
     *,
     execution_ref: str,
     outputs: dict[str, dict[str, Any]],
+    report_manifest_ref: str | None = None,
     uid: str,
     title: str,
 ) -> dict[str, Any]:
@@ -266,9 +274,9 @@ def compose_dashboard(
         evidence_layouts, section_end = _layouts(section["panels"], outputs, block_start)
         for item, grid_pos in zip(section["panels"], evidence_layouts, strict=True):
             artifact_id = item["artifact_id"]
-            if artifact_id not in outputs or "png_index" not in outputs[artifact_id]:
+            if artifact_id not in outputs or ("png_index" not in outputs[artifact_id] and "plotly_index" not in outputs[artifact_id]):
                 raise ValueError("dashboard output mapping is incomplete")
-            section_panels.append(_evidence_panel(next_id, item, _narrative(item, catalog), _view_narratives(item, catalog), execution_ref, outputs[artifact_id], grid_pos))
+            section_panels.append(_evidence_panel(next_id, item, _narrative(item, catalog), _view_narratives(item, catalog), execution_ref, outputs[artifact_id], grid_pos, report_manifest_ref))
             next_id += 1
         if section["collapsed"]:
             row_panel["panels"] = section_panels

@@ -1,6 +1,6 @@
 # Sandboxed Python analysis MCP
 
-Status: implementation design
+Status: implementation design; capability-driven report manifest TDD slices implemented, localhost/browser acceptance pending
 
 Branch: `feature/sandbox-analysis-mcp`
 
@@ -29,6 +29,14 @@ Ask O11y LLM
 The external endpoints bind loopback, require the shared service bearer, and use server-configured org/user identity. Model-visible tools exclude Artifact Bridge. Ontology is read-only and has no datasource credentials; Planner remains the final trusted semantic enforcement point. Built-in Grafana mutation still passes Ask O11y's host approval gate.
 
 ## Sandbox contract
+
+### Capability-driven report output amendment (2026-09-06)
+
+A successful analysis may emit a bounded `report-source-v1` declaration alongside captured outputs. The Host, not the model, resolves it into an immutable `report-manifest-v1` and returns `refs.report_manifest_ref`. The declaration names artifact IDs and safe fact references; it never names a guessed output index as a public coordinate.
+
+For each declared artifact the Host evaluates Plotly first: a valid sanitized figure produces `render.mode="plotly"`; only when no figure exists may a validated PNG produce `render.mode="image"`; an invalid figure fails closed even when a PNG is present. Ordinary summary JSON without the source format is not a report manifest. Existing execution/provenance refs remain readable and unauthorized or ambiguous refs fail closed.
+
+Plotly mode does not require a PNG fallback. PNG is an explicit image capability when no figure was produced, not a silent substitute for an invalid figure.
 
 Sandbox Analysis exposes six tools:
 
@@ -67,8 +75,8 @@ Rules:
 - Trusted bootstrap constructs and filters `df` before generated code runs, then unlinks the input bundle.
 - Source is UTF-8 and limited to 32 KiB. The MCP hashes and transfers it but never executes it locally.
 - Frame execution receives `df`, `pd`, `np`, `display`, `emit`, and `emit_frame`. Document preprocessing receives `document_path`, `input_format`, `pd`, `np`, `emit`, and `emit_frame`; original host paths are never exposed. A `.json` name captures JSON; a `.csv` name captures a downloadable CSV.
-- An analysis dashboard is a static report: generated Python emits a Matplotlib PNG plus optional textual summary; no Sandbox output becomes a native Grafana chart target.
-- Output names are sanitized metadata and never filesystem paths. `emit_frame` accepts one non-empty DataFrame with at most 200 fields, 5,000 rows, and 4 MiB encoded content; host validation persists it as `derived_frame_ref`, and document preprocessing also creates a parent-linked session upload dataset.
+- An analysis dashboard is a capability-driven report: generated Python may emit a sanitized Plotly figure, a PNG image, and bounded textual facts. A valid figure is rendered as Plotly; a PNG-only artifact is rendered explicitly as image; no Sandbox output becomes a native Grafana chart target.
+- Output names are sanitized metadata and never filesystem paths. `emit_frame` is fail-closed for document preprocessing and analysis; derived datasets are not accepted as model inputs. The historical 200-field/5,000-row/4 MiB limits remain rejection bounds, not a persistence promise.
 - Raw frames, query bodies, physical paths, credentials, full MIME payloads, stdout logs, and exception values are not returned to the model. Only explicitly emitted text/JSON is returned inline, bounded to 32 KiB total.
 
 Success returns opaque refs, validity evidence, provenance, and compact output metadata:
@@ -78,7 +86,8 @@ Success returns opaque refs, validity evidence, provenance, and compact output m
   "ok": true,
   "refs": {
     "execution_ref": "artifact://run_…/sandbox-execution",
-    "provenance_ref": "artifact://run_…/sandbox-provenance"
+    "provenance_ref": "artifact://run_…/sandbox-provenance",
+    "report_manifest_ref": "artifact://run_…/report-manifest"
   },
   "output_summary": {
     "result_count": 1,
@@ -120,7 +129,7 @@ Every call creates and destroys one sandbox. No kernel persists across turns.
 | input bundle | 16 MiB |
 | original uploaded document | 50 MiB, CSV/XLSX only |
 | captured execution | 5 MiB |
-| derived frame | 200 fields, 5,000 rows, 4 MiB |
+| derived frame output | rejected; legacy bound 200 fields, 5,000 rows, 4 MiB |
 | inline text/JSON | 32 KiB total |
 | signed CSV download | 4 MiB each, artifact-retention expiry |
 | output field summary | 200 fields |
@@ -200,10 +209,19 @@ The reproducible Ask O11y v0.3.2 integration patch is `patches/ask-o11y-dynamic-
 7. Trusted validity filtering runs before generated code and is verified against the source row count.
 8. Sandbox execution has deny-all egress, bounded resources/output, no credentials, no volumes, and unconditional cleanup.
 9. Analysis PNG outputs remain behind authorized refs; signed URLs are host-resolved and never authored by the model.
-10. Artifact Bridge preserves model-authored panels/options, resolves only authorized bindings, and exposes no Grafana write tool.
+10. Artifact Bridge preserves model-authored panels/options, resolves only authorized bindings, exposes no Grafana write tool, and consumes `report_manifest_ref` rather than model-guessed output indexes.
 11. Preview is a real tagged Dashboard; publication removes the tag on the same UID without rerunning query or Python.
 12. E2E proves SHAP PNG visibility without an analysis data target, query-only dynamic XY authoring, built-in-only publication, and absence of model-visible bridge calls.
 13. Production deployment adds OpenSandbox authentication and gVisor, Kata, or Firecracker; local `runc` evidence is not production attestation.
+
+## TDD implementation slices
+
+1. `ml_plotly_contract.py`: red aggregate point-budget case, then count all bounded trace arrays and retain idempotent sanitizer behavior.
+2. `ml_report_contract.py`: red Plotly-only/PNG-only/invalid-figure/summary-index cases, then add bounded source → Host manifest normalization.
+3. Sandbox execution seam: red missing `report_manifest_ref`, then persist the manifest beside immutable execution/provenance and return the opaque ref.
+4. Bridge/compositor seam: red figure-only and explicit image bindings, then remove mandatory fallback while preserving legacy readers.
+5. Profile seam: red conditional Plotly candidate emission, then reuse existing profile aggregates without fixed chart selection.
+6. Tool schema/prompt and gates: remove new index guessing, run scoped contract/security checks, then defer localhost/manual acceptance to the user.
 
 ## Deferred
 

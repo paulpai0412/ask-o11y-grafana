@@ -213,7 +213,8 @@ def execute(code: str, seed: int, namespace: dict[str, Any], audit: dict[str, An
                 rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
             except (TypeError, ValueError) as exc:
                 raise ValueError("JSON output must contain JSON-serializable values") from exc
-            write(f"output-{index}.json", "application/json", rendered, display_name)
+            mime_type = "application/vnd.plotly.v1+json" if isinstance(value, dict) and set(value) == {"data", "layout", "config"} else "application/json"
+            write(f"output-{index}.json", mime_type, rendered, display_name)
             return
         if isinstance(value, Figure):
             path = OUTPUT_DIR / f"figure-{index}.png"
