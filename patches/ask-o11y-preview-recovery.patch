@@ -1,0 +1,288 @@
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -33,6 +33,11 @@
+ // model to reissue a tool call whose arguments arrived truncated/invalid. Beyond
+ // this the run ends with a clean, retryable error instead of spinning.
+ const maxTruncationRetries = 1
++
++// maxGrafanaPreviewNoProgressNudges bounds consecutive no-tool responses after
++// analysis when the required Preview is still missing. A real tool call resets
++// this streak so valid recovery work can continue.
++const maxGrafanaPreviewNoProgressNudges = 2
+ const maxSelectedTools = 24
+ const publicationQuestion = "是否確認將此 Grafana Preview 正式發佈至 Dashboard？"
+ const grafanaPreviewNudge = "[SYSTEM: The confirmed intent requires a visually inspectable Grafana Preview, not a chat-only Result Preview. Use the selected dashboarding skill and mcp-grafana_update_dashboard with one complete dashboard JSON. For an analysis image, use only an opaque asset binding in asko11y-plotly-panel with explicit image or plotly mode; text panels are narrative-only; use $plan_ref targets only when Sandbox was not called. After compose_ml_dashboard returns refs.dashboard_ref, send {dashboard: {$dashboard_ref: refs.dashboard_ref}} rather than copying the full dashboard; the host resolves it. The trusted host resolves all refs. The host will enforce preview status. Return the exact Grafana URL and stop for publication confirmation.]"
+@@ -156,6 +161,7 @@
+ 	truncationRetries := 0
+ 	pendingTruncationNudge := false
+ 	pendingGrafanaPreviewNudge := false
++	grafanaPreviewNoProgressNudges := 0
+ 	successfulExecutionObserved := false
+ 	grafanaPreviewObserved := false
+ 
+@@ -258,12 +264,13 @@
+ 
+ 		if len(msg.ToolCalls) == 0 {
+ 			if prepareGrafanaPreviewAfterExecution && successfulExecutionObserved && !grafanaPreviewObserved {
+-				if iteration < maxIter-1 {
+-					pendingGrafanaPreviewNudge = true
+-					continue
++				if grafanaPreviewNoProgressNudges >= maxGrafanaPreviewNoProgressNudges || iteration >= maxIter-1 {
++					a.send(ctx, eventCh, SSEEvent{Type: "error", Data: ErrorEvent{Message: "Analysis completed, but the requested Grafana Preview was not created. Retry using the existing successful refs; do not rerun analysis.", Code: "grafana_preview_missing", Retryable: true}})
++					return
+ 				}
+-				a.send(ctx, eventCh, SSEEvent{Type: "error", Data: ErrorEvent{Message: "Analysis completed, but the requested Grafana Preview was not created. Retry using the existing successful refs; do not rerun analysis.", Code: "grafana_preview_missing", Retryable: true}})
+-				return
++				grafanaPreviewNoProgressNudges++
++				pendingGrafanaPreviewNudge = true
++				continue
+ 			}
+ 			if prepareGrafanaPreviewAfterExecution && grafanaPreviewObserved && msg.Content != "" && !strings.Contains(msg.Content, publicationQuestion) {
+ 				msg.Content = strings.TrimSpace(msg.Content) + "\n\n" + publicationQuestion
+@@ -289,6 +296,9 @@
+ 			return
+ 		}
+ 
++		// A valid tool call is progress. Start a fresh no-progress streak after
++		// executing it, including when the tool itself returns an error.
++		grafanaPreviewNoProgressNudges = 0
+ 		msg.Content = ""
+ 		messages = append(messages, msg)
+ 
+diff --git a/pkg/agent/loop_test.go b/pkg/agent/loop_test.go
+--- a/pkg/agent/loop_test.go
++++ b/pkg/agent/loop_test.go
+@@ -12,6 +12,7 @@
+ 	"sync/atomic"
+ 	"testing"
+ 
++	"github.com/grafana/grafana-plugin-sdk-go/backend/httpclient"
+ 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+ 
+ 	"consensys-asko11y-app/pkg/mcp"
+@@ -1060,3 +1061,224 @@
+ 		t.Fatalf("failed/unrelated ref = %q", got)
+ 	}
+ }
++
++func TestAgentLoop_GrafanaPreviewNoProgressIsBounded(t *testing.T) {
++	for _, repair := range []bool{false, true} {
++		t.Run(fmt.Sprintf("repair=%t", repair), func(t *testing.T) {
++			maxAllowedLLMCalls := 6
++			if repair {
++				maxAllowedLLMCalls = 10
++			}
++			t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++			var llmCalls atomic.Int32
++			var dashboardCalls atomic.Int32
++			var requestMu sync.Mutex
++			var requestBodies []string
++
++			newMCPServer := func(toolName string, result func() mcp.CallToolResult) *httptest.Server {
++				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++					switch r.URL.Path {
++					case "/mcp/list-tools":
++						_ = json.NewEncoder(w).Encode(struct {
++							Tools []mcp.Tool `json:"tools"`
++						}{Tools: []mcp.Tool{{
++							Name:        toolName,
++							InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
++						}}})
++					case "/mcp/call-tool":
++						var rpc mcp.MCPRequest
++						if err := json.NewDecoder(r.Body).Decode(&rpc); err != nil {
++							t.Errorf("decode MCP request: %v", err)
++							return
++						}
++						var params mcp.CallToolParams
++						if err := json.Unmarshal(rpc.Params, &params); err != nil {
++							t.Errorf("decode MCP params: %v", err)
++							return
++						}
++						if params.Name != toolName {
++							t.Errorf("MCP tool = %q, want %q", params.Name, toolName)
++						}
++						if toolName == "update_dashboard" {
++							dashboardCalls.Add(1)
++						}
++						_ = json.NewEncoder(w).Encode(result())
++					default:
++						http.NotFound(w, r)
++					}
++				}))
++			}
++
++			analysisServer := newMCPServer("execute_ml_contract", func() mcp.CallToolResult {
++				return mcp.CallToolResult{Content: []mcp.ContentBlock{{
++					Type: "text",
++					Text: `{"ok":true,"step":"execute_ml_contract","refs":{"execution_ref":"artifact://analysis-run"}}`,
++				}}}
++			})
++			defer analysisServer.Close()
++			dashboardServer := newMCPServer("update_dashboard", func() mcp.CallToolResult {
++				if repair && dashboardCalls.Load() == 3 {
++					return mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: `{"uid":"preview","url":"/d/preview"}`}}}
++				}
++				return mcp.CallToolResult{IsError: true, Content: []mcp.ContentBlock{{
++					Type: "text",
++					Text: "dashboard writer unavailable: effect store missing",
++				}}}
++			})
++			defer dashboardServer.Close()
++
++			llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, _ := io.ReadAll(r.Body)
++				requestMu.Lock()
++				requestBodies = append(requestBodies, string(body))
++				requestMu.Unlock()
++
++				idx := int(llmCalls.Add(1)) - 1
++				responseIndex := idx
++				if repair && (idx == 5 || idx == 8) {
++					responseIndex = 2 // Retry after two nudges, with a new exact approved input.
++				}
++				var response ChatCompletionResponse
++				switch responseIndex {
++				case 0:
++					response = ChatCompletionResponse{ID: "selection", Choices: []Choice{{
++						Message:      Message{Role: "assistant", Content: `{"tools":["sandbox-analysis_execute_ml_contract","mcp-grafana_update_dashboard"],"skills":["dashboarding"],"datasource_families":[],"prepare_grafana_preview_after_execution":true,"publish_reviewed_grafana_preview":false}`},
++						FinishReason: "stop",
++					}}}
++				case 1:
++					response = ChatCompletionResponse{ID: "analysis", Choices: []Choice{{
++						Message: Message{Role: "assistant", ToolCalls: []ToolCall{{
++							ID: "analysis-call", Type: "function",
++							Function: FunctionCall{Name: "sandbox-analysis_execute_ml_contract", Arguments: `{}`},
++						}}},
++						FinishReason: "tool_calls",
++					}}}
++				case 2:
++					response = ChatCompletionResponse{ID: "dashboard", Choices: []Choice{{
++						Message: Message{Role: "assistant", ToolCalls: []ToolCall{{
++							ID: fmt.Sprintf("dashboard-call-%d", idx), Type: "function",
++							Function: FunctionCall{Name: "mcp-grafana_update_dashboard", Arguments: fmt.Sprintf(`{"dashboard":{"title":"Preview attempt %d","panels":[{"id":1,"type":"text","title":"Summary","options":{"mode":"markdown","content":"analysis"}}]}}`, idx)},
++						}}},
++						FinishReason: "tool_calls",
++					}}}
++				default:
++					// Keep returning a no-tool answer to reproduce the old 50-iteration spin.
++					response = ChatCompletionResponse{ID: "no-progress", Choices: []Choice{{
++						Message:      Message{Role: "assistant"},
++						FinishReason: "stop",
++					}}}
++				}
++				respondAsStream(w, response)
++			}))
++			defer llmServer.Close()
++
++			proxy := mcp.NewProxy(context.Background(), log.DefaultLogger)
++			defer proxy.Close()
++			if err := proxy.EnsureServer(mcp.ServerConfig{ID: "sandbox-analysis", URL: analysisServer.URL, Type: "standard", Enabled: true}); err != nil {
++				t.Fatalf("configure analysis MCP server: %v", err)
++			}
++			if err := proxy.EnsureServer(mcp.ServerConfig{ID: "mcp-grafana", URL: dashboardServer.URL, Type: "standard", Enabled: true}); err != nil {
++				t.Fatalf("configure dashboard MCP server: %v", err)
++			}
++
++			client, err := httpclient.New()
++			if err != nil {
++				t.Fatal(err)
++			}
++			client.Timeout = llmTimeout
++			t.Cleanup(client.CloseIdleConnections)
++			llmClient := NewLLMClient(log.DefaultLogger, client)
++			loop := NewAgentLoop(llmClient, proxy, log.DefaultLogger)
++			eventCh := make(chan SSEEvent, 64)
++			req := LoopRequest{
++				Messages:      []Message{{Role: "user", Content: "run the analysis and create a Grafana preview"}},
++				SystemPrompt:  "sys",
++				MaxIterations: 50,
++				GrafanaURL:    llmServer.URL,
++				AuthToken:     "test-token",
++				UserRole:      "Admin",
++				UserID:        "42",
++				SessionID:     "session-1",
++				OrgID:         "1",
++				MCPServers: []mcp.ServerConfig{
++					{ID: "sandbox-analysis", Enabled: true},
++					{ID: "mcp-grafana", Enabled: true},
++				},
++				RegisterApproval: func(_ context.Context, approval ApprovalRequestEvent) (ApprovalWaitFunc, error) {
++					return func(context.Context) (ApprovalResolvedEvent, error) {
++						return ApprovalResolvedEvent{ApprovalID: approval.ApprovalID, Decision: "approved"}, nil
++					}, nil
++				},
++			}
++
++			go loop.Run(context.Background(), req, eventCh)
++			events := collectEvents(eventCh)
++			if got := int(llmCalls.Load()); got != maxAllowedLLMCalls {
++				t.Fatalf("preview recovery made %d LLM calls, want %d", got, maxAllowedLLMCalls)
++			}
++			wantDashboardCalls := int32(1)
++			if repair {
++				wantDashboardCalls = 3
++			}
++			if got := dashboardCalls.Load(); got != wantDashboardCalls {
++				t.Fatalf("dashboard calls = %d, want %d", got, wantDashboardCalls)
++			}
++			if len(events) == 0 {
++				t.Fatal("loop emitted no events")
++			}
++			last := events[len(events)-1]
++			if repair {
++				if last.Type != "done" {
++					t.Fatalf("repaired Preview ended with %#v, want done", last)
++				}
++			} else {
++				if last.Type != "error" {
++					t.Fatalf("last event = %q, want bounded preview error", last.Type)
++				}
++				errEvent, ok := last.Data.(ErrorEvent)
++				if !ok || errEvent.Code != "grafana_preview_missing" || !errEvent.Retryable {
++					t.Fatalf("last event = %#v, want retryable grafana_preview_missing", last.Data)
++				}
++			}
++
++			var sawExecutionEvidence, sawRawDashboardError bool
++			for _, event := range events {
++				switch event.Type {
++				case "evidence":
++					if evidence, ok := event.Data.(EvidenceEvent); ok && evidence.ToolName == "sandbox-analysis_execute_ml_contract" && strings.Contains(evidence.Summary, "artifact://analysis-run") {
++						sawExecutionEvidence = true
++					}
++				case "tool_call_result":
++					if result, ok := event.Data.(ToolCallResultEvent); ok && result.Name == "mcp-grafana_update_dashboard" && result.IsError && strings.Contains(result.Content, "effect store missing") {
++						sawRawDashboardError = true
++					}
++				}
++			}
++			if !sawExecutionEvidence {
++				t.Fatal("successful analysis ref was not retained as evidence")
++			}
++			if !sawRawDashboardError {
++				t.Fatal("raw dashboard tool error was not retained in the SSE result")
++			}
++
++			requestMu.Lock()
++			defer requestMu.Unlock()
++			var nudgeCount int
++			for _, body := range requestBodies {
++				if strings.Contains(body, "visually inspectable Grafana Preview") {
++					nudgeCount++
++				}
++			}
++			wantNudges := 2
++			if repair {
++				wantNudges = 4 // Tool errors reset the consecutive no-tool bound.
++			}
++			if nudgeCount != wantNudges {
++				t.Fatalf("preview nudge count = %d, want %d", nudgeCount, wantNudges)
++			}
++			if len(requestBodies) > 0 && !strings.Contains(requestBodies[len(requestBodies)-1], "artifact://analysis-run") {
++				t.Fatal("successful analysis ref disappeared from later LLM context")
++			}
++		})
++	}
++}

@@ -1,0 +1,85 @@
+{
+  "source_base": "dd6d9ecd7b8b84592421aa3430aeacde2391313d",
+  "scope": "source delivery only; no deploy/config-apply/restart/live LLM",
+  "mission": "42e2bc1a-a6c7-4ca0-b05f-2ee7836a593f",
+  "review_run": "e18a5f06-b9a2-41fd-9b35-28b883b59b4d",
+  "sha256": {
+    "CONTEXT.md": "0a8c63c3e65c378527270eabbfd3e63f5e97e9b018a283c452de9995a2bd5285",
+    "patches/ask-o11y-autonomous-analyst.patch": "978cfd7e8bab860565a4cd74cc20a1946bc3a26d0eabaa26023f9e48e5ab73b6",
+    "patches/ask-o11y-bounded-autonomy.patch": "cef6012c5428f662a39babf2f1c1b5a29b6ed397dfd44d21b9ccbb8ffbf8b363",
+    "scripts/build-install-ask-o11y.sh": "37feb5f8b8d248923b719608137e60cb3ac184b4a3e3915d4d0e36841727efe3",
+    "scripts/configure-ask-o11y-workflow-tools.py": "b5e6dcc07ea57490cb35335d6a97277b5d4466871f546de604e39bb081d18c50",
+    "scripts/check-ask-o11y-autonomous-analyst.py": "b4ad3b35a481e2e86b3a71a1da8f6307f10a9a1d4e5aa334f0676bbdd2625d95",
+    "docs/design/ask-o11y-bounded-autonomy.md": "9c2ca8229be13f204404f304895c0b2b6948dbbbdf5041804b17834ddf88b440"
+  },
+  "rebuild_and_tests": "ok  \tconsensys-asko11y-app/pkg/plugin\t2.186s\nok  \tconsensys-asko11y-app/pkg/agent\t1.795s\nok  \tconsensys-asko11y-app/pkg/mcp\t1.301s\nPASS: 14 installer patches; prompt, skills, autonomy/approval seams and package regressions (not live LLM E2E)\n",
+  "negative_regression_observations": [
+    "--- FAIL: TestAutonomyScopeReplayAndPythonDenied (0.00s)",
+    "    analysis_autonomy_safety_test.go:42: reused model ID replayed an approval for changed frame/budget",
+    "--- FAIL: TestAutonomyTruncationKeepsReplacementSkill (0.00s)",
+    "    analysis_autonomy_safety_test.go:76: truncation nudge lost replacement skill",
+    "--- FAIL: TestAutonomyRunReselectScopeAndBudget (0.01s)",
+    "    analysis_autonomy_test.go:186: replacement skill did not replace prior skill in next request",
+    "    analysis_autonomy_test.go:221: approval trace/broker identity reused",
+    "--- FAIL: TestAgentLoop_GrafanaPreviewNoProgressIsBounded (0.01s)",
+    "    --- FAIL: TestAgentLoop_GrafanaPreviewNoProgressIsBounded/repair=false (0.00s)",
+    "        loop_test.go:1270: preview nudge lost the selected skill",
+    "    --- FAIL: TestAgentLoop_GrafanaPreviewNoProgressIsBounded/repair=true (0.01s)",
+    "        loop_test.go:1270: preview nudge lost the selected skill",
+    "FAIL",
+    "FAIL\tconsensys-asko11y-app/pkg/agent\t0.023s",
+    "FAIL"
+  ],
+  "race_status": "unavailable: gcc absent, not installed",
+  "review": {
+    "summary": "No remaining concrete reachable P0/P1/P2 blocker found in the bounded v2 fixes. The host-ID replay fix, Python exclusion, and one-shot skill preservation are source-verified and covered by inspected parent evidence. This is not live LLM, deployment, user-outcome, or data validation.",
+    "criterionResults": [
+      {
+        "criterion": "Run-local scope cannot authorize another frame, contract, actor, query or write, exceed its attempt budget, or survive restart/denial",
+        "status": "met",
+        "entrypoint": "pkg/agent/analysis_autonomy.go:19, 193-280; pkg/agent/loop.go:854-938",
+        "observed": "Every broker-facing scope and ordinary exact approval now receives a fresh host-generated ApprovalID; ToolCallID remains the provider/model ID only. Scope retains actor/frame/plan/budget checks, excludes Python, consumes before dispatch, and exact fallback rejects a mismatched resolved ApprovalID.",
+        "evidence": [
+          "analysis_autonomy.go:19 uses crypto/rand.Text under the declared Go 1.26.5 toolchain; scope registration at :223 uses hostApprovalID while ToolCallID remains tc.ID, checks resolved.ApprovalID at :238, and records the host ID at :242.",
+          "loop.go:862-865 assigns a fresh host ID to scoped trace events; ordinary exact approval uses hostApprovalID at :879 and requires resolved.ApprovalID == approval.ApprovalID at :933. This closes both prior broker-cached scope replacement and exhausted-scope fallback replays.",
+          "analysis_autonomy_safety_test.go:16-61 simulates cached broker resolutions while reusing the model call ID across changed frame/budget proposals; analysis_autonomy_test.go:123-232 drives repeated provider IDs through Run, scope exhaustion, and exact fallback. Inspected rebuilt-v2.log reports pkg/agent, pkg/plugin, and pkg/mcp pass; review-regression-negative.log shows the old candidate fails these guards.",
+          "Existing run-local controls remain: successful-query-only frames at analysis_autonomy.go:157-181; org/user/session equality and pre-dispatch decrement at :250-280; new Run creates fresh autonomy state in loop.go:152."
+        ]
+      },
+      {
+        "criterion": "Dynamic capability replacement stays inside existing permissions and current publication lifecycle, and replaces rather than accumulates skill context",
+        "status": "met",
+        "entrypoint": "pkg/agent/analysis_autonomy.go:35-75, 86-155, 245-280; pkg/agent/loop.go:132-200, 322-391",
+        "observed": "The reusable scope is deliberately narrowed to immutable-frame profile and exact-plan ML-contract execution; free-form Python stays on ordinary exact approval. Reselection can only draw from the pre-filtered catalog, skill context is per request, and one-shot requests retain then re-trim the selected skills. Publication continues to hide autonomy tools and preview completion closes tools/scope.",
+        "evidence": [
+          "scopeTool and the tool schema allow only sandbox-analysis_profile_dataset and sandbox-analysis_execute_ml_contract (analysis_autonomy.go:35-41, :67-70); consumeScope permits Python neither in its tool switch nor allowed argument keys (:257-273), while ML requires contract_ref == the successful-frame plan (:259-264).",
+          "Run copies catalog only after RBAC/server-selection/exclusion filtering (loop.go:132-153); selectCapabilities admits only catalog entries (analysis_autonomy.go:119-132); publication omits local tools (analysis_autonomy.go:55-56) and successful preview clears openAITools and scope (loop.go:388-391).",
+          "loop.go:186 injects selected skills; :199-200 appends one-shot nudge to that already skill-injected request and re-trims it. analysis_autonomy_safety_test.go:69-99 checks truncation nudge preservation; updated loop_test.go:1266-1272 checks preview nudge preservation; analysis_autonomy_test.go:179-190 checks reselection/near-limit with a reused provider ID.",
+          "No new permission, data-query, write, publication, or tool-wide grant path was found in the reviewed changed blocks."
+        ]
+      },
+      {
+        "criterion": "Tests and documentation accurately bound the delivered behavior without claiming live model or deployment validation",
+        "status": "met",
+        "entrypoint": "pkg/agent/analysis_autonomy_safety_test.go; pkg/agent/analysis_autonomy_test.go; /home/timmypai/apps/grafana/docs/design/ask-o11y-bounded-autonomy.md",
+        "observed": "The new tests target each prior finding, and the current design, embedded skills, default prompt, and settings-helper prompt all disclose the conservative Python boundary and no-live limitation. The prior first-batch document is explicitly historical and links to the new design.",
+        "evidence": [
+          "analysis_autonomy_safety_test.go:16-67 covers cached-resolution replay, changed frame/budget, malformed extra field, budget limits, and Python ineligibility; analysis_autonomy_test.go:56-121 covers forged/failed frame, foreign session, plan mismatch, noncompute/query/write calls, exhaustion, fresh run, and denial/mismatched resolution.",
+          "The scoped Run seam at analysis_autonomy_test.go:123-232 asserts two scoped calls, a third independently rejected call, fresh non-provider approval IDs, and no skill accumulation. It labels its LLM/MCP fixtures as non-live.",
+          "docs/design/ask-o11y-bounded-autonomy.md:42-45 accurately explains why free-form Python remains exact-approved; :52-58 documents host-issued opaque IDs and broker replay rationale; :62-89 identifies local/mock evidence and negative old-candidate checks; :101-110 explicitly reserves deployment/live natural-language validation. docs/design/ask-o11y-autonomous-analyst.md:1-4 labels the earlier document historical. scripts/configure-ask-o11y-workflow-tools.py SYSTEM_PROMPT carries the same scope/Python limitation.",
+          "Inspected parent evidence rebuilt-v2.log records package passes and explicitly says 'not live LLM E2E'; review-regression-negative.log preserves failures against the old candidate. These were not executed by this reviewer."
+        ]
+      }
+    ],
+    "residualRisks": [
+      "No live LLM, Grafana deployment, approval-UI interaction, or production-data behavior was authorized or independently run; the design correctly leaves those as post-redeploy validation.",
+      "The crypto/rand host ID is probabilistic by design; no practical collision path was found, and its generated format is compatible with the previously inspected opaque approvalId UI/route/broker contract.",
+      "Reviewer performed no shell command or staged-file inspection under the read-only boundary; parent-owned rebuild/test logs were inspected as evidence only."
+    ]
+  },
+  "retrospective": [
+    "Host-issued approval IDs, not model tool-call IDs, must key broker authorization decisions.",
+    "Same frame does not prove arbitrary Python honors an ML contract; keep free-form code exact-approved.",
+    "Inject replacement skills per request, and preserve them through every one-shot nudge path."
+  ]
+}

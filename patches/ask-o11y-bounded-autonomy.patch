@@ -1,0 +1,821 @@
+diff --git a/pkg/agent/analysis_autonomy.go b/pkg/agent/analysis_autonomy.go
+new file mode 100644
+index 0000000..a398ed3
+--- /dev/null
++++ b/pkg/agent/analysis_autonomy.go
+@@ -0,0 +1,280 @@
++package agent
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/json"
++	"fmt"
++	"strings"
++	"time"
++
++	"consensys-asko11y-app/pkg/mcp"
++)
++
++const selectCapabilitiesTool = "ask_o11y_select_capabilities"
++const approveAnalysisScopeTool = "ask_o11y_approve_analysis_scope"
++
++// Broker keys must never come from a model-provided ToolCall.ID. Even an
++// identical proposal needs a fresh user decision when registering a new grant.
++func hostApprovalID() string { return "approval_" + rand.Text() }
++
++// Run-local only: never serialized into history, accepted from model input or
++// restored from a tool-wide grant. A resumed/new run must obtain new approval.
++type analysisAutonomy struct {
++	catalog []mcp.Tool
++	frames  map[string]string // successful current-run frame -> exact query plan
++	scope   *analysisScope
++}
++
++type analysisScope struct {
++	FrameRef   string   `json:"frame_ref"`
++	Purpose    string   `json:"purpose"`
++	Tools      []string `json:"tools"`
++	MaxCalls   int      `json:"max_calls"`
++	planRef    string
++	remaining  int
++	approvalID string
++	actor      [3]string
++}
++
++func scopeTool(name string) bool {
++	switch name {
++	case "sandbox-analysis_profile_dataset", "sandbox-analysis_execute_ml_contract":
++		return true
++	}
++	return false
++}
++
++func hasTool(tools []mcp.Tool, name string) bool {
++	for _, tool := range tools {
++		if tool.Name == name {
++			return true
++		}
++	}
++	return false
++}
++
++func autonomyTools(tools []mcp.Tool, publication bool) []OpenAITool {
++	out := ConvertMCPToolsToOpenAI(tools)
++	if publication {
++		return out
++	}
++	out = append(out, OpenAITool{Type: "function", Function: OpenAIFunction{
++		Name:        selectCapabilitiesTool,
++		Description: "Discover or replace active tools/skills when evidence reveals a capability gap. Empty arguments return the authorized catalog. Nonempty tools/skills replace the selection; use exact catalog names. This changes availability, never permissions, approval, or publication state. No fixed workflow or extra planner call.",
++		Parameters: map[string]interface{}{"type": "object", "additionalProperties": false, "properties": map[string]interface{}{
++			"tools":  map[string]interface{}{"type": "array", "maxItems": maxSelectedTools, "uniqueItems": true, "items": map[string]interface{}{"type": "string"}},
++			"skills": map[string]interface{}{"type": "array", "maxItems": maxSelectedSkills, "uniqueItems": true, "items": map[string]interface{}{"type": "string"}},
++		}},
++	}})
++	out = append(out, OpenAITool{Type: "function", Function: OpenAIFunction{
++		Name:        approveAnalysisScopeTool,
++		Description: "Request explicit user approval for bounded autonomous compute on one successful current-run frame. Select exact supported compute tools and a call budget. Allows supported deterministic compute on that frame and unchanged ML contract. Free-form Python always needs its own exact approval because its semantic contract cannot be verified. No other dataset, query, write, publication or permission. Failed attempts consume budget; the scope expires at run end. Empty tools revokes an existing scope without granting anything. Never required for ordinary exact-call approval.",
++		Parameters: map[string]interface{}{"type": "object", "additionalProperties": false, "required": []string{"frame_ref", "purpose", "tools", "max_calls"}, "properties": map[string]interface{}{
++			"frame_ref": map[string]interface{}{"type": "string"}, "purpose": map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 1000},
++			"tools":     map[string]interface{}{"type": "array", "uniqueItems": true, "items": map[string]interface{}{"type": "string", "enum": []string{"sandbox-analysis_profile_dataset", "sandbox-analysis_execute_ml_contract"}}},
++			"max_calls": map[string]interface{}{"type": "integer", "minimum": 1},
++		}},
++	}})
++	return out
++}
++
++func decodeAutonomyArgs(raw string, value interface{}) error {
++	if !strings.HasPrefix(strings.TrimSpace(raw), "{") || !json.Valid([]byte(raw)) {
++		return fmt.Errorf("arguments must be one JSON object")
++	}
++	decoder := json.NewDecoder(strings.NewReader(raw))
++	decoder.DisallowUnknownFields()
++	return decoder.Decode(value)
++}
++
++func (s *analysisAutonomy) selectCapabilities(raw string, req LoopRequest) ([]mcp.Tool, []Message, string, error) {
++	var selection struct {
++		Tools  []string `json:"tools"`
++		Skills []string `json:"skills"`
++	}
++	if err := decodeAutonomyArgs(raw, &selection); err != nil {
++		return nil, nil, "", err
++	}
++	if selection.Tools == nil && selection.Skills == nil {
++		type entry struct {
++			Name        string `json:"name"`
++			Description string `json:"description"`
++		}
++		tools, skills := []entry{}, []entry{}
++		for _, tool := range s.catalog {
++			tools = append(tools, entry{tool.Name, truncateWhitespace(tool.Description, 300)})
++		}
++		for _, skill := range availableAgentSkills() {
++			skills = append(skills, entry{skill.Name, skill.Description})
++		}
++		body, _ := json.Marshal(map[string]interface{}{"tools": tools, "skills": skills, "max_tools": maxSelectedTools, "max_skills": maxSelectedSkills})
++		return nil, nil, string(body), nil
++	}
++	if selection.Tools == nil || selection.Skills == nil || len(selection.Tools) > maxSelectedTools || len(selection.Skills) > maxSelectedSkills {
++		return nil, nil, "", fmt.Errorf("replacement requires both tools and skills arrays within existing limits")
++	}
++	selected := []mcp.Tool{}
++	seen := map[string]bool{}
++	for _, name := range selection.Tools {
++		if seen[name] || !hasTool(s.catalog, name) {
++			return nil, nil, "", fmt.Errorf("unknown, duplicate or unauthorized tool: %s", name)
++		}
++		seen[name] = true
++		for _, family := range []string{"loki", "prometheus", "tempo", "pyroscope"} {
++			lower := strings.ToLower(name)
++			if (strings.Contains(lower, "_"+family+"_") || strings.HasSuffix(lower, "_"+family)) && !conversationSupportsDatasourceFamily(req.Messages, family) {
++				return nil, nil, "", fmt.Errorf("datasource family lacks existing conversation authorization: %s", family)
++			}
++		}
++		for _, tool := range s.catalog {
++			if tool.Name == name {
++				selected = append(selected, tool)
++				break
++			}
++		}
++	}
++	seen = map[string]bool{}
++	for _, name := range selection.Skills {
++		known := false
++		for _, skill := range availableAgentSkills() {
++			known = known || skill.Name == name
++		}
++		if !known || seen[name] {
++			return nil, nil, "", fmt.Errorf("unknown or duplicate skill: %s", name)
++		}
++		seen[name] = true
++	}
++	body, _ := json.Marshal(map[string]interface{}{"ok": true, "tools": selection.Tools, "skills": selection.Skills})
++	return selected, selectedSkillMessages(selection.Skills), string(body), nil
++}
++
++func withSelectedSkills(messages, skills []Message) []Message {
++	if len(messages) == 0 || len(skills) == 0 {
++		return messages
++	}
++	out := make([]Message, 0, len(messages)+len(skills))
++	out = append(out, messages[0])
++	out = append(out, skills...)
++	return append(out, messages[1:]...)
++}
++
++func (s *analysisAutonomy) observeFrame(tc ToolCall, content string, isError bool) {
++	if isError || tc.Function.Name != "grafana-query_execute_planned_query" {
++		return
++	}
++	var args struct {
++		PlanRef string `json:"plan_ref"`
++	}
++	var result struct {
++		OK       bool   `json:"ok"`
++		FrameRef string `json:"frame_ref"`
++		Refs     struct {
++			FrameRef string `json:"frame_ref"`
++		} `json:"refs"`
++	}
++	if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil || json.Unmarshal([]byte(content), &result) != nil || !result.OK || args.PlanRef == "" {
++		return
++	}
++	frame := result.FrameRef
++	if frame == "" {
++		frame = result.Refs.FrameRef
++	}
++	if frame != "" {
++		s.frames[frame] = args.PlanRef
++	}
++}
++
++func (a *AgentLoop) approveAnalysisScope(ctx context.Context, events chan<- SSEEvent, tc ToolCall, req LoopRequest) (string, bool, string) {
++	s := req.autonomy
++	if s == nil || req.ForceGrafanaPublication {
++		return "Scope approval unavailable", true, "approval_required"
++	}
++	// Any attempted replacement/revocation invalidates the previous scope.
++	s.scope = nil
++	var proposal analysisScope
++	if err := decodeAutonomyArgs(tc.Function.Arguments, &proposal); err != nil {
++		return err.Error(), true, "tool"
++	}
++	if len(proposal.Tools) == 0 {
++		return `{"ok":true,"scope_revoked":true}`, false, ""
++	}
++	plan := s.frames[proposal.FrameRef]
++	if plan == "" || req.OrgID == "" || req.UserID == "" || req.SessionID == "" || tc.ID == "" {
++		return "Scope requires authenticated actor/session and a successful current-run query frame", true, "approval_required"
++	}
++	limit := req.MaxIterations
++	if limit <= 0 {
++		limit = defaultMaxIterations
++	}
++	if proposal.MaxCalls < 1 || proposal.MaxCalls > limit || strings.TrimSpace(proposal.Purpose) == "" || len(proposal.Purpose) > 1000 {
++		return "Scope needs a purpose and positive call budget no greater than the run iteration limit", true, "tool"
++	}
++	seen := map[string]bool{}
++	for _, name := range proposal.Tools {
++		if !scopeTool(name) || !hasTool(s.catalog, name) || seen[name] {
++			return "Scope contains duplicate, unauthorized or non-compute tool", true, "approval_required"
++		}
++		seen[name] = true
++	}
++	if req.RegisterApproval == nil {
++		return "User approval is required for an analysis scope", true, "approval_required"
++	}
++	approval := ApprovalRequestEvent{ApprovalID: hostApprovalID(), ToolCallID: tc.ID, ToolName: approveAnalysisScopeTool, Risk: "write", Arguments: tc.Function.Arguments,
++		Reason: fmt.Sprintf("Authorize at most %d compute attempts on this exact frame and originating plan %s during this run. Only the listed deterministic operations are covered; free-form Python, new data, changed ML contracts, writes and publication require separate approval. Existing sandbox/resource and data guards still apply.", proposal.MaxCalls, plan)}
++	wait, err := req.RegisterApproval(ctx, approval)
++	if err != nil || wait == nil {
++		return "Unable to register scope approval", true, "approval_required"
++	}
++	a.send(ctx, events, SSEEvent{Type: "approval_request", Data: approval})
++	resolved, err := wait(ctx)
++	if err != nil || ctx.Err() != nil {
++		return "Scope approval interrupted; no scope granted", true, "approval_required"
++	}
++	if resolved.ResolvedAt == "" {
++		resolved.ResolvedAt = time.Now().UTC().Format(time.RFC3339)
++	}
++	a.send(ctx, events, SSEEvent{Type: "approval_resolved", Data: resolved})
++	if resolved.Decision != "approved" || resolved.ApprovalID != approval.ApprovalID {
++		return "Scope was not approved for this request", true, "approval_denied"
++	}
++	proposal.planRef = plan
++	proposal.remaining = proposal.MaxCalls
++	proposal.approvalID = approval.ApprovalID
++	proposal.actor = [3]string{req.OrgID, req.UserID, req.SessionID}
++	s.scope = &proposal
++	body, _ := json.Marshal(map[string]interface{}{"ok": true, "scope_approval_id": approval.ApprovalID, "frame_ref": proposal.FrameRef, "remaining_calls": proposal.remaining, "expires": "run_end"})
++	return string(body), false, ""
++}
++
++func (s *analysisAutonomy) consumeScope(tc ToolCall, req LoopRequest) bool {
++	if s == nil || s.scope == nil || req.ForceGrafanaPublication {
++		return false
++	}
++	grant := s.scope
++	if grant.remaining <= 0 || grant.actor != [3]string{req.OrgID, req.UserID, req.SessionID} || !containsString(grant.Tools, tc.Function.Name) {
++		return false
++	}
++	var args map[string]interface{}
++	if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil || stringArg(args["frame_ref"]) != grant.FrameRef {
++		return false
++	}
++	allowed := map[string]bool{"frame_ref": true, "seed": true}
++	switch tc.Function.Name {
++	case "sandbox-analysis_execute_ml_contract":
++		allowed["contract_ref"] = true
++		if stringArg(args["contract_ref"]) != grant.planRef {
++			return false
++		}
++	case "sandbox-analysis_profile_dataset":
++	default:
++		return false
++	}
++	for key := range args {
++		if !allowed[key] {
++			return false
++		}
++	}
++	grant.remaining-- // failed/indeterminate attempts also consume budget, before dispatch
++	return true
++}
+diff --git a/pkg/agent/analysis_autonomy_safety_test.go b/pkg/agent/analysis_autonomy_safety_test.go
+new file mode 100644
+index 0000000..915d98d
+--- /dev/null
++++ b/pkg/agent/analysis_autonomy_safety_test.go
+@@ -0,0 +1,99 @@
++package agent
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"consensys-asko11y-app/pkg/mcp"
++	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
++)
++
++func TestAutonomyScopeReplayAndPythonDenied(t *testing.T) {
++	loop := NewAgentLoop(nil, nil, log.DefaultLogger)
++	cache := map[string]ApprovalResolvedEvent{}
++	decisions := 0
++	req := LoopRequest{OrgID: "1", UserID: "u", SessionID: "s", MaxIterations: 5,
++		autonomy: &analysisAutonomy{catalog: []mcp.Tool{{Name: "sandbox-analysis_profile_dataset"}, {Name: "sandbox-analysis_execute_python_analysis"}}, frames: map[string]string{"frame-A": "plan-A", "frame-B": "plan-B"}},
++		RegisterApproval: func(_ context.Context, a ApprovalRequestEvent) (ApprovalWaitFunc, error) {
++			if previous, ok := cache[a.ApprovalID]; ok {
++				return func(context.Context) (ApprovalResolvedEvent, error) { return previous, nil }, nil
++			}
++			decisions++
++			decision := "rejected"
++			if decisions == 1 {
++				decision = "approved"
++			}
++			return func(context.Context) (ApprovalResolvedEvent, error) {
++				r := ApprovalResolvedEvent{ApprovalID: a.ApprovalID, Decision: decision}
++				cache[a.ApprovalID] = r
++				return r, nil
++			}, nil
++		},
++	}
++	for i, frame := range []string{"frame-A", "frame-B"} {
++		call := autonomyCall(approveAnalysisScopeTool, fmt.Sprintf(`{"frame_ref":%q,"purpose":"investigate","tools":["sandbox-analysis_profile_dataset"],"max_calls":%d}`, frame, i+1))
++		_, failed, _ := loop.approveAnalysisScope(context.Background(), make(chan SSEEvent, 8), call, req)
++		if (i == 0 && failed) || (i == 1 && (!failed || req.autonomy.scope != nil)) {
++			t.Fatal("reused model ID replayed an approval for changed frame/budget")
++		}
++	}
++	if decisions != 2 {
++		t.Fatalf("new proposal did not obtain a new decision: %d", decisions)
++	}
++	_, failed, _ := loop.approveAnalysisScope(context.Background(), make(chan SSEEvent, 8), autonomyCall(approveAnalysisScopeTool, `{"frame_ref":"frame-A","purpose":"investigate","tools":["sandbox-analysis_execute_python_analysis"],"max_calls":2}`), req)
++	if !failed || decisions != 2 {
++		t.Fatal("free-form Python entered reusable scope")
++	}
++	for _, args := range []string{
++		`{"frame_ref":"frame-A","purpose":"investigate","tools":["sandbox-analysis_profile_dataset"],"max_calls":6}`,
++		`{"frame_ref":"frame-A","purpose":"investigate","tools":["sandbox-analysis_profile_dataset"],"max_calls":0}`,
++		`{"frame_ref":"frame-A","purpose":"investigate","tools":["sandbox-analysis_profile_dataset"],"max_calls":2,"remaining":99}`,
++	} {
++		if _, failed, _ := loop.approveAnalysisScope(context.Background(), make(chan SSEEvent, 8), autonomyCall(approveAnalysisScopeTool, args), req); !failed {
++			t.Fatalf("invalid scope accepted: %s", args)
++		}
++	}
++}
++
++func TestAutonomyPythonNeverScopeEligible(t *testing.T) {
++	if scopeTool("sandbox-analysis_execute_python_analysis") {
++		t.Fatal("free-form Python cannot attest the unchanged ML contract and must remain exact-approved")
++	}
++}
++
++func TestAutonomyTruncationKeepsReplacementSkill(t *testing.T) {
++	calls := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		calls++
++		message := Message{Role: "assistant"}
++		switch calls {
++		case 1:
++			message.ToolCalls = []ToolCall{autonomyCall(selectCapabilitiesTool, `{"tools":[],"skills":["ml-method-selection"]}`)}
++		case 2:
++			message.ToolCalls = []ToolCall{autonomyCall(selectCapabilitiesTool, `{"tools":`)}
++		case 3:
++			if !strings.Contains(string(body), truncatedToolCallNudge) || !strings.Contains(string(body), "[Selected Agent Skill: ml-method-selection") {
++				t.Error("truncation nudge lost replacement skill")
++			}
++			message.Content = "No further evidence available."
++		default:
++			t.Error("unexpected extra LLM call")
++		}
++		respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: message, FinishReason: "stop"}}})
++	}))
++	defer server.Close()
++	proxy := mcp.NewProxy(context.Background(), log.DefaultLogger)
++	defer proxy.Close()
++	loop := NewAgentLoop(NewLLMClient(log.DefaultLogger, server.Client()), proxy, log.DefaultLogger)
++	events := make(chan SSEEvent, 32)
++	loop.Run(context.Background(), LoopRequest{SystemPrompt: "sys", Messages: []Message{{Role: "user", Content: "Analyze"}}, GrafanaURL: server.URL, UserRole: "Admin", MaxIterations: 4}, events)
++	if calls != 3 {
++		t.Fatalf("calls=%d", calls)
++	}
++}
+diff --git a/pkg/agent/analysis_autonomy_test.go b/pkg/agent/analysis_autonomy_test.go
+new file mode 100644
+index 0000000..5ef2948
+--- /dev/null
++++ b/pkg/agent/analysis_autonomy_test.go
+@@ -0,0 +1,232 @@
++package agent
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"consensys-asko11y-app/pkg/mcp"
++	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
++)
++
++func autonomyCall(name, args string) ToolCall {
++	return ToolCall{ID: "call-1", Type: "function", Function: FunctionCall{Name: name, Arguments: args}}
++}
++
++func TestAutonomySelection(t *testing.T) {
++	s := &analysisAutonomy{catalog: []mcp.Tool{{Name: "sandbox-analysis_profile_dataset"}, {Name: "mcp-grafana_query_prometheus"}}}
++	_, _, catalog, err := s.selectCapabilities(`{}`, LoopRequest{})
++	if err != nil || !strings.Contains(catalog, "ml-method-selection") {
++		t.Fatalf("catalog: %s %v", catalog, err)
++	}
++	tools, skills, _, err := s.selectCapabilities(`{"tools":["sandbox-analysis_profile_dataset"],"skills":["ml-method-selection"]}`, LoopRequest{})
++	if err != nil || len(tools) != 1 || len(skills) != 1 {
++		t.Fatalf("selection: %v", err)
++	}
++	for _, args := range []string{
++		`{"tools":["disabled"],"skills":[]}`,
++		`{"tools":["mcp-grafana_query_prometheus"],"skills":[]}`,
++		`{"tools":[],"skills":["invented"]}`,
++		`{"tools":[],"skills":["dashboarding","dashboarding"]}`,
++		`{"tools":[],"skills":["dashboarding","ml-method-selection","data-understanding"]}`,
++		`{"tools":[],"skills":[],"publish":true}`, `null`, `{"tools":[]}`,
++	} {
++		if _, _, _, err := s.selectCapabilities(args, LoopRequest{}); err == nil {
++			t.Fatalf("accepted invalid selection %s", args)
++		}
++	}
++	messages := []Message{{Role: "system", Content: "base"}, {Role: "user", Content: "question"}}
++	first := withSelectedSkills(messages, skills)
++	second := withSelectedSkills(messages, selectedSkillMessages([]string{"data-understanding"}))
++	if len(messages) != 2 || len(first) != 3 || len(second) != 3 || strings.Contains(second[1].Content, "[Selected Agent Skill: ml-method-selection") {
++		t.Fatal("skills accumulated in history")
++	}
++	for _, tool := range autonomyTools(tools, true) {
++		if strings.HasPrefix(tool.Function.Name, "ask_o11y_") {
++			t.Fatal("publication exposed local autonomy tools")
++		}
++	}
++}
++
++func TestAutonomyScopeBoundaries(t *testing.T) {
++	loop := NewAgentLoop(nil, nil, log.DefaultLogger)
++	compute := "sandbox-analysis_profile_dataset"
++	newRequest := func() LoopRequest {
++		return LoopRequest{OrgID: "1", UserID: "u", SessionID: "s", MaxIterations: 4,
++			autonomy: &analysisAutonomy{catalog: []mcp.Tool{{Name: compute}, {Name: "sandbox-analysis_execute_ml_contract"}}, frames: map[string]string{}},
++			RegisterApproval: func(_ context.Context, a ApprovalRequestEvent) (ApprovalWaitFunc, error) {
++				return func(context.Context) (ApprovalResolvedEvent, error) {
++					return ApprovalResolvedEvent{ApprovalID: a.ApprovalID, Decision: "approved"}, nil
++				}, nil
++			},
++		}
++	}
++	args := `{"frame_ref":"frame","purpose":"Explain the observed change","tools":["sandbox-analysis_profile_dataset","sandbox-analysis_execute_ml_contract"],"max_calls":2}`
++	approve := func(req LoopRequest) (bool, string) {
++		_, failed, kind := loop.approveAnalysisScope(context.Background(), make(chan SSEEvent, 10), autonomyCall(approveAnalysisScopeTool, args), req)
++		return failed, kind
++	}
++	req := newRequest()
++	if failed, _ := approve(req); !failed {
++		t.Fatal("invented frame acquired approval")
++	}
++	query := autonomyCall("grafana-query_execute_planned_query", `{"plan_ref":"plan"}`)
++	req.autonomy.observeFrame(query, `{"ok":false,"refs":{"frame_ref":"frame"}}`, false)
++	if len(req.autonomy.frames) != 0 {
++		t.Fatal("failed result became authority")
++	}
++	req.autonomy.observeFrame(query, `{"ok":true,"refs":{"frame_ref":"frame"}}`, false)
++	if failed, kind := approve(req); failed {
++		t.Fatalf("scope approval: %s", kind)
++	}
++	for _, tc := range []ToolCall{
++		autonomyCall(compute, `{"frame_ref":"other"}`),
++		autonomyCall(compute, `{"frame_ref":"frame","_server_context":{}}`),
++		autonomyCall("sandbox-analysis_execute_python_analysis", `{"frame_ref":"frame","python_code":"print(1)"}`),
++		autonomyCall("sandbox-analysis_execute_ml_contract", `{"frame_ref":"frame","contract_ref":"another-plan"}`),
++		autonomyCall("mcp-grafana_update_dashboard", `{"frame_ref":"frame"}`),
++		autonomyCall("grafana-query_execute_planned_query", `{"plan_ref":"plan"}`),
++	} {
++		if req.autonomy.consumeScope(tc, req) {
++			t.Fatalf("scope accepted forbidden call %s", tc.Function.Name)
++		}
++	}
++	foreign := req
++	foreign.SessionID = "other"
++	valid := autonomyCall(compute, `{"frame_ref":"frame"}`)
++	if req.autonomy.consumeScope(valid, foreign) {
++		t.Fatal("scope crossed sessions")
++	}
++	if !req.autonomy.consumeScope(valid, req) || !req.autonomy.consumeScope(autonomyCall("sandbox-analysis_execute_ml_contract", `{"frame_ref":"frame","contract_ref":"plan"}`), req) || req.autonomy.consumeScope(valid, req) {
++		t.Fatal("call budget or exact ML plan not enforced")
++	}
++	fresh := newRequest()
++	if fresh.autonomy.consumeScope(valid, fresh) {
++		t.Fatal("scope survived into a new run")
++	}
++	for _, decision := range []string{"rejected", "approved-with-wrong-id"} {
++		req.RegisterApproval = func(_ context.Context, a ApprovalRequestEvent) (ApprovalWaitFunc, error) {
++			return func(context.Context) (ApprovalResolvedEvent, error) {
++				return ApprovalResolvedEvent{ApprovalID: "wrong-id", Decision: decision}, nil
++			}, nil
++		}
++		if failed, _ := approve(req); !failed || req.autonomy.scope != nil {
++			t.Fatal("denied/mismatched scope retained authority")
++		}
++	}
++}
++
++// A scripted LLM drives the real Run -> approval -> MCP seam. No live model or data.
++func TestAutonomyRunReselectScopeAndBudget(t *testing.T) {
++	ctx := context.Background()
++	computeCalls, registrations := 0, 0
++	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		var rpc struct {
++			Params struct {
++				Name string `json:"name"`
++			} `json:"params"`
++		}
++		var result interface{}
++		switch r.URL.Path {
++		case "/mcp/list-tools":
++			result = map[string]interface{}{"tools": []map[string]interface{}{{"name": "execute_planned_query", "inputSchema": map[string]string{"type": "object"}}, {"name": "profile_dataset", "inputSchema": map[string]string{"type": "object"}}}}
++		case "/mcp/call-tool":
++			if err := json.NewDecoder(r.Body).Decode(&rpc); err != nil {
++				t.Error(err)
++				return
++			}
++			text := `{"ok":true,"refs":{"frame_ref":"frame"}}`
++			if rpc.Params.Name == "profile_dataset" {
++				computeCalls++
++				text = `{"ok":true,"step":"profile_dataset","refs":{"execution_ref":"result"}}`
++			}
++			result = map[string]interface{}{"content": []map[string]string{{"type": "text", "text": text}}}
++		default:
++			result = map[string]interface{}{}
++		}
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(result)
++	}))
++	defer mcpServer.Close()
++	proxy := mcp.NewProxy(ctx, log.DefaultLogger)
++	defer proxy.Close()
++	configs := []mcp.ServerConfig{{ID: "grafana-query", URL: mcpServer.URL, Type: "standard", Enabled: true}, {ID: "sandbox-analysis", URL: mcpServer.URL, Type: "standard", Enabled: true}}
++	for _, config := range configs {
++		if err := proxy.EnsureServer(config); err != nil {
++			t.Fatal(err)
++		}
++	}
++	steps := []ToolCall{
++		autonomyCall("grafana-query_execute_planned_query", `{"plan_ref":"plan"}`),
++		autonomyCall(selectCapabilitiesTool, `{"tools":["sandbox-analysis_profile_dataset"],"skills":["ml-method-selection"]}`),
++		autonomyCall(approveAnalysisScopeTool, `{"frame_ref":"frame","purpose":"Explain change","tools":["sandbox-analysis_profile_dataset"],"max_calls":2}`),
++		autonomyCall("sandbox-analysis_profile_dataset", `{"frame_ref":"frame","seed":1}`),
++		autonomyCall("sandbox-analysis_profile_dataset", `{"frame_ref":"frame","seed":2}`),
++		autonomyCall("sandbox-analysis_profile_dataset", `{"frame_ref":"frame","seed":3}`),
++	}
++	llmCalls := 0
++	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		i := llmCalls
++		llmCalls++
++		message := Message{Role: "assistant", Content: "Evidence-based answer"}
++		if i == 0 {
++			message.Content = `{"tools":["grafana-query_execute_planned_query"],"skills":["data-understanding"]}`
++		} else if i <= len(steps) {
++			step := steps[i-1]
++			step.ID = "provider-reused-id" // never safe to use as a broker key
++			message.Content = ""
++			message.ToolCalls = []ToolCall{step}
++		}
++		if i >= 3 && (!strings.Contains(string(body), "[Selected Agent Skill: ml-method-selection") || strings.Contains(string(body), "[Selected Agent Skill: data-understanding")) {
++			t.Error("replacement skill did not replace prior skill in next request")
++		}
++		if i == len(steps) && !strings.Contains(string(body), nearLimitWarning) {
++			t.Error("expected near-limit nudge after reselection")
++		}
++		respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: message, FinishReason: "stop"}}})
++	}))
++	defer llmServer.Close()
++	loop := NewAgentLoop(NewLLMClient(log.DefaultLogger, llmServer.Client()), proxy, log.DefaultLogger)
++	events := make(chan SSEEvent, 128)
++	cached := map[string]ApprovalResolvedEvent{} // same replay behavior as both production brokers
++	req := LoopRequest{SystemPrompt: "sys", Messages: []Message{{Role: "user", Content: "Analyze the change"}}, GrafanaURL: llmServer.URL, UserRole: "Admin", OrgID: "1", UserID: "u", SessionID: "s", MCPServers: configs, MaxIterations: len(steps) + 1,
++		RegisterApproval: func(_ context.Context, a ApprovalRequestEvent) (ApprovalWaitFunc, error) {
++			if previous, ok := cached[a.ApprovalID]; ok {
++				return func(context.Context) (ApprovalResolvedEvent, error) { return previous, nil }, nil
++			}
++			registrations++
++			decision := "approved"
++			if registrations > 2 {
++				decision = "rejected"
++			}
++			return func(context.Context) (ApprovalResolvedEvent, error) {
++				resolved := ApprovalResolvedEvent{ApprovalID: a.ApprovalID, Decision: decision}
++				cached[a.ApprovalID] = resolved
++				return resolved, nil
++			}, nil
++		},
++	}
++	loop.Run(ctx, req, events)
++	all := collectEvents(events)
++	ids := map[string]bool{}
++	for _, event := range all {
++		if event.Type == "approval_request" {
++			id := event.Data.(ApprovalRequestEvent).ApprovalID
++			if ids[id] || id == "provider-reused-id" {
++				t.Fatal("approval trace/broker identity reused")
++			}
++			ids[id] = true
++		}
++	}
++	if computeCalls != 2 || registrations != 3 || llmCalls != len(steps)+2 {
++		t.Fatalf("compute=%d approval=%d llm=%d; want 2,3,%d", computeCalls, registrations, llmCalls, len(steps)+2)
++	}
++	if all[len(all)-1].Type != "done" {
++		t.Fatal("run did not finish")
++	}
++}
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+index 39bf5a7..fed3b8b 100644
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -104,6 +104,9 @@ type LoopRequest struct {
+ 	// run. They repair omitted dependent arguments without inventing a ref.
+ 	OpaquePlanRef  string
+ 	OpaqueFrameRef string
++
++	// Created by Run, never accepted from an API or restored from model history.
++	autonomy *analysisAutonomy
+ }
+ 
+ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSEEvent) {
+@@ -140,17 +143,16 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 		}
+ 		mcpTools = filtered
+ 	}
++	authorizedTools := append([]mcp.Tool(nil), mcpTools...)
+ 	var prepareGrafanaPreviewAfterExecution, publishReviewedGrafanaPreview bool
+ 	var skillMessages []Message
+ 	mcpTools, skillMessages, prepareGrafanaPreviewAfterExecution, publishReviewedGrafanaPreview = a.selectRelevantTools(ctx, req, mcpTools)
+ 	req.ForceGrafanaPreview = prepareGrafanaPreviewAfterExecution
+ 	req.ForceGrafanaPublication = publishReviewedGrafanaPreview
+-	openAITools := ConvertMCPToolsToOpenAI(mcpTools)
++	req.autonomy = &analysisAutonomy{catalog: authorizedTools, frames: make(map[string]string)}
++	openAITools := autonomyTools(mcpTools, publishReviewedGrafanaPreview)
+ 
+ 	messages := BuildContextWindow(req.SystemPrompt, req.Messages, req.Summary, req.RecentMessageCount)
+-	if len(messages) > 0 && len(skillMessages) > 0 {
+-		messages = append(append([]Message{messages[0]}, skillMessages...), messages[1:]...)
+-	}
+ 
+ 	// Per-run state for transport-failure aggregation. We emit at most one
+ 	// mcp_unavailable event per run, once at least 2 distinct tools have hit
+@@ -181,7 +183,7 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 		// persisting in history: the near-limit warning (produce a final answer
+ 		// before the loop aborts at maxIter) and the truncation nudge (reissue a
+ 		// tool call that was discarded for having truncated arguments).
+-		callMessages := messages
++		callMessages := TrimMessagesToTokenLimit(withSelectedSkills(messages, skillMessages), openAITools, promptBudget)
+ 		var oneShot []Message
+ 		if maxIter >= 2 && iteration == maxIter-2 {
+ 			oneShot = append(oneShot, Message{Role: "system", Content: nearLimitWarning})
+@@ -195,7 +197,7 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 			pendingGrafanaPreviewNudge = false
+ 		}
+ 		if len(oneShot) > 0 {
+-			callMessages = append(append([]Message{}, messages...), oneShot...)
++			callMessages = TrimMessagesToTokenLimit(append(append([]Message{}, callMessages...), oneShot...), openAITools, promptBudget)
+ 		}
+ 
+ 		llmReq := ChatCompletionRequest{
+@@ -320,7 +322,30 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 				},
+ 			})
+ 
+-			toolContent, isError, errorKind := a.executeToolWithApproval(ctx, eventCh, tc, req)
++			var toolContent, errorKind string
++			var isError bool
++			switch {
++			case grafanaPreviewObserved:
++				toolContent, isError, errorKind = "Preview is complete; tools are closed until a new user turn", true, "approval_required"
++			case tc.Function.Name == selectCapabilitiesTool && !publishReviewedGrafanaPreview:
++				selected, skills, result, selectionErr := req.autonomy.selectCapabilities(tc.Function.Arguments, req)
++				if selectionErr != nil {
++					toolContent, isError, errorKind = selectionErr.Error(), true, "tool"
++				} else {
++					toolContent = result
++					if selected != nil {
++						mcpTools, skillMessages = selected, skills
++						openAITools = autonomyTools(mcpTools, false)
++					}
++				}
++			case tc.Function.Name == approveAnalysisScopeTool && !publishReviewedGrafanaPreview:
++				toolContent, isError, errorKind = a.approveAnalysisScope(ctx, eventCh, tc, req)
++			case !hasTool(mcpTools, tc.Function.Name):
++				toolContent, isError, errorKind = "Tool is not active; select an authorized capability before calling it", true, "tool"
++			default:
++				toolContent, isError, errorKind = a.executeToolWithApproval(ctx, eventCh, tc, req)
++			}
++			req.autonomy.observeFrame(tc, toolContent, isError)
+ 
+ 			a.send(ctx, eventCh, SSEEvent{
+ 				Type: "tool_call_result",
+@@ -360,6 +385,10 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
+ 			if !isError {
+ 				successfulExecutionObserved = successfulExecutionObserved || isExecutionResult(toolContent)
+ 				grafanaPreviewObserved = grafanaPreviewObserved || (prepareGrafanaPreviewAfterExecution && tc.Function.Name == "mcp-grafana_update_dashboard")
++				if grafanaPreviewObserved {
++					openAITools = nil
++					req.autonomy.scope = nil
++				}
+ 				a.send(ctx, eventCh, SSEEvent{
+ 					Type: "evidence",
+ 					Data: EvidenceEvent{
+@@ -828,6 +857,14 @@ func (a *AgentLoop) executeToolWithApproval(ctx context.Context, eventCh chan<-
+ 		return a.executeTool(ctx, tc, req)
+ 	}
+ 
++	if req.autonomy.consumeScope(tc, req) {
++		grant := req.autonomy.scope
++		approval := ApprovalRequestEvent{ApprovalID: hostApprovalID(), ToolCallID: tc.ID, ToolName: tc.Function.Name, Risk: "write", Reason: "Authorized by bounded run-local analysis scope " + grant.approvalID, Arguments: tc.Function.Arguments}
++		a.send(ctx, eventCh, SSEEvent{Type: "approval_request", Data: approval})
++		a.send(ctx, eventCh, SSEEvent{Type: "approval_resolved", Data: ApprovalResolvedEvent{ApprovalID: approval.ApprovalID, Decision: "approved", Comment: fmt.Sprintf("scope %s; %d compute attempts remain", grant.approvalID, grant.remaining), ResolvedAt: time.Now().UTC().Format(time.RFC3339)}})
++		return a.executeTool(ctx, tc, req)
++	}
++
+ 	risk := mcp.ClassifyToolRisk(tool, req.MCPServers)
+ 	exactApproval := requiresExactAnalysisApproval(tc.Function.Name)
+ 	if exactApproval {
+@@ -839,7 +876,7 @@ func (a *AgentLoop) executeToolWithApproval(ctx context.Context, eventCh chan<-
+ 	}
+ 
+ 	approval := ApprovalRequestEvent{
+-		ApprovalID: tc.ID,
++		ApprovalID: hostApprovalID(),
+ 		ToolCallID: tc.ID,
+ 		ToolName:   tc.Function.Name,
+ 		Risk:       riskLabel(risk),
+@@ -893,8 +930,8 @@ func (a *AgentLoop) executeToolWithApproval(ctx context.Context, eventCh chan<-
+ 		Data: resolved,
+ 	})
+ 
+-	if resolved.Decision != "approved" {
+-		return fmt.Sprintf("Tool %s was not approved by the user.", tc.Function.Name), true, "approval_denied"
++	if ctx.Err() != nil || resolved.Decision != "approved" || resolved.ApprovalID != approval.ApprovalID {
++		return fmt.Sprintf("Tool %s was not approved for this request.", tc.Function.Name), true, "approval_denied"
+ 	}
+ 
+ 	return a.executeTool(ctx, tc, req)
+diff --git a/pkg/agent/loop_test.go b/pkg/agent/loop_test.go
+index 4d6c841..82555c3 100644
+--- a/pkg/agent/loop_test.go
++++ b/pkg/agent/loop_test.go
+@@ -1266,6 +1266,9 @@ func TestAgentLoop_GrafanaPreviewNoProgressIsBounded(t *testing.T) {
+ 			var nudgeCount int
+ 			for _, body := range requestBodies {
+ 				if strings.Contains(body, "visually inspectable Grafana Preview") {
++					if !strings.Contains(body, "[Selected Agent Skill: dashboarding") {
++						t.Fatal("preview nudge lost the selected skill")
++					}
+ 					nudgeCount++
+ 				}
+ 			}
+diff --git a/pkg/agent/skills/data-understanding/SKILL.md b/pkg/agent/skills/data-understanding/SKILL.md
+index 395ef57..9a59970 100644
+--- a/pkg/agent/skills/data-understanding/SKILL.md
++++ b/pkg/agent/skills/data-understanding/SKILL.md
+@@ -14,6 +14,10 @@ This skill is advisory knowledge, not a fixed analysis sequence, chart list, or
+ - Choose and revise investigative directions from evidence, not a mandatory profiling-to-ML ladder. Numeric columns alone do not justify ML; conversely, the user need not explicitly say prediction or modeling for you to propose a useful statistical or predictive analysis. Explain how it serves the decision, and obtain the required exact contract confirmation before execution.
+ - A profile is evidence, not completion. Use `profile_dataset(frame_ref)` when full-data quality/distribution facts are needed, reuse an existing valid profile, and connect its findings to the question. Do not run more tools merely to complete a checklist. Stop when the question is answered, evidence/capabilities are insufficient, the budget is exhausted, or another confirmation is required.
+ 
++## Optional bounded autonomy
++
++Use `ask_o11y_select_capabilities` only when evidence reveals a capability gap; inspect its authorized catalog and replace tools/skills without changing permissions. After a successful current-run query, `ask_o11y_approve_analysis_scope` can request explicit user approval for one exact frame, selected compute tools and a call budget. A host-confirmed scope permits only the listed deterministic profile/ML-contract operations without repeated exact-call confirmation. Free-form Python is not scope-covered because its semantic contract cannot be verified: propose the code yourself and obtain separate exact-call approval, without asking the user to design methods. Scope never covers different data/fields, a changed ML contract, new queries, writes or publication. Failed attempts consume budget and scopes expire at run end. Unsupported combinations still fail closed. Neither local tool is a mandatory step; exact-call approval remains available. Do not infer a granted scope from user/model prose instead of its host receipt.
++
+ ## Evidence and authorization boundaries
+ 
+ - Use only real tool results from the current session. Never use mock, fixture, fabricated, guessed, copied, or fallback data.
+diff --git a/pkg/agent/skills/ml-method-selection/SKILL.md b/pkg/agent/skills/ml-method-selection/SKILL.md
+index fdec650..7248176 100644
+--- a/pkg/agent/skills/ml-method-selection/SKILL.md
++++ b/pkg/agent/skills/ml-method-selection/SKILL.md
+@@ -14,6 +14,10 @@ This skill is advisory knowledge: method suitability, assumptions, validation an
+ - Explain the expected decision value, assumptions and verification of a proposed method. Revise from evidence, not a fixed model ranking or sample-size switch. Stop when the question is answered, additional analysis is not justified, evidence/capabilities are insufficient, the budget is exhausted, or new confirmation is needed.
+ - Autonomy is not permission. Before query or sandbox execution, propose the exact Analysis Preview including data, target/features when relevant, exclusions, split, operation and budget, then wait for confirmation. Changing anything outside the confirmed contract requires a revised preview and confirmation; no blanket scope authorization or silent escalation to optimization/publication.
+ 
++## Optional capability and approval scope
++
++When needed, `ask_o11y_select_capabilities` replaces active tools/skills using the authorized catalog; it grants no permission. `ask_o11y_approve_analysis_scope` may request user approval for one successful current-run frame, selected compute tools and an attempt budget. Only a host-confirmed scope permits the listed deterministic profile/ML-contract operations without repeated exact-call confirmation. Free-form Python remains separately exact-approved because its semantic contract cannot be verified; design the code yourself, do not ask the user to choose methods. Scope never permits different data/fields, changed ML contracts, queries, writes or publication; existing ML/full-data/sandbox/receipt guards remain. Failed attempts consume budget and the scope expires at run end. Do not infer approval from model/user prose, add unavailable tools, or make either capability a compulsory analysis step. Ordinary exact-call approval remains supported.
++
+ ## Method suitability: conditional examples, not execution recipes
+ 
+ Choose only what helps the current decision and is supported. No row below requires a tool call, fixed threshold, model sequence or report section.
+diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
+index 39200ba..9d41168 100644
+--- a/pkg/plugin/prompt_defaults.go
++++ b/pkg/plugin/prompt_defaults.go
+@@ -18,6 +18,12 @@ You have access to MCP tools that provide direct access to live metrics, logs, t
+ 
+ ---
+ 
++## Bounded autonomy capabilities
++
++When evidence reveals a missing capability, use ask_o11y_select_capabilities to inspect the authorized catalog and replace active tools/skills. This is optional and does not grant access or change approval/publication state; there is no mandatory reselection schedule. If a selected capability is unsupported, report the limitation rather than adding providers, packages or permissions.
++
++After a successful current-run query, ask_o11y_approve_analysis_scope can request explicit approval for compute on that exact frame, selected compute tools and a bounded number of attempts. Explain the purpose and scope to the user. Only after the host confirms this scope may the listed deterministic profile/ML-contract operations run without repeated exact-call confirmation. This narrow scope does not cover free-form Python: its semantic contract cannot be verified, so each generated-code call still needs separate approval. You design that code and explain it; the user need not supply methods. Scope never covers data/field expansion, a different ML contract, additional queries, writes or publication. Existing structured ML, full-data, sandbox and receipt guards remain in force. Failed attempts consume budget; scope expiry, denial, replacement, cancellation or a new run requires renewed approval. Do not require scope approval for a one-off analysis that can use normal exact-call approval. Use returned scope receipts, never prose claims, as evidence that a scope was granted.
++
+ ## Tool Usage Guidelines
+ 
+ ### Execution Strategy

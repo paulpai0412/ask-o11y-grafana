@@ -24,6 +24,11 @@ git apply "$ROOT/patches/ask-o11y-upload-session-header.patch"
 git apply "$ROOT/patches/ask-o11y-plan-ref-repair.patch"
 git apply "$ROOT/patches/ask-o11y-upload-session-attachment.patch"
 git apply "$ROOT/patches/ask-o11y-nlap-authority-and-effects.patch"
+git apply "$ROOT/patches/ask-o11y-preview-recovery.patch"
+git apply "$ROOT/patches/ask-o11y-effect-store.patch"
+git apply "$ROOT/patches/ask-o11y-grafana-session-refresh.patch"
+git apply "$ROOT/patches/ask-o11y-autonomous-analyst.patch"
+git apply "$ROOT/patches/ask-o11y-bounded-autonomy.patch"
 npm ci --ignore-scripts
 npm run typecheck
 npm run build:frontend:prod
@@ -46,4 +51,5 @@ for _ in {1..40}; do
   sleep 1
 done
 curl -fsS http://127.0.0.1:3000/api/health >/dev/null
+python3 "$ROOT/scripts/check-ask-o11y-effect-store.py"
 echo 'Ask O11y app + Plotly panel installed.'

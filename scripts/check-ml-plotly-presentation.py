@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -171,7 +172,23 @@ def main() -> int:
         # PNG assets remain the fallback evidence set.
         assert {"ontology_field_map.png", "distribution_small_multiples.png", "semantic_correlation.png", "feature_target_relationships.png", "error_slice_analysis.png", "confusion_matrix.png", "calibration_curve.png", "threshold_cost_curve.png", "roc_pr_curves.png"} <= png_names
 
-    print("ok: plotly figures for all ML assets")
+    capture = load_module("sandbox_capture_plotly", ROOT / "sandbox-analysis-mcp/capture.py")
+    capture.runtime_modules()[0].close("all")
+    with tempfile.TemporaryDirectory() as tmp:
+        frame_path = Path(tmp) / "frame.json"
+        frame_path.write_text(json.dumps({"frame": {"schema": {"fields": [{"name": "x", "type": "number"}]}, "data": {"values": [[1, 2, 3]]}}, "validity_rules": []}), encoding="utf-8")
+        capture.run("import plotly.graph_objects as go\nfig = go.Figure(data=[go.Scatter(x=[1, 2, 3], y=[2, 1, 4])])\nemit(fig, name='figure.json')", str(frame_path), 42)
+        try:
+            manifest = json.loads(Path("/tmp/sandbox-output/manifest.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AssertionError("sandbox capture manifest is unavailable") from exc
+        assert manifest == [{"path": "/tmp/sandbox-output/plotly-1.json", "mime_type": "application/vnd.plotly.v1+json", "display_name": "figure.json"}], manifest
+        try:
+            shutil.rmtree("/tmp/sandbox-output")
+        except OSError as exc:
+            raise AssertionError("sandbox capture output cleanup failed") from exc
+
+    print("ok: plotly figures for all ML assets and sandbox capture")
     return 0
 
 

@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..d4f5a6b
 --- /dev/null
 +++ b/pkg/agent/skills/data-understanding/SKILL.md
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,49 @@
 +---
 +name: data-understanding
 +description: REQUIRED before analysis of an uploaded, ERP, WFERP, or otherwise unfamiliar dataset. Use for data profiling, schema/ontology inspection, descriptive or diagnostic analysis, data quality review, choosing whether ML is appropriate, and any request to understand a dataset before prediction.
@@ -52,12 +52,15 @@ index 0000000..d4f5a6b
 +## Dashboard/report safety
 +
 +A dashboard is a presentation of completed evidence, not a substitute for profiling. A Preview still requires explicit write intent. For a report, the LLM may choose sections, ordering, titles, collapsed state, and relevant views dynamically, but every numeric claim must reference a deterministic fact and every selected view needs its own data observation, visual observation (or `null` for spec-only), interpretation, limitation, next step, and evidence. The compositor/validator is authoritative; if it rejects a synthesis, repair the synthesis from its exact error without rerunning successful work. `compose_ml_dashboard` returns an opaque `refs.dashboard_ref`; pass it to the sole writer as `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` instead of copying the full dashboard JSON.
++The `synthesis` object must contain exactly `format`, `report_title`, `thesis`, `thesis_evidence`, and `sections`; never include legacy top-level `purpose`, `title`, or `uid` inside it. Pass the new unique `uid` and dashboard `title` as separate `compose_ml_dashboard` arguments. Each section must follow the current tool schema; when validation reports missing or unexpected fields, repair only those fields and do not rerun completed analysis.
 diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
 --- a/pkg/plugin/prompt_defaults.go
 +++ b/pkg/plugin/prompt_defaults.go
-@@ -75,0 +76,5 @@
+@@ -75,0 +76,7 @@
 +### Data-first analysis
 +
-+Before analyzing an unfamiliar upload, ERP/WFERP dataset, or numeric table, use the data-understanding skill and the available inspect/schema tools. Keep dataset IDs, physical fields, date semantics, grain, relations, and opaque refs dynamic from tool evidence. Show an Analysis Preview and wait for confirmation before query or sandbox execution. If the user did not explicitly ask for prediction/modeling, profile the complete authorized frame with ` + "`profile_dataset`" + ` and prefer descriptive, diagnostic, or comparative analysis; do not invoke ML merely because columns are numeric. Profile charts are visual-only aggregations, never a derived dataset or training input. An uploaded ontology remains inferred/observed unless an approved snapshot says otherwise.
++Before analyzing an unfamiliar upload, ERP/WFERP dataset, or numeric table, use the data-understanding skill and the available inspect/schema tools. Keep dataset IDs, physical fields, date semantics, grain, relations, and opaque refs dynamic from tool evidence. Show an Analysis Preview and wait for confirmation before query or sandbox execution. If the user did not explicitly ask for prediction/modeling, profile the complete authorized frame with ` 'profile_dataset'  and prefer descriptive, diagnostic, or comparative analysis; do not invoke ML merely because columns are numeric. Profile charts are visual-only aggregations, never a derived dataset or training input. An uploaded ontology remains inferred/observed unless an approved snapshot says otherwise.
 +
-+When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. For completed profile/analysis results, use ` + "`prepare_ml_report`" + `, ` + "`inspect_report_artifacts`" + `, and ` + "`compose_ml_dashboard`" + ` generically: inspect all bounded facts and artifact/view evidence, then synthesize once with evidence-bound per-view narratives before the sole approved Grafana writer.
++When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. For completed profile/analysis results, use prepare_ml_report, inspect_report_artifacts, and compose_ml_dashboard generically: inspect all bounded facts and artifact/view evidence, then synthesize once with evidence-bound per-view narratives before the sole approved Grafana writer.
++
++The compose_ml_dashboard synthesis must contain exactly format, report_title, thesis, thesis_evidence, and sections; pass uid and title as separate tool arguments, never as legacy top-level synthesis fields.

@@ -289,6 +289,10 @@ def _clean_styling(value: dict[str, Any], where: str) -> dict[str, Any]:
 
 
 def _clean_layout(layout: Any) -> dict[str, Any]:
+    if not isinstance(layout, dict):
+        _reject("layout must be an object")
+    # Plotly adds a default template to every figure; it is host styling, not report evidence.
+    layout = {key: value for key, value in layout.items() if key != "template"}
     _check_mapping_keys(layout, ALLOWED_LAYOUT_KEYS, "layout")
     cleaned: dict[str, Any] = {}
     for key, value in layout.items():
@@ -296,13 +300,16 @@ def _clean_layout(layout: Any) -> dict[str, Any]:
         if value is None:
             continue
         if key == "title":
-            cleaned[key] = _check_string(str(value), where)
+            title_text = value.get("text", "") if isinstance(value, dict) else value
+            cleaned[key] = _check_string(str(title_text), where)
             continue
         if key in AXIS_LAYOUT_KEYS:
             axis = _check_mapping_keys(value, ALLOWED_AXIS_KEYS, where)
             cleaned_axis: dict[str, Any] = {}
             for axis_key, axis_value in axis.items():
                 axis_where = f"{where}.{axis_key}"
+                if axis_key == "title" and isinstance(axis_value, dict):
+                    axis_value = axis_value.get("text", "")
                 if isinstance(axis_value, str):
                     cleaned_axis[axis_key] = _check_string(axis_value, axis_where)
                 elif isinstance(axis_value, list):

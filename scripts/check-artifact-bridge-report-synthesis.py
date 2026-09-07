@@ -52,6 +52,9 @@ def main() -> int:
     assert compose_schema["properties"]["uid"]["maxLength"] == 40
     synthesis_schema = compose_schema["properties"]["synthesis"]
     assert set(synthesis_schema["required"]) == {"format", "report_title", "thesis", "thesis_evidence", "sections"}
+    assert "Top-level keys are exactly" in synthesis_schema["description"]
+    assert "separate compose arguments" in synthesis_schema["description"]
+    assert "separately from synthesis" in compose_schema["properties"]["title"]["description"]
     section_schema = synthesis_schema["properties"]["sections"]["items"]
     assert set(section_schema["required"]) == {"section_id", "title", "purpose", "collapsed", "narrative_blocks", "panels"}
     panel_schema = section_schema["properties"]["panels"]["items"]
@@ -95,6 +98,20 @@ def main() -> int:
         spec_only = bridge.inspect_report_artifacts({"report_context_ref": report_context_ref, "artifact_ids": ["static"], "mode": "spec", "_server_context": context})
         assert spec_only["ok"] and not spec_only["_mcp_content"], spec_only
         static_inspection_ref = spec_only["refs"]["inspection_ref"]
+
+        legacy_shape = synthesis()
+        legacy_shape.update({"purpose": "legacy", "title": "legacy", "uid": "legacy"})
+        legacy_rejected = bridge.compose_ml_dashboard({
+            "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": legacy_shape,
+            "uid": "legacy-shape", "title": "Legacy shape", "_server_context": context,
+        })
+        assert not legacy_rejected["ok"] and "unexpected: purpose, title, uid" in legacy_rejected["error"], legacy_rejected
+
+        missing_dashboard_args = bridge.compose_ml_dashboard({
+            "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": synthesis(),
+            "title": "Missing UID", "_server_context": context,
+        })
+        assert not missing_dashboard_args["ok"] and "dashboard uid and title are required" in missing_dashboard_args["error"] and "dashboard arguments" in missing_dashboard_args["instruction"], missing_dashboard_args
 
         without_receipt = bridge.compose_ml_dashboard({
             "report_context_ref": report_context_ref, "inspection_refs": [], "synthesis": synthesis(),

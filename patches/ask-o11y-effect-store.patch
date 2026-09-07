@@ -1,0 +1,107 @@
+diff --git a/pkg/agent/effect_receipts.go b/pkg/agent/effect_receipts.go
+--- a/pkg/agent/effect_receipts.go
++++ b/pkg/agent/effect_receipts.go
+@@ -72,13 +72,20 @@
+ func dashboardOnce(identity []byte, invoke func() (*mcp.CallToolResult, error)) (*mcp.CallToolResult, error) {
+ 	root := os.Getenv("ASKO11Y_EFFECT_STORE")
+ 	if root == "" {
++		// Grafana forwards plugin-specific INI settings without exposing the host environment.
++		root = os.Getenv("GF_PLUGIN_ASKO11Y_EFFECT_STORE")
++	}
++	if root == "" {
+ 		data := os.Getenv("GF_PATHS_DATA")
+ 		if data == "" {
+-			return nil, fmt.Errorf("dashboard writer requires a persistent ASKO11Y_EFFECT_STORE or GF_PATHS_DATA")
++			return nil, fmt.Errorf("dashboard writer requires a persistent GF_PLUGIN_ASKO11Y_EFFECT_STORE, ASKO11Y_EFFECT_STORE or GF_PATHS_DATA")
+ 		}
+ 		root = filepath.Join(data, "ask-o11y-operations")
+ 	}
+ 	if err := os.MkdirAll(root, 0700); err != nil {
++		return nil, err
++	}
++	if err := os.Chmod(root, 0700); err != nil {
+ 		return nil, err
+ 	}
+ 	digest := sha256.Sum256(identity)
+diff --git a/pkg/agent/effect_receipts_test.go b/pkg/agent/effect_receipts_test.go
+--- a/pkg/agent/effect_receipts_test.go
++++ b/pkg/agent/effect_receipts_test.go
+@@ -11,6 +11,78 @@
+ 	"strings"
+ 	"testing"
+ )
++
++func TestDashboardReceiptStoreConfiguration(t *testing.T) {
++	for _, source := range []string{"plugin", "plugin-over-data", "explicit", "data", "missing"} {
++		t.Run(source, func(t *testing.T) {
++			root := t.TempDir()
++			for _, key := range []string{"ASKO11Y_EFFECT_STORE", "GF_PLUGIN_ASKO11Y_EFFECT_STORE", "GF_PATHS_DATA"} {
++				t.Setenv(key, "")
++			}
++			switch source {
++			case "plugin", "plugin-over-data":
++				t.Setenv("GF_PLUGIN_ASKO11Y_EFFECT_STORE", root)
++				if source == "plugin-over-data" {
++					t.Setenv("GF_PATHS_DATA", filepath.Join(root, "unused"))
++				}
++			case "explicit":
++				t.Setenv("ASKO11Y_EFFECT_STORE", root)
++				t.Setenv("GF_PLUGIN_ASKO11Y_EFFECT_STORE", filepath.Join(root, "unused"))
++			case "data":
++				t.Setenv("GF_PATHS_DATA", root)
++				root = filepath.Join(root, "ask-o11y-operations")
++			}
++			calls := 0
++			for i := 0; i < 2; i++ {
++				_, err := dashboardOnce([]byte("config-test"), func() (*mcp.CallToolResult, error) {
++					calls++
++					return &mcp.CallToolResult{}, nil
++				})
++				if source == "missing" {
++					if err == nil || calls != 0 {
++						t.Fatalf("missing config dispatched writer: calls=%d err=%v", calls, err)
++					}
++					continue
++				}
++				if err != nil {
++					t.Fatal(err)
++				}
++			}
++			if source != "missing" {
++				if calls != 1 {
++					t.Fatalf("writer executed %d times, want durable replay", calls)
++				}
++				operation := fmt.Sprintf("%x", sha256.Sum256([]byte("config-test")))
++				if _, err := os.Stat(filepath.Join(root, operation, "completion.json")); err != nil {
++					t.Fatalf("receipt missing from configured store: %v", err)
++				}
++			}
++		})
++	}
++}
++
++func TestDashboardReceiptStoreTightensPermissions(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "store")
++	if err := os.Mkdir(root, 0755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(root, 0755); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("ASKO11Y_EFFECT_STORE", root)
++	if _, err := dashboardOnce([]byte("private-root"), func() (*mcp.CallToolResult, error) {
++		return &mcp.CallToolResult{}, nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Stat(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := info.Mode().Perm(); got != 0700 {
++		t.Fatalf("effect store mode = %o, want 700", got)
++	}
++}
+ 
+ func TestNLAPDashboardReceiptReplayAndUnknown(t *testing.T) {
+ 	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())

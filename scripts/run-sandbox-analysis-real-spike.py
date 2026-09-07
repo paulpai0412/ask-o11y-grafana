@@ -50,6 +50,7 @@ def main() -> int:
                 "frame_ref": frame_ref,
                 "python_code": "import catboost, imblearn, lightgbm, optuna, plotly, scipy, seaborn, shap, statsmodels, xgboost\nfrom sklearn.ensemble import RandomForestRegressor\nimport matplotlib.pyplot as plt\nX = df[['load_mw', 'ambient_c']]\nmodel = RandomForestRegressor(n_estimators=20, random_state=42).fit(X, df['heat_rate'])\nvalues = shap.TreeExplainer(model)(X)\ndisplay(df[['timestamp', 'heat_rate']])\nshap.plots.beeswarm(values, show=False)\nemit(plt.gcf(), name='shap-beeswarm')",
                 "seed": 42,
+                "presentation_mode": "image",
                 "_server_context": context,
             }
         )
