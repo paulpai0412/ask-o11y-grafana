@@ -7,6 +7,7 @@ import ast
 import base64
 import contextlib
 import csv
+import queue
 import hashlib
 import io
 import importlib.util
@@ -16,6 +17,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import urllib.parse
@@ -75,6 +77,8 @@ MAX_DERIVED_ROWS = 5_000
 MAX_DERIVED_BYTES = 4 * 1024 * 1024
 DERIVED_FRAME_MIME = "application/vnd.ask-o11y.dataframe+json"
 DEFAULT_SEED = 42
+DEFAULT_PRESENTATION_MODE = "plotly"
+PRESENTATION_MODES = ("plotly", "image")
 ARTIFACT_PUBLIC_BASE = os.environ.get("ARTIFACT_PUBLIC_BASE", "http://127.0.0.1:8777").rstrip("/")
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
@@ -84,13 +88,14 @@ TOOLS = [
     {"name": "get_ml_capabilities", "description": "Inspect actual imports and package versions in the configured sandbox image, without user data. Returns supported trusted task/split combinations and sequential global-budget limits; unsupported or unavailable algorithms are never substituted.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
     {
         "name": "execute_python_analysis",
-        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. The sandbox receives df, pd, np, display(value), and emit(value, name=None). Derived datasets and model-input chaining are disabled. Arbitrary Python outputs cannot claim verified ML; use execute_ml_contract for that. Name JSON results *.json for bounded inline return and DataFrame/string downloads *.csv for a signed URL. The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna; use Matplotlib PNG when a plot may become a Grafana panel.",
+        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. Plotly is the default presentation: emit Plotly figures as *.json so the host can create interactive panels. Use presentation_mode='image' only when the user explicitly requests a static PNG. The sandbox receives df, pd, np, display(value), and emit(value, name=None). Derived datasets and model-input chaining are disabled. Arbitrary Python outputs cannot claim verified ML; use execute_ml_contract for that. Name JSON results *.json for bounded inline return and DataFrame/string downloads *.csv for a signed URL. The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "frame_ref": {"type": "string", "description": "Opaque authorized grafana-frame artifact ref."},
                 "python_code": {"type": "string", "maxLength": MAX_CODE_BYTES, "description": "Python source executed only inside the isolated sandbox."},
                 "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295, "default": DEFAULT_SEED},
+                "presentation_mode": {"type": "string", "enum": list(PRESENTATION_MODES), "default": DEFAULT_PRESENTATION_MODE, "description": "Defaults to interactive Plotly; set to image only for an explicitly requested static PNG."},
             },
             "required": ["frame_ref", "python_code"],
             "additionalProperties": False,
@@ -161,6 +166,7 @@ TOOLS = [
                 "provenance_ref": {"type": "string", "description": "Opaque prior sandbox-provenance ref."},
                 "python_code": {"type": "string", "maxLength": MAX_CODE_BYTES, "description": "Complete replacement Python source."},
                 "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295, "default": DEFAULT_SEED},
+                "presentation_mode": {"type": "string", "enum": list(PRESENTATION_MODES), "default": DEFAULT_PRESENTATION_MODE, "description": "Defaults to interactive Plotly; set to image only for an explicitly requested static PNG."},
             },
             "required": ["provenance_ref", "python_code"],
             "additionalProperties": False,
@@ -405,6 +411,85 @@ def wrapped_document_code(python_code: str, input_format: str, seed: int) -> str
     return f"from capture import run_document\nrun_document({python_code!r}, '/tmp/input-document.{input_format}', {input_format!r}, {seed})"
 
 
+POST_COMPLETE_GRACE_SECONDS = 10
+
+
+def _is_execution_complete(line: Any) -> bool:
+    raw = line.decode("utf-8", errors="ignore") if isinstance(line, bytes) else line
+    if not isinstance(raw, str):
+        return False
+    if raw.startswith("data:"):
+        raw = raw[5:].strip()
+    try:
+        return json.loads(raw).get("type") == "execution_complete"
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+class _ExecutionCompleteResponse:
+    """Drain trailing SSE frames, then bound a stream that never closes."""
+
+    def __init__(self, response: Any):
+        self._response = response
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._response, name)
+
+    def iter_lines(self):
+        frames: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=128)
+
+        def pump() -> None:
+            try:
+                for line in self._response.iter_lines():
+                    frames.put(("line", line))
+            except Exception as exc:
+                frames.put(("error", exc))
+            finally:
+                frames.put(("done", None))
+
+        reader = threading.Thread(target=pump, name="opensandbox-sse-reader", daemon=True)
+        reader.start()
+        complete_deadline = None
+        while True:
+            timeout = None if complete_deadline is None else max(0, complete_deadline - time.monotonic())
+            try:
+                kind, payload = frames.get(timeout=timeout)
+            except queue.Empty:
+                self._response.close()
+                return
+            if kind == "line":
+                yield payload
+                if _is_execution_complete(payload) and complete_deadline is None:
+                    complete_deadline = time.monotonic() + POST_COMPLETE_GRACE_SECONDS
+            elif kind == "error":
+                if complete_deadline is None:
+                    raise payload
+                return
+            else:
+                return
+
+
+class _ExecutionCompleteStream:
+    def __init__(self, stream: Any):
+        self._stream = stream
+
+    def __enter__(self) -> _ExecutionCompleteResponse:
+        return _ExecutionCompleteResponse(self._stream.__enter__())
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> Any:
+        return self._stream.__exit__(exc_type, exc_value, traceback)
+
+
+class _ExecutionCompleteSSEClient:
+    """Wrap the SDK client whose sync adapter waits for HTTP EOF after completion."""
+
+    def __init__(self, client: Any):
+        self._client = client
+
+    def stream(self, *args: Any, **kwargs: Any) -> _ExecutionCompleteStream:
+        return _ExecutionCompleteStream(self._client.stream(*args, **kwargs))
+
+
 def serialize_execution(execution: Any) -> dict[str, Any]:
     results = []
     for result in execution.result:
@@ -435,8 +520,23 @@ def serialize_execution(execution: Any) -> dict[str, Any]:
     }
 
 
+def read_sandbox_bytes(filesystem: Any, path: str, range_header: str) -> bytes:
+    last_error = None
+    for attempt in range(30):
+        try:
+            return filesystem.read_bytes(path, range_header=range_header)
+        except Exception as exc:
+            last_error = exc
+            if attempt == 29:
+                raise
+            time.sleep(0.1)
+    if last_error is None:  # pragma: no cover
+        raise RuntimeError(f"failed to read sandbox file: {path}")
+    raise last_error
+
+
 def read_captured_outputs(filesystem: Any) -> list[dict[str, Any]]:
-    manifest_bytes = filesystem.read_bytes("/tmp/sandbox-output/manifest.json", range_header=f"bytes=0-{MAX_OUTPUT_BYTES}")
+    manifest_bytes = read_sandbox_bytes(filesystem, "/tmp/sandbox-output/manifest.json", f"bytes=0-{MAX_OUTPUT_BYTES}")
     if len(manifest_bytes) > MAX_OUTPUT_BYTES:
         raise WorkflowContractError("sandbox output manifest exceeds limit")
     try:
@@ -459,7 +559,7 @@ def read_captured_outputs(filesystem: Any) -> list[dict[str, Any]]:
             raise WorkflowContractError("sandbox output display name is invalid")
         if path.parent != output_root or mime_type not in allowed_mime:
             raise WorkflowContractError("sandbox output path or MIME type is not allowed")
-        payload = filesystem.read_bytes(str(path), range_header=f"bytes=0-{MAX_OUTPUT_BYTES}")
+        payload = read_sandbox_bytes(filesystem, str(path), f"bytes=0-{MAX_OUTPUT_BYTES}")
         total += len(payload)
         if total > MAX_OUTPUT_BYTES:
             raise WorkflowContractError("sandbox captured outputs exceed limit")
@@ -477,7 +577,7 @@ def read_captured_outputs(filesystem: Any) -> list[dict[str, Any]]:
 def read_captured_logs(filesystem: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     logs = []
     for name in ("stdout", "stderr"):
-        payload = filesystem.read_bytes(f"/tmp/sandbox-output/{name}.txt", range_header=f"bytes=0-{MAX_LOG_BYTES}")
+        payload = read_sandbox_bytes(filesystem, f"/tmp/sandbox-output/{name}.txt", f"bytes=0-{MAX_LOG_BYTES}")
         if len(payload) > MAX_LOG_BYTES:
             raise WorkflowContractError(f"sandbox {name} exceeds limit")
         try:
@@ -489,7 +589,7 @@ def read_captured_logs(filesystem: Any) -> tuple[list[dict[str, Any]], list[dict
 
 
 def read_input_audit(filesystem: Any) -> dict[str, Any]:
-    payload = filesystem.read_bytes("/tmp/sandbox-output/audit.json", range_header="bytes=0-65535")
+    payload = read_sandbox_bytes(filesystem, "/tmp/sandbox-output/audit.json", "bytes=0-65535")
     try:
         audit = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -532,7 +632,13 @@ def execute_opensandbox_input(input_path: str, input_data: str | bytes, source: 
             connection_config=connection,
         )
         sandbox.files.write_files([WriteEntry(path=input_path, data=input_data, mode=600)])
-        execution = CodeInterpreterSync.create(sandbox=sandbox).codes.run(
+        code_service = CodeInterpreterSync.create(sandbox=sandbox).codes
+        # opensandbox-code-interpreter 0.1.2 can leave the HTTP stream open after
+        # emitting execution_complete; consume the terminal event and close it.
+        sse_client = getattr(code_service, "_sse_client", None)
+        if sse_client is not None:
+            setattr(code_service, "_sse_client", _ExecutionCompleteSSEClient(sse_client))
+        execution = code_service.run(
             source,
             language=SupportedLanguage.PYTHON,
             handlers=ExecutionHandlersSync(skip_accumulation=capture_required),
@@ -1224,10 +1330,14 @@ def execute_python_analysis(
     parent_provenance_ref: str | None = None,
 ) -> dict[str, Any]:
     try:
-        context = context_from_args(args)
-        inputs = {key: value for key, value in args.items() if key not in {"context", "_server_context"}}
+        presentation_mode = args.get("presentation_mode", DEFAULT_PRESENTATION_MODE)
+        if presentation_mode not in PRESENTATION_MODES:
+            return error_response(step=step, error=f"presentation_mode must be one of: {', '.join(PRESENTATION_MODES)}", recoverable=False, instruction="Stop; use the default Plotly presentation or explicitly select image for a static PNG.")
+        normalized_args = {**args, "presentation_mode": presentation_mode}
+        context = context_from_args(normalized_args)
+        inputs = {key: value for key, value in normalized_args.items() if key not in {"context", "_server_context"}}
         inputs.setdefault("seed", DEFAULT_SEED)
-        return ARTIFACTS.run_once(context, step, inputs, lambda: _execute_python_analysis(args, executor, step=step, parent_provenance_ref=parent_provenance_ref))
+        return ARTIFACTS.run_once(context, step, inputs, lambda: _execute_python_analysis(normalized_args, executor, step=step, parent_provenance_ref=parent_provenance_ref))
     except (PermissionError, WorkflowContractError, OSError, TypeError, ValueError) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Do not repeat an indeterminate operation; inspect its existing execution evidence.")
 
@@ -1239,12 +1349,16 @@ def _execute_python_analysis(
     step: str,
     parent_provenance_ref: str | None,
 ) -> dict[str, Any]:
-    unexpected = sorted(set(args) - {"frame_ref", "python_code", "seed", "context", "_server_context"})
+    presentation_mode = args.get("presentation_mode", DEFAULT_PRESENTATION_MODE)
+    unexpected = sorted(set(args) - {"frame_ref", "python_code", "seed", "presentation_mode", "context", "_server_context"})
     if unexpected:
         return error_response(step=step, error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; pass only the declared opaque frame ref, Python source, and seed.")
     frame_ref = args.get("frame_ref")
     python_code = args.get("python_code")
     seed = args.get("seed", DEFAULT_SEED)
+    presentation_mode = args.get("presentation_mode", DEFAULT_PRESENTATION_MODE)
+    if presentation_mode not in PRESENTATION_MODES:
+        return error_response(step=step, error=f"presentation_mode must be one of: {', '.join(PRESENTATION_MODES)}", recoverable=False, instruction="Stop; use the default Plotly presentation or explicitly select image for a static PNG.")
     if not isinstance(frame_ref, str):
         return error_response(step=step, error="frame_ref is required", recoverable=False, instruction="Stop; Grafana Query must return a frame_ref first.")
     if not isinstance(python_code, str) or not python_code.strip():
@@ -1282,8 +1396,26 @@ def _execute_python_analysis(
         or validity.get("rules") != validity_rules
     ):
         return error_response(step=step, error="sandbox execution returned an invalid trusted input audit", recoverable=False, instruction="Stop; do not trust outputs without host-verified validity evidence.")
+    if not execution.get("error"):
+        output_mimes = {
+            str(mime)
+            for result in execution.get("results", [])
+            if isinstance(result, dict) and isinstance(result.get("mime"), dict)
+            for mime in result["mime"]
+        }
+        required_mime = "application/vnd.plotly.v1+json" if presentation_mode == "plotly" else "image/png"
+        if required_mime not in output_mimes:
+            requested = "Plotly figure JSON" if presentation_mode == "plotly" else "PNG"
+            return error_response(
+                step=step,
+                error=f"{requested} presentation requires an output with MIME {required_mime}; PNG-only output is not accepted by default" if presentation_mode == "plotly" else f"image presentation requires an output with MIME {required_mime}",
+                recoverable=True,
+                instruction="Revise the same Python analysis with Plotly figures emitted as *.json; do not rerun the query or silently use PNG." if presentation_mode == "plotly" else "Revise the same Python analysis to emit a valid PNG; do not rerun the query.",
+                evidence={"presentation_mode": presentation_mode, "output_mimes": sorted(output_mimes)},
+            )
     settings = runtime_settings() if executor is execute_opensandbox else {"image": "self-check", "runtime_class": "fake"}
     summary = output_summary(execution)
+    summary["presentation_mode"] = presentation_mode
     output_run_id = ARTIFACTS.create_run(context)
     code_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-code", {"sha256": code_sha256, "source": python_code})
     provenance = {
@@ -1295,6 +1427,7 @@ def _execute_python_analysis(
         "code_ref": code_ref,
         "input_frame_ref": frame_ref,
         "executor_kind": step,
+        "presentation_mode": presentation_mode,
         "trusted_ml_contract": step == "execute_ml_contract",
         "input_frame_sha256": hashlib.sha256(json.dumps(frame, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
         "input_fields": field_names,
@@ -1548,7 +1681,7 @@ def inspect_python_analysis(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def revise_python_analysis(args: dict[str, Any], executor: Callable[[str, str, int], dict[str, Any]] = execute_opensandbox) -> dict[str, Any]:
-    unexpected = sorted(set(args) - {"provenance_ref", "python_code", "seed", "context", "_server_context"})
+    unexpected = sorted(set(args) - {"provenance_ref", "python_code", "seed", "presentation_mode", "context", "_server_context"})
     if unexpected:
         return error_response(step="revise_python_analysis", error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; pass only provenance_ref, replacement Python, and seed.")
     provenance_ref = args.get("provenance_ref")
@@ -1562,7 +1695,7 @@ def revise_python_analysis(args: dict[str, Any], executor: Callable[[str, str, i
     if not isinstance(provenance.get("input_frame_ref"), str):
         return error_response(step="revise_python_analysis", error="prior revision used a document input", recoverable=False, instruction="Call execute_python_preprocessing with the retained input_document_ref and complete replacement code.")
     return execute_python_analysis(
-        {"frame_ref": provenance["input_frame_ref"], "python_code": args.get("python_code"), "seed": args.get("seed", DEFAULT_SEED), "_server_context": context},
+        {"frame_ref": provenance["input_frame_ref"], "python_code": args.get("python_code"), "seed": args.get("seed", DEFAULT_SEED), "presentation_mode": args.get("presentation_mode", DEFAULT_PRESENTATION_MODE), "_server_context": context},
         executor=executor,
         step="revise_python_analysis",
         parent_provenance_ref=provenance_ref,
@@ -1779,7 +1912,7 @@ def self_check() -> None:
                 "input_audit": {"input_rows": input_rows, "valid_rows": input_rows - excluded_rows, "excluded_rows": excluded_rows, "rules": bundle["validity_rules"]},
             }
 
-        args = {"frame_ref": frame_ref, "python_code": "display(df)", "seed": 7, "_server_context": context}
+        args = {"frame_ref": frame_ref, "python_code": "display(df)", "seed": 7, "presentation_mode": "image", "_server_context": context}
         result = execute_python_analysis(args, executor=fake_executor)
         assert result["ok"] and result["output_summary"]["mime_types"] == ["application/json", "image/png", "text/csv", "text/html", "text/plain"]
         assert result["output_summary"]["inline_results"] == [
@@ -1801,6 +1934,16 @@ def self_check() -> None:
         assert observed["bundle"]["validity_rules"][0]["field"] == "heat_rate_valid"
         assert "display(df)" not in json.dumps(result) and '"values"' not in json.dumps(result)
         assert ARTIFACTS.read_json(context, result["refs"]["execution_ref"])["results"][3]["mime"]["image/png"] == "aW1hZ2U="
+        default_result = execute_python_analysis({"frame_ref": frame_ref, "python_code": "display(df)", "seed": 6, "_server_context": context}, executor=fake_executor)
+        assert not default_result["ok"] and "Plotly figure JSON presentation requires" in default_result["error"]
+
+        def fake_plotly_executor(frame_bundle_json: str, code: str, seed: int) -> dict[str, Any]:
+            execution = fake_executor(frame_bundle_json, code, seed)
+            execution["results"].append({"text": None, "timestamp": 1, "mime": {"application/vnd.plotly.v1+json": json.dumps({"data": [], "layout": {}, "config": {}})}, "display_name": "figure.json"})
+            return execution
+
+        plotly_result = execute_python_analysis({"frame_ref": frame_ref, "python_code": "emit(figure, name='figure.json')", "seed": 10, "_server_context": context}, executor=fake_plotly_executor)
+        assert plotly_result["ok"] and plotly_result["output_summary"]["presentation_mode"] == "plotly"
 
         source = uploaded_datasets.store_upload(context=context, session_id="session-self-check", filename="source.csv", raw=b"old_a,old_b\n1,3\n2,4\n")
         document_run = ARTIFACTS.create_run(context)
@@ -1824,7 +1967,7 @@ def self_check() -> None:
         assert listed["ok"] and any(item["provenance_ref"] == result["refs"]["provenance_ref"] for item in listed["analyses"]), listed
         inspected = inspect_python_analysis({"provenance_ref": result["refs"]["provenance_ref"], "_server_context": context})
         assert inspected["ok"] and inspected["python_code"] == "display(df)" and "values" not in inspected
-        revised = revise_python_analysis({"provenance_ref": result["refs"]["provenance_ref"], "python_code": "display(df.head())", "seed": 8, "_server_context": context}, executor=fake_executor)
+        revised = revise_python_analysis({"provenance_ref": result["refs"]["provenance_ref"], "python_code": "display(df.head())", "seed": 8, "presentation_mode": "image", "_server_context": context}, executor=fake_executor)
         assert revised["ok"] and revised["step"] == "revise_python_analysis" and revised["provenance"]["parent_provenance_ref"] == result["refs"]["provenance_ref"]
         foreign = execute_python_analysis({**args, "_server_context": {"org_id": "2", "user_id": "attacker", "session_id": "attacker-session"}}, executor=lambda *_: (_ for _ in ()).throw(AssertionError("must not execute")))
         assert not foreign["ok"] and "mismatch" in foreign["error"]
@@ -1832,6 +1975,26 @@ def self_check() -> None:
         assert not oversized["ok"] and "exceeds" in oversized["error"]
         policy = sandbox_policy()
         assert policy["network_default_action"] == "deny" and policy["env"] == {} and policy["volumes"] == [] and policy["resource"] == {"cpu": "4", "memory": "4Gi"}
+
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter(["data: {\"type\":\"init\"}", "data: {\"type\":\"execution_complete\"}", "data: {\"type\":\"stdout\"}"])
+
+        class FakeStream:
+            def __enter__(self):
+                return FakeResponse()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        class FakeClient:
+            def stream(self, *args, **kwargs):
+                return FakeStream()
+
+        with _ExecutionCompleteSSEClient(FakeClient()).stream("POST", "/code") as response:
+            assert list(response.iter_lines()) == ["data: {\"type\":\"init\"}", "data: {\"type\":\"execution_complete\"}", "data: {\"type\":\"stdout\"}"]
         raw = handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "execute_python_analysis", "arguments": {**args, "frame": []}}})
         assert raw is not None
         try:

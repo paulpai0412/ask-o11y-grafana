@@ -859,7 +859,7 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
         )
         ml_dashboard_contract.validate_preview_dashboard(dashboard)
     except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
-        return error_response(step=step, error=str(exc), recoverable=True, instruction="Revise only the LLM report synthesis; do not rerun query or analysis.")
+        return error_response(step=step, error=str(exc), recoverable=True, instruction="Revise only the report synthesis or missing dashboard arguments; do not rerun query or analysis.")
     dashboard_run_id = ARTIFACTS.create_run(context)
     dashboard_ref = ARTIFACTS.write_json(context, dashboard_run_id, "dashboard", dashboard)
     result = success_response(
@@ -938,7 +938,7 @@ SECTION_SYNTHESIS_SCHEMA = {
 }
 REPORT_SYNTHESIS_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "description": "Exact evidence-bound report shape. Narrative text must contain no digits; put every number in evidence using fact_ref and an allowed format.",
+    "description": "Exact evidence-bound report shape. Top-level keys are exactly format, report_title, thesis, thesis_evidence, and sections; pass uid and dashboard title as separate compose arguments. Narrative text must contain no digits; put every number in evidence using fact_ref and an allowed format.",
     "properties": {
         "format": {"const": ml_report_contract.REPORT_FORMAT},
         "report_title": {"type": "string"},
@@ -965,11 +965,18 @@ TOOLS = [{
     "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"execution_ref": {"type": "string"}, "target_session_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{16,128}$"}}, "required": ["execution_ref", "target_session_id"]},
 }, {
     "name": "prepare_ml_report",
-    "description": "Return a bounded artifact and deterministic fact catalog for one complete report so the host LLM can synthesize flow and per-chart narratives without raw rows or signed URLs.",
+    "description": "Return a bounded artifact and deterministic fact catalog for one complete report. Prefer the host-owned report_manifest_ref; execution_ref plus manifest_output_index is a legacy continuation adapter for successful pre-manifest executions only.",
     "inputSchema": {
         "type": "object", "additionalProperties": False,
-        "properties": {"report_manifest_ref": {"type": "string", "description": "Host-owned opaque report-manifest-v1 ref returned by Sandbox."}},
-        "required": ["report_manifest_ref"],
+        "properties": {
+            "report_manifest_ref": {"type": "string", "description": "Preferred host-owned opaque report-manifest-v1 ref returned by Sandbox."},
+            "execution_ref": {"type": "string", "description": "Legacy continuation only: existing successful sandbox-execution ref; never guess or use for new analysis."},
+            "manifest_output_index": {"type": "integer", "minimum": 0, "description": "Legacy continuation only: exact existing manifest output index from the prior successful execution."},
+        },
+        "anyOf": [
+            {"required": ["report_manifest_ref"]},
+            {"required": ["execution_ref", "manifest_output_index"]},
+        ],
     },
 }, {
     "name": "inspect_report_artifacts",
@@ -993,7 +1000,7 @@ TOOLS = [{
             "inspection_refs": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True, "items": {"type": "string"}},
             "synthesis": REPORT_SYNTHESIS_SCHEMA,
             "uid": {"type": "string", "maxLength": 40, "description": "A new unique Preview dashboard UID for this analysis session; include a short session/upload suffix, keep it at most 40 characters, and never reuse another session's UID."},
-            "title": {"type": "string"},
+            "title": {"type": "string", "description": "Dashboard title; pass separately from synthesis."},
             "output_mode": {"type": "string", "enum": ["ref", "full"], "default": "ref", "description": "ref keeps the composed dashboard opaque and small; full is only for local contract tests."},
         },
         "required": ["report_context_ref", "inspection_refs", "synthesis", "uid", "title"],
@@ -1023,7 +1030,7 @@ def handle_rpc(msg: dict[str, Any]):
         handlers = {
             "resolve_dashboard_refs": (resolve_dashboard_refs, {"dashboard", "_server_context"}),
             "grant_artifact_reuse": (grant_artifact_reuse, {"execution_ref", "target_session_id", "_server_context"}),
-            "prepare_ml_report": (prepare_ml_report, {"report_manifest_ref", "_server_context"}),
+            "prepare_ml_report": (prepare_ml_report, {"report_manifest_ref", "execution_ref", "manifest_output_index", "_server_context"}),
             "inspect_report_artifacts": (inspect_report_artifacts, {"report_context_ref", "artifact_ids", "mode", "_server_context"}),
             "compose_ml_dashboard": (compose_ml_dashboard, {"report_context_ref", "inspection_refs", "synthesis", "uid", "title", "output_mode", "_server_context"}),
         }

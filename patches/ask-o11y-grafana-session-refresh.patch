@@ -1,0 +1,247 @@
+diff --git a/src/services/__tests__/agentClient.test.ts b/src/services/__tests__/agentClient.test.ts
+index 7c941b4..350aa78 100644
+--- a/src/services/__tests__/agentClient.test.ts
++++ b/src/services/__tests__/agentClient.test.ts
+@@ -1,4 +1,11 @@
+-import { runAgentDetached, reconnectToAgentRun, readSSEStream, AgentCallbacks, AgentRunRequest } from '../agentClient';
++import {
++  resolveAgentApproval,
++  runAgentDetached,
++  reconnectToAgentRun,
++  readSSEStream,
++  AgentCallbacks,
++  AgentRunRequest,
++} from '../agentClient';
+ 
+ function createMockBody(lines: string[]) {
+   const encoder = new TextEncoder();
+@@ -115,6 +122,42 @@ describe('runAgentDetached', () => {
+   });
+ });
+ 
++describe('Grafana session refresh', () => {
++  const originalFetch = global.fetch;
++
++  afterEach(() => {
++    global.fetch = originalFetch;
++    jest.restoreAllMocks();
++  });
++
++  it('refreshes the session before retrying an unauthorized approval', async () => {
++    const mockFetch = jest
++      .fn()
++      .mockResolvedValueOnce({
++        ok: false,
++        status: 401,
++        text: jest.fn().mockResolvedValue('{"message":"Unauthorized"}'),
++      })
++      .mockResolvedValueOnce({ ok: true })
++      .mockResolvedValueOnce({
++        ok: true,
++        json: jest.fn().mockResolvedValue({ approvalId: 'approval-1', decision: 'approved' }),
++      });
++    global.fetch = mockFetch;
++
++    await expect(resolveAgentApproval('run-1', 'approval-1', 'approved')).resolves.toEqual({
++      approvalId: 'approval-1',
++      decision: 'approved',
++    });
++
++    expect(mockFetch).toHaveBeenCalledTimes(3);
++    expect(mockFetch.mock.calls[1]).toEqual(['/api/login/ping', { credentials: 'same-origin' }]);
++    expect(mockFetch.mock.calls[2][1]).toEqual(
++      expect.objectContaining({ method: 'POST', credentials: 'same-origin' })
++    );
++  });
++});
++
+ describe('reconnectToAgentRun', () => {
+   const originalFetch = global.fetch;
+ 
+diff --git a/src/services/agentClient.ts b/src/services/agentClient.ts
+index 150b9ed..96da1c8 100644
+--- a/src/services/agentClient.ts
++++ b/src/services/agentClient.ts
+@@ -1,3 +1,5 @@
++import { grafanaFetch } from './grafanaFetch';
++
+ export interface AgentRunRequest {
+   message: string;
+   type?: 'chat' | 'investigation' | 'performance';
+@@ -296,7 +298,7 @@ export async function resolveAgentApproval(
+   orgId?: string,
+   approvalScope: 'once' | 'always' = 'once'
+ ): Promise<ApprovalResolvedEvent> {
+-  const resp = await fetch(`${AGENT_RUNS_URL}/${runId}/approvals/${approvalId}`, {
++  const resp = await grafanaFetch(`${AGENT_RUNS_URL}/${runId}/approvals/${approvalId}`, {
+     method: 'POST',
+     headers: {
+       'Content-Type': 'application/json',
+@@ -328,7 +330,7 @@ export async function runAgentDetached(request: AgentRunRequest): Promise<Detach
+     url.searchParams.set('model', model);
+   }
+ 
+-  const resp = await fetch(url.pathname + url.search, {
++  const resp = await grafanaFetch(url.pathname + url.search, {
+     method: 'POST',
+     headers: {
+       'Content-Type': 'application/json',
+@@ -346,7 +348,7 @@ export async function runAgentDetached(request: AgentRunRequest): Promise<Detach
+ }
+ 
+ export async function cancelAgentRun(runId: string, orgId?: string): Promise<void> {
+-  const resp = await fetch(`${AGENT_RUNS_URL}/${runId}/cancel`, {
++  const resp = await grafanaFetch(`${AGENT_RUNS_URL}/${runId}/cancel`, {
+     method: 'POST',
+     headers: orgIdHeaders(orgId),
+   });
+@@ -358,7 +360,7 @@ export async function cancelAgentRun(runId: string, orgId?: string): Promise<voi
+ }
+ 
+ export async function getAgentRunStatus(runId: string, orgId?: string): Promise<AgentRunStatus> {
+-  const resp = await fetch(`${AGENT_RUNS_URL}/${runId}`, {
++  const resp = await grafanaFetch(`${AGENT_RUNS_URL}/${runId}`, {
+     headers: orgIdHeaders(orgId),
+   });
+ 
+@@ -389,7 +391,7 @@ export async function reconnectToAgentRun(
+       await new Promise((resolve) => setTimeout(resolve, RECONNECT_DELAY_MS));
+     }
+ 
+-    const resp = await fetch(`${AGENT_RUNS_URL}/${runId}/events`, {
++    const resp = await grafanaFetch(`${AGENT_RUNS_URL}/${runId}/events`, {
+       headers: orgIdHeaders(orgId),
+       signal: abortSignal,
+     });
+diff --git a/src/services/backendSessionClient.ts b/src/services/backendSessionClient.ts
+index daa3626..601ae0f 100644
+--- a/src/services/backendSessionClient.ts
++++ b/src/services/backendSessionClient.ts
+@@ -1,4 +1,5 @@
+ import { config } from '@grafana/runtime';
++import { grafanaFetch } from './grafanaFetch';
+ import type { ChatMessage } from '../components/Chat/types';
+ 
+ const SESSIONS_URL = '/api/plugins/consensys-asko11y-app/resources/api/sessions';
+@@ -34,7 +35,7 @@ export async function createSession(
+   title?: string,
+   messages?: ChatMessage[]
+ ): Promise<BackendChatSession> {
+-  const resp = await fetch(SESSIONS_URL, {
++  const resp = await grafanaFetch(SESSIONS_URL, {
+     method: 'POST',
+     headers: { 'Content-Type': 'application/json', ...orgHeaders() },
+     body: JSON.stringify({ title: title || '', messages: messages || [] }),
+@@ -46,7 +47,7 @@ export async function createSession(
+ }
+ 
+ export async function listSessions(): Promise<SessionMetadata[]> {
+-  const resp = await fetch(SESSIONS_URL, {
++  const resp = await grafanaFetch(SESSIONS_URL, {
+     headers: orgHeaders(),
+   });
+   if (!resp.ok) {
+@@ -56,7 +57,7 @@ export async function listSessions(): Promise<SessionMetadata[]> {
+ }
+ 
+ export async function getSession(sessionId: string): Promise<BackendChatSession> {
+-  const resp = await fetch(`${SESSIONS_URL}/${sessionId}`, {
++  const resp = await grafanaFetch(`${SESSIONS_URL}/${sessionId}`, {
+     headers: orgHeaders(),
+   });
+   if (!resp.ok) {
+@@ -66,7 +67,7 @@ export async function getSession(sessionId: string): Promise<BackendChatSession>
+ }
+ 
+ export async function updateSession(sessionId: string, update: SessionUpdate): Promise<void> {
+-  const resp = await fetch(`${SESSIONS_URL}/${sessionId}`, {
++  const resp = await grafanaFetch(`${SESSIONS_URL}/${sessionId}`, {
+     method: 'PUT',
+     headers: { 'Content-Type': 'application/json', ...orgHeaders() },
+     body: JSON.stringify(update),
+@@ -77,7 +78,7 @@ export async function updateSession(sessionId: string, update: SessionUpdate): P
+ }
+ 
+ export async function deleteSession(sessionId: string): Promise<void> {
+-  const resp = await fetch(`${SESSIONS_URL}/${sessionId}`, {
++  const resp = await grafanaFetch(`${SESSIONS_URL}/${sessionId}`, {
+     method: 'DELETE',
+     headers: orgHeaders(),
+   });
+@@ -87,7 +88,7 @@ export async function deleteSession(sessionId: string): Promise<void> {
+ }
+ 
+ export async function deleteAllSessions(): Promise<void> {
+-  const resp = await fetch(SESSIONS_URL, {
++  const resp = await grafanaFetch(SESSIONS_URL, {
+     method: 'DELETE',
+     headers: orgHeaders(),
+   });
+@@ -97,7 +98,7 @@ export async function deleteAllSessions(): Promise<void> {
+ }
+ 
+ export async function getCurrentSessionId(): Promise<string | null> {
+-  const resp = await fetch(`${SESSIONS_URL}/current`, {
++  const resp = await grafanaFetch(`${SESSIONS_URL}/current`, {
+     headers: orgHeaders(),
+   });
+   if (!resp.ok) {
+@@ -108,7 +109,7 @@ export async function getCurrentSessionId(): Promise<string | null> {
+ }
+ 
+ export async function setCurrentSessionId(sessionId: string | null): Promise<void> {
+-  const resp = await fetch(`${SESSIONS_URL}/current`, {
++  const resp = await grafanaFetch(`${SESSIONS_URL}/current`, {
+     method: 'PUT',
+     headers: { 'Content-Type': 'application/json', ...orgHeaders() },
+     body: JSON.stringify({ sessionId: sessionId || '' }),
+@@ -119,7 +120,7 @@ export async function setCurrentSessionId(sessionId: string | null): Promise<voi
+ }
+ 
+ export async function ingestSession(messages: ChatMessage[]): Promise<{ ingested: number }> {
+-  const resp = await fetch(`${GRAPHITI_URL}/ingest-session`, {
++  const resp = await grafanaFetch(`${GRAPHITI_URL}/ingest-session`, {
+     method: 'POST',
+     headers: { 'Content-Type': 'application/json', ...orgHeaders() },
+     body: JSON.stringify({
+diff --git a/src/services/grafanaFetch.ts b/src/services/grafanaFetch.ts
+new file mode 100644
+index 0000000..c09ee67
+--- /dev/null
++++ b/src/services/grafanaFetch.ts
+@@ -0,0 +1,35 @@
++let sessionRefresh: Promise<boolean> | undefined;
++
++async function refreshGrafanaSession(): Promise<boolean> {
++  if (!sessionRefresh) {
++    sessionRefresh = fetch('/api/login/ping', { credentials: 'same-origin' })
++      .then((response) => response.ok)
++      .catch(() => false)
++      .finally(() => {
++        sessionRefresh = undefined;
++      });
++  }
++  return sessionRefresh;
++}
++
++/**
++ * Grafana rotates browser session tokens while the user is active. Native
++ * fetch calls from an app plugin do not use Grafana's auth-refresh wrapper, so
++ * retry once after the safe login ping when the auth middleware returns 401.
++ */
++export async function grafanaFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
++  const requestInit: RequestInit = {
++    ...init,
++    credentials: init.credentials ?? 'same-origin',
++  };
++  const response = await fetch(input, requestInit);
++  if (response.status !== 401 || requestInit.signal?.aborted) {
++    return response;
++  }
++
++  if (!(await refreshGrafanaSession()) || requestInit.signal?.aborted) {
++    return response;
++  }
++
++  return fetch(input, requestInit);
++}

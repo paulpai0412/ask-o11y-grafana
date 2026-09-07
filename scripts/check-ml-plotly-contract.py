@@ -86,7 +86,6 @@ def main() -> int:
             ("hovertemplate", "x"),
             ("texttemplate", "x"),
             ("images", [{}]),
-            ("template", {}),
             ("updatemenus", []),
             ("sliders", []),
             ("href", "https://x"),
@@ -98,6 +97,13 @@ def main() -> int:
         ):
             expect_reject(contract, {"data": [{"type": "scatter", "x": [1], key: value}], "layout": {}}, key)
             expect_reject(contract, {"data": [{"type": "scatter", "x": [1]}], "layout": {key: value}}, key)
+
+    def default_template_case() -> None:
+        clean = contract.sanitize_figure({
+            "data": [{"type": "bar", "x": ["a"], "y": [1]}],
+            "layout": {"template": {"layout": {"font": {"size": 12}}}},
+        })
+        assert "template" not in clean["layout"], clean
 
     def axis_layout_case() -> None:
         contract.sanitize_figure({
@@ -169,6 +175,7 @@ def main() -> int:
         ("fixed-config-rejects", fixed_config_case),
         ("allowed-trace-types", allowed_trace_types_case),
         ("forbidden-keys", forbidden_keys_case),
+        ("default-template-stripped", default_template_case),
         ("axis-layout-whitelist", axis_layout_case),
         ("dangerous-strings", dangerous_strings_case),
         ("numeric-validation", numeric_validation_case),

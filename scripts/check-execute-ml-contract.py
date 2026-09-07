@@ -60,7 +60,7 @@ def main() -> int:
         def fake_executor(frame_bundle_json: str, python_code: str, seed: int):
             captured["code"] = python_code
             captured["seed"] = seed
-            return {"execution_id": "exec", "results": [], "stdout": [], "stderr": [], "error": None, "complete": {}, "input_audit": {"input_rows": 4, "valid_rows": 4, "excluded_rows": 0, "rules": []}}
+            return {"execution_id": "exec", "results": [{"display_name": "plotly.json", "mime": {"application/vnd.plotly.v1+json": "{}"}}], "stdout": [], "stderr": [], "error": None, "complete": {}, "input_audit": {"input_rows": 4, "valid_rows": 4, "excluded_rows": 0, "rules": []}}
 
         result = sandbox.execute_ml_contract({"frame_ref": frame_ref, "contract_ref": contract_ref, "seed": 42, "_server_context": context}, executor=fake_executor)
         assert result["ok"], result

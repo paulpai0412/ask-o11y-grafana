@@ -2,6 +2,32 @@
 
 The active decisions are [ADR 0001](docs/adr/0001-grafana-executes-datasource-queries.md), the retained boundaries of [ADR 0002](docs/adr/0002-adaptive-ask-o11y-ml-mcp-topology.md), and [ADR 0003](docs/adr/0003-isolated-python-analysis-mcp.md).
 
+## Language
+
+**Decision question（決策問題）**:
+The business question the user wants to understand or act on; it does not require the user to prescribe an analytical method.
+_Avoid_: Algorithm request, analysis procedure
+
+**Analysis strategy（分析策略）**:
+The analyst's evidence-led choice of how to answer a decision question, including revision when new evidence changes what is justified.
+_Avoid_: Fixed workflow, mandatory model sequence
+
+**Confirmed analysis contract（已確認分析契約）**:
+The particular analysis proposal the user has authorized, including its data and operation boundaries; it is not blanket permission for different analyses.
+_Avoid_: Unrestricted autonomy, general consent
+
+**Bounded compute scope（有界運算授權）**:
+Explicit permission to repeat a specified set of verifiable computations within the same authorized data and agreed budget; it is not permission to change the data or analytical contract.
+_Avoid_: Blanket approval, permission to run arbitrary code
+
+**Audience context（受眾情境）**:
+The user's stated responsibilities, decision priorities and technical familiarity that guide an explanation without changing its facts or uncertainty.
+_Avoid_: Access role, permission grant
+
+**Analysis finding（分析發現）**:
+An observation or estimate supported by evidence relevant to the decision question, not automatically a causal conclusion or an approved intervention.
+_Avoid_: Proven root cause, guaranteed improvement
+
 ## Runtime planning
 
 Ask O11y's pinned LLM is the only runtime planner. It selects a compact tool and Agent Skill subset from live schemas and composes capabilities from user intent, authorized metadata, and intermediate evidence. There is no fixed DAG, keyword router, `next_step`, method enum, panel template, or required query→analysis→dashboard sequence.

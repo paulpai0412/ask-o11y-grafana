@@ -1,0 +1,613 @@
+diff --git a/pkg/agent/analyst_skills_test.go b/pkg/agent/analyst_skills_test.go
+new file mode 100644
+index 0000000..c5bda81
+--- /dev/null
++++ b/pkg/agent/analyst_skills_test.go
+@@ -0,0 +1,69 @@
++package agent
++
++import (
++	"strings"
++	"testing"
++)
++
++// Exercise embedded skill discovery and selection, not a second Markdown parser.
++func TestAnalystSkillsContract(t *testing.T) {
++	required := map[string][]string{
++		"data-understanding": {
++			"advisory knowledge", "Do not ask the user to design the procedure",
++			"A profile is evidence, not completion", "wait for confirmation",
++			"outside that contract", "full-data", "observed candidate",
++			"only for unresolved business meaning", "Only Grafana Query",
++			"Keep facts, uncertainty and limitations unchanged across audiences",
++			"indeterminate compute/write outcomes", "Dummy baseline gate",
++			"mode=spec", "visual_observation=null", "thesis_evidence",
++			"refs.dashboard_ref", "independent per-view narratives",
++		},
++		"ml-method-selection": {
++			"advisory knowledge", "Do not ask the user to choose algorithms",
++			"conditional examples, not execution recipes", "wait for confirmation",
++			"outside the confirmed contract", "training CV only",
++			"one global search budget", "Lock the winner before final holdout",
++			"no sampling, truncation or derived datasets", "Dummy baseline gate",
++			"support_group_fields must be context_fields", "bounds: {}",
++			"calibrated_probabilities", "CatBoost", "受控 challenger",
++			"pre-specified confirmatory result", "mode=spec", "visual_observation=null",
++			"Keep facts, uncertainty and limitations unchanged across audiences",
++			"refs.dashboard_ref", "thesis_evidence", "independent per-view narratives",
++		},
++	}
++	found := 0
++	for _, skill := range availableAgentSkills() {
++		needles, ok := required[skill.Name]
++		if !ok {
++			continue
++		}
++		found++
++		t.Run(skill.Name, func(t *testing.T) {
++			if skill.Description == "" || len(skill.Content) > maxSkillContextBytes {
++				t.Fatal("skill must be discoverable and within the existing context bound")
++			}
++			messages := selectedSkillMessages([]string{skill.Name})
++			if len(messages) != 1 || !strings.Contains(messages[0].Content, skill.Content) {
++				t.Fatal("selected advisory must reach the model intact")
++			}
++			for _, needle := range needles {
++				if !strings.Contains(skill.Content, needle) {
++					t.Errorf("missing responsibility or guardrail: %q", needle)
++				}
++			}
++			for _, forbidden := range []string{
++				"Only after the user explicitly asks", "一般無時間欄的二元分類使用 stratified holdout",
++				"一律 `TimeSeriesSplit`", "處理順序：", "小樣本（n<1000）",
++				"預設往高 recall 偏移", "PSI<0.1", "Cpk≥1.33",
++				"對 SHAP 前 K 名特徵（K≤10）回頭做單變數檢定",
++			} {
++				if strings.Contains(skill.Content, forbidden) {
++					t.Errorf("legacy method/intent recipe survived: %q", forbidden)
++				}
++			}
++		})
++	}
++	if found != len(required) {
++		t.Fatalf("found %d analyst skills, want %d", found, len(required))
++	}
++}
+diff --git a/pkg/agent/skills/data-understanding/SKILL.md b/pkg/agent/skills/data-understanding/SKILL.md
+index 8179108..395ef57 100644
+--- a/pkg/agent/skills/data-understanding/SKILL.md
++++ b/pkg/agent/skills/data-understanding/SKILL.md
+@@ -1,49 +1,45 @@
+ ---
+ name: data-understanding
+-description: REQUIRED before analysis of an uploaded, ERP, WFERP, or otherwise unfamiliar dataset. Use for data profiling, schema/ontology inspection, descriptive or diagnostic analysis, data quality review, choosing whether ML is appropriate, and any request to understand a dataset before prediction.
++description: Understand unfamiliar uploaded, ERP/WFERP, or registered data and answer business decision questions through evidence-led exploration, data quality checks, descriptive, diagnostic, comparative or proposed statistical analysis. Users need not name a method.
+ ---
+ 
+-# Ontology-guided data understanding
++# Decision-led data understanding
+ 
+-This skill is data-first and evidence-bound. It does not prescribe a fixed chart list, analysis DAG, model, or report layout. Tool schemas, authorized refs, the approved ontology, and the user's current intent are authoritative.
++This skill is advisory knowledge, not a fixed analysis sequence, chart list, or method selector. The analyst owns the strategy; the user owns the decision question and authorization. Live tool schemas, confirmed contracts and host gates remain authoritative.
+ 
+-## Non-negotiable rules
++## Analyst judgment
+ 
+-- Use only real tool results from the current session. Never use mock, fixture, fabricated, guessed, copied, or fallback data.
+-- Keep the original result grain and row count. Do not sample, truncate, down-select rows, or create a derived dataset for profiling or ML. Chart bins and time buckets are visual-only aggregations.
+-- Dataset IDs, field names, date semantics, relations, query refs, and ontology hashes must come from inspect/classify/plan evidence. Never translate, rename, concatenate, or hardcode physical field names.
+-- An uploaded ontology is an observed candidate. Say `inferred` or `observed` unless an approved ontology snapshot explicitly says `approved`; never promote a candidate by wording.
+-- Before any query or sandbox execution, show an Analysis Preview containing the dataset, grain/date meaning, exact fields, row bounds, ontology status, and intended operation. Wait for user confirmation.
+-- Do not call ML tools merely because numeric columns exist. Without explicit predictive intent, default to ontology-guided profiling and descriptive/diagnostic/comparative analysis. Ask which decision the user wants if intent is ambiguous.
+-- Recovery is native LLM reasoning: read the complete error, current tool schema, opaque refs, and contract/evidence; repair only what the evidence requires and retry. Do not invent IDs/fields, fill missing values with guesses, switch to a mock/fallback, or add a fixed retry state machine.
+-
+-## Data-first sequence (adapt to intent, not a fixed DAG)
++- Translate the user's question into an observable decision question and propose a proportionate analysis using authorized metadata and intermediate evidence. Do not ask the user to design the procedure or choose an algorithm.
++- Discover technical facts through tools and choose supported technical parameters yourself. Ask only for unresolved business meaning, materially different objectives, trade-offs or authorization. Unknown or inferred field semantics are not permission to invent a target or role.
++- Choose and revise investigative directions from evidence, not a mandatory profiling-to-ML ladder. Numeric columns alone do not justify ML; conversely, the user need not explicitly say prediction or modeling for you to propose a useful statistical or predictive analysis. Explain how it serves the decision, and obtain the required exact contract confirmation before execution.
++- A profile is evidence, not completion. Use `profile_dataset(frame_ref)` when full-data quality/distribution facts are needed, reuse an existing valid profile, and connect its findings to the question. Do not run more tools merely to complete a checklist. Stop when the question is answered, evidence/capabilities are insufficient, the budget is exhausted, or another confirmation is required.
+ 
+-1. Discover or inspect the authorized dataset. Reuse the returned opaque `dataset_metadata_ref`, dataset ID, datasource identity, fields, row hint, and date range. For an upload, use its session-owned ID and the observed field classification; do not search only organization-approved ontology.
+-2. For WFERP/ERP, call `search_wferp_schema` first, then author one bounded legacy-compatible `SELECT` through `plan_wferp_query`. Verify joins do not multiply grain, keys are not silently lost, and date semantics distinguish document date, posting date, production date, and event date. Never execute SQL directly.
+-3. Ask the user to confirm the exact preview. The confirmation authorizes this analysis only; it does not approve ontology promotion or dashboard publication.
+-4. Call the authorized Planner with exact physical fields and bounded full-data row requirements. Then call Grafana Query. The query must return the complete authorized population at its declared grain; stop if validation reports missing fields, row loss, truncation, or an unexpected grain.
+-5. For a non-ML understanding request, call `profile_dataset(frame_ref)` rather than writing model-authored Python. The deterministic profile covers every row and every returned field and returns bounded facts plus visual-only assets for distributions, missingness, relationships, and any time trend supported by the data. It never chooses an ML method.
+-6. Read the profile manifest, facts, warnings, ontology status, and all returned asset metadata. Decide the next action from the user's question and evidence: descriptive/WFERP analysis, a separate authorized statistical analysis, or an ML preview. Do not silently escalate from profile to prediction.
++## Evidence and authorization boundaries
+ 
+-## Profile interpretation
++- Use only real tool results from the current session. Never use mock, fixture, fabricated, guessed, copied, or fallback data.
++- Keep the original result grain and full-data row coverage. Do not sample, truncate, down-select rows, or create a derived dataset for profiling or ML. Chart bins and time buckets are visual-only aggregations.
++- Dataset IDs, field names, date semantics, relations, query refs and ontology hashes must come from inspect/classify/plan evidence. Never translate, rename, concatenate or hardcode physical field names.
++- An uploaded ontology is an observed candidate, not organization approval. Say inferred/observed unless an approved snapshot explicitly establishes otherwise.
++- Before any query or sandbox execution, show an Analysis Preview with the exact dataset, grain/date meaning, fields, row bounds, ontology status and intended operation, then wait for confirmation. You propose the method and technical contract; the user confirms, rather than supplying the method. A new target, fields, split, operation, purpose or scope outside that contract requires a revised preview and confirmation. This is not blanket scope authorization and does not authorize ontology promotion or dashboard publication.
++- Metadata discovery may precede confirmation within existing permissions. For WFERP/ERP, obtain schema evidence through `search_wferp_schema` before authoring a bounded legacy-compatible SELECT for `plan_wferp_query`. Only Grafana Query executes datasource queries. Check join multiplicity, missing keys and document/posting/production/event date semantics when relevant; do not guess physical fields or execute SQL directly.
++- The query must return the complete authorized population at its declared grain. Stop on missing fields, row loss, truncation or unexpected grain; do not quietly substitute partial data.
++- Recovery is native LLM reasoning from the exact error, live schema, refs and evidence, not a fixed retry state machine. Never invent IDs, bypass gates or add a mock/fallback. For indeterminate compute/write outcomes, reconcile the existing receipt before any retry; reuse successful results when repairing a report.
+ 
+-- Report row/field coverage and whether `full_data=true`, `sampling=false`, and `derived_dataset=false`.
+-- Distinguish missingness, low variance, type inference, temporal ordering, categorical concentration, and association. Association/correlation is not causation.
+-- Treat visual grouping, histogram bins, and time aggregation as presentation only. Do not use them as a training or query input.
+-- If a field has unknown or inferred semantics, state that limitation and ask for ontology confirmation instead of asserting a role.
+-- For a profile dashboard, use `prepare_ml_report`, `inspect_report_artifacts`, and `compose_ml_dashboard` as generic report tools: inspect all bounded facts and all artifact/view specs (and PNGs when vision is available), produce one cross-artifact synthesis with independent per-view narratives, then resolve opaque bindings before the sole approved Grafana writer. Do not author asset URLs, raw figure data, datasource targets, or scripts.
++## Interpreting evidence and proposing deeper analysis
+ 
+-## Moving to ML
++- Report relevant coverage, including `full_data=true`, `sampling=false`, and `derived_dataset=false` when established by results. Separate missingness, type inference, low variance, time ordering, category concentration and association from business conclusions. Association is not causation.
++- Decide whether a comparison, trend, stratification or model adds decision value. Check competing explanations such as changed population mix or data quality before asserting a driver. These are examples of judgment, not compulsory analyses or a domain router.
++- For proposed ML/statistics, use the method-selection knowledge when available; never pretend a missing skill or tool was loaded. Build an ontology-pinned contract from the user's decision and observed/approved evidence. Propose target, features, leakage exclusions, split/date semantics, training-only preprocessing, budget and baseline yourself; clarify target meaning only if genuinely unresolved.
++- Preserve the current executor contract: Dummy baseline gate, train/CV-only model selection, untouched final holdout and complete authorized rows. Do not use profile chart bins or inferred role labels as training data or approved ontology. If a needed method/split is unsupported, report the limitation instead of silently changing it. A losing baseline comparison is a valid finding, not permission to invent candidate settings or optimization bounds.
+ 
+-Only after the user explicitly asks for prediction, estimation, forecasting, or model comparison:
++## Explain for the audience
+ 
+-- Select the ML/statistics skill and create an ontology-pinned analysis contract from the observed/approved evidence. Preserve the full-data invariant.
+-- Explain target, features, excluded/leakage/proxy fields, grain, split/date semantics, preprocessing fit scope, and baseline before execution. `Timestamp` or another time field may define chronological order but must not enter model features unless the approved contract explicitly allows it.
+-- Keep Dummy as the baseline gate. If it wins, report that result and data-quality/feature recommendations; do not fabricate candidate settings or optimization bounds.
+-- For WFERP with no explicit predictive intent, remain descriptive/diagnostic/comparative; do not force a model.
++Use the audience's stated responsibilities, decision priorities and technical familiarity, not a hardcoded role-to-report map. If unknown, use a plain-language decision summary without asking for a job title. Keep facts, uncertainty and limitations unchanged across audiences. Explain what was found, why it matters to this decision, what is still unknown and a feasible next action; include technical detail only when useful or requested. Do not turn correlation into a causal recommendation or invent business costs to sound actionable.
+ 
+ ## Dashboard/report safety
+ 
+-A dashboard is a presentation of completed evidence, not a substitute for profiling. A Preview still requires explicit write intent. For a report, the LLM may choose sections, ordering, titles, collapsed state, and relevant views dynamically, but every numeric claim must reference a deterministic fact and every selected view needs its own data observation, visual observation (or `null` for spec-only), interpretation, limitation, next step, and evidence. The compositor/validator is authoritative; if it rejects a synthesis, repair the synthesis from its exact error without rerunning successful work. `compose_ml_dashboard` returns an opaque `refs.dashboard_ref`; pass it to the sole writer as `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` instead of copying the full dashboard JSON.
+-The `synthesis` object must contain exactly `format`, `report_title`, `thesis`, `thesis_evidence`, and `sections`; never include legacy top-level `purpose`, `title`, or `uid` inside it. Pass the new unique `uid` and dashboard `title` as separate `compose_ml_dashboard` arguments. Each section must follow the current tool schema; when validation reports missing or unexpected fields, repair only those fields and do not rerun completed analysis.
++A dashboard presents completed evidence; it is not the analysis objective unless requested. Preview writes require explicit write intent and publication a separate confirmation. For a requested profile/analysis report, use `prepare_ml_report`, `inspect_report_artifacts`, and `compose_ml_dashboard` under their current schemas: inspect all bounded facts and artifact/view specs, then create one cross-artifact synthesis with independent per-view narratives. The current host is text-only: use `mode=spec` and `visual_observation=null`, never claim visual inspection. Do not author asset URLs, raw figure data, datasource targets or scripts.
++
++Choose sections, ordering, titles, collapsed state and relevant views from the question and evidence, not a fixed report template. Every numeric claim must reference a deterministic fact; every selected view needs its own data observation, visual observation (null for spec-only), interpretation, limitation, next step and evidence. The compositor/validator is authoritative: repair the exact rejected fields without rerunning completed analysis. Pass the returned opaque `refs.dashboard_ref` to the sole writer as `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` rather than copying dashboard JSON.
++
++The `synthesis` object must contain exactly `format`, `report_title`, `thesis`, `thesis_evidence`, and `sections`; never include legacy top-level `purpose`, `title`, or `uid` inside it. Pass the new unique `uid` and dashboard `title` as separate `compose_ml_dashboard` arguments. Follow the current section schema rather than inventing report fields for audience metadata.
+diff --git a/pkg/agent/skills/ml-method-selection/SKILL.md b/pkg/agent/skills/ml-method-selection/SKILL.md
+index f68f2ca..fdec650 100644
+--- a/pkg/agent/skills/ml-method-selection/SKILL.md
++++ b/pkg/agent/skills/ml-method-selection/SKILL.md
+@@ -1,275 +1,74 @@
+ ---
+ name: ml-method-selection
+-description: REQUIRED for any machine-learning or statistical analysis turn. Always select for 模型訓練、自動調參、分類、迴歸、分群、異常偵測、時間序列、預測、特徵重要性、結果解釋，或要求把 ML 過程/結果做成 Grafana Dashboard；亦涵蓋智慧製造設備健康、預測性維護 predictive maintenance、異常偵測 anomaly detection、良率/不良、製程參數、SPC/Cpk/OEE、需求預測。
++description: Advisory method selection and interpretation for business decision questions needing statistical inference, prediction, regression, classification, forecasting, clustering, anomaly detection or model comparison, including 設備健康、製程、良率 and predictive maintenance. Users need not specify ML or an algorithm.
+ ---
+ 
+-# 資料驅動分析方法指引
++# Evidence-led analysis methods
+ 
+-下列製造案例僅是 advisory examples，不是平台預設、欄位判定規則或必跑分析。以當前工具可執行能力與使用者核准 contract 為準；未支援的方法／split 必須明示，不得換方法假裝已執行。
++This skill is advisory knowledge: method suitability, assumptions, validation and interpretation, not a fixed procedure or domain/keyword router. The analyst owns the analysis strategy; the user supplies the decision question and confirms authorization. Live tool schemas and the supported executor contract are authoritative. Do not claim a package, model or split is available without capability evidence, install dependencies at runtime, or bypass a validator through generic Python.
+ 
+-本 skill 是 advisory knowledge：提供選法準則、判定門檻與解讀規範，不構成固定流程。
+-實際工具 schema 與資料現況永遠優先。方法必須落在 sandbox 已安裝套件內：
+-scikit-learn、statsmodels、imbalanced-learn、xgboost、lightgbm、shap。
++## Own the method, not the business decision
+ 
+-### Data-first handoff
++- Derive candidate questions and methods from the user's decision, authorized metadata and intermediate evidence. Do not ask the user to choose algorithms, feature-engineering procedures or validation parameters that you can defensibly propose. Clarify only unresolved business meaning, materially different objectives, costs/limits or authorization.
++- The user need not name ML to justify a proposal. A description or comparison may answer the question without a model; numeric fields alone are not a reason to train one. Use `profile_dataset` when quality/distribution evidence is needed and reuse valid results, not a mandatory profile-first ladder. A profile, model or dashboard alone is not task completion.
++- Explain the expected decision value, assumptions and verification of a proposed method. Revise from evidence, not a fixed model ranking or sample-size switch. Stop when the question is answered, additional analysis is not justified, evidence/capabilities are insufficient, the budget is exhausted, or new confirmation is needed.
++- Autonomy is not permission. Before query or sandbox execution, propose the exact Analysis Preview including data, target/features when relevant, exclusions, split, operation and budget, then wait for confirmation. Changing anything outside the confirmed contract requires a revised preview and confirmation; no blanket scope authorization or silent escalation to optimization/publication.
+ 
+-- 陌生資料集、upload 或 WFERP/ERP 請先使用 `data-understanding` skill：inspect/schema → ontology evidence → user-visible Analysis Preview → authorized full-data query → `profile_dataset`。Profile 是所有 rows/fields 的 deterministic facts，不是 ML method selector。
+-- 沒有明確預測、估計、forecast 或 model-comparison 意圖時，不要把數值欄位自動解讀成 ML 任務；WFERP 預設走描述性、診斷性或比較性分析。
+-- Profile 或 WFERP 結果若導向 ML，必須重新取得使用者意圖、target/features/split 與 ontology-pinned contract；不得把 profile 的 chart bins、時間聚合或 inferred role 當成模型輸入。
++## Method suitability: conditional examples, not execution recipes
+ 
+-### Session-owned upload 的 ontology 規則
++Choose only what helps the current decision and is supported. No row below requires a tool call, fixed threshold, model sequence or report section.
+ 
+-當 dataset id 是精確的 `upload_<32 hex>` 且任務是 ML：
+-
+-- 先 inspect sanitized fields，再直接對 upload candidate 做 field classification；不要以「沒有 approved snapshot」為由停止，也不要只查 approved snapshot list。
+-- classification 回傳全量欄位 facts、風險 hypotheses、quality policy 與 source SHA；不會替使用者選 target。欄名、順序或 numeric magnitude 不是 target/feature 權威，目標及納入欄位來自使用者意圖與核准契約。
+-- `leakage_risk`（如 Satisfaction/Reason/Rating 等事後欄位）與 `sensitive`（如 Gender/Sex/Race 等受保護屬性）欄位會被 deterministic gate 自動排除，Planner 直接拒絕含它們的 contract；請在 Analysis Preview 主動說明排除原因，不要等待閘門報錯，也不要嘗試納入。
+-- ML query plan 用 observed fields/hash 與使用者核准 target/features 建 contract，由 Planner 驗證型別、風險與同源資料。不得把 hypothesis 當成已核准 ontology。
+-- split 必須明確含 `kind`、`test_fraction` 與 `preprocessing_fit_scope: "training_only"`；一般無時間欄的二元分類使用 stratified holdout。不要把缺少 fit scope 誤解成必須改成順序切分。
+-- 同一 ML plan 的 selected fields 必須精確等於 target + model features；被排除或只供公平性/subgroup 檢查的欄位不能偷偷混進模型 query。若使用者需要 subgroup 稽核，先在 Preview 說明，待模型結果後以獨立授權 plan 進行。
+-- 使用者對 Analysis Preview 的確認只授權本次分析；不能把 upload candidate 宣稱為全域 approved ontology。
+-- 若使用者意圖仍無法確定 target 才釐清；使用者已明示 target 時不得因 candidate 沒有 target 而阻擋。
+-
+-### Regression 與受限候選設定
+-
+-- 連續目標使用 `task_kind: regression`，由資料特性選擇模型子集；Dummy baseline 必須保留作為進入後續搜尋的最低門檻。Upload heuristic 的 classification target_candidate 只為分類提示；`user-declared continuous target` 經 deterministic validator 證明為 numeric、非全缺、非常數後可作 regression target，不得只因 heuristic 標成 identifier 就停止。
+-- chronological/grouped split、training-only preprocessing、MAE 選模、holdout-once 與 bootstrap interval 都由 trusted template 強制；LLM 不得改寫 deterministic 規則。完整 contract 必須含 algorithms，且 `features = controllable_fields + context_fields - split field`。Regression query projection 必須精確是 `target + model features + split field`；split field 只供切分，不得混入模型 features。
+-- constrained search 只能在模型優於 baseline 後使用，只能評估 ontology 標記的 controllable fields 與已觀察支持組合，不得生成 unseen source、position 或超出 bounds 的外推值。`support_group_fields must be context_fields`，只能放來源、位置、批次等背景分組，不得放 controllable fields；若沒有已觀察或使用者核准的工程界線，必須傳 `bounds: {}`，禁止猜測極大上下界。
+-- 結果只能稱為 `candidate_settings`，必須附 support、uncertainty、混雜限制、受控試驗建議與停止條件；不得稱為因果最佳。
+-- 模型和 feature sets 共用一個 global search budget，先僅憑 training CV 鎖定 winner，再對它做 final holdout gate。不得檢視每組 holdout 再挑選，也不得失敗後挑 runner-up。現行比較為 sequential，不宣稱並行。
+-- `objective=mae` 是 scorer 的 minimize；純預測不需要業務方向。只有使用者要求並核准 constrained search 才傳 `optimization.direction`，不得把降低誤差誤解為降低 target。
+-- 所有訓練與 explanation 使用完整核准資料；圖表聚合只供展示，不回流模型。不抽樣、不截斷、不建立 derived dataset，資源不足明示。
+-- 所有圖片必須由 `asko11y-plotly-panel` 呈現，明確 image/plotly mode；純敘述可用 Text，但不得用 HTML/CSS/Markdown 圖片繞過。invalid figure 明示錯誤，不降級偽裝。
+-- 修改報告只重用既有 execution/report refs，不重跑 query/ML。effect outcome 若為 indeterminate，先調查既有 receipt，不盲目重試。
+-
+-## 1. 問題分型（先分型，再選法）
+-
+-| 分型 | 典型製造提問 | 首選方向 |
++| Question/evidence | Possible approach and conditions | Validation and interpretation limits |
+ |---|---|---|
+-| 預測 | 下週不良率？這批會不會超標？機台還能撐多久？ | 監督式學習 / 時間序列 |
+-| 推論 | 哪些參數真正影響良率？A/B 兩線差異是否顯著？ | statsmodels 統計推論 + 效應量 |
+-| 描述/分群 | 機台行為有幾種模式？哪些批次相似？ | PCA + clustering |
+-| 異常偵測 | 這個感測器讀值正常嗎？（通常無標籤） | IsolationForest / PCA 重構誤差 |
+-
+-推論型問題禁止只用樹模型特徵重要性回答——樹模型的 importance 不提供不確定性，
+-推論必須回到 statsmodels（OLS/GLM）拿係數、信賴區間與 p-value。
+-
+-## 2. 製造資料現實檢查（動手前逐項判定，附實際門檻）
+-
+-### 2.1 時序自相關與資料洩漏
+-
+-- 同機台連續取樣的感測器資料幾乎必有自相關。先算 Durbin-Watson（偏離 2 越多越嚴重）
+-  或畫 ACF；ACF 在 lag>0 顯著超出信賴帶即視為自相關。
+-- **時序切分**：一律 `TimeSeriesSplit`（forward-chaining），禁止隨機 k-fold。
+-- **批次/批號洩漏**：同批號樣本共享環境因子，跨切分即洩漏 → 用 `GroupKFold`，
+-  group=批號/lot/換線週期。
+-- 特徵工程禁止使用未來資訊：滾動統計只准用 `shift(1)` 後的視窗；
+-  目標編碼（target encoding）必須在 fold 內計算。
+-
+-### 2.2 類別不平衡（不良分析的核心陷阱）
+-
+-- 先算不平衡比。**經驗法則**：不良率 <5% 時 accuracy 直接作廢
+-  （98% 良率下全猜「良品」就有 98% accuracy）；>20:1 必須處理。
+-- 處理順序：`class_weight="balanced"`（先試，最簡單）→ imbalanced-learn 的
+-  SMOTE（僅用在訓練 fold 內，驗證集絕不 resample）→ 閾值調整。
+-- 評估指標以 PR-AUC 為主；PR-AUC 的隨機基線 = 不良率本身
+-  （例：不良率 2%，PR-AUC 0.05 只比亂猜好一點，別拿 0.05 自稱「高」）。
+-- 分類閾值依成本決定：漏檢成本（不良流出）通常遠高於誤判（誤殺良品），
+-  預設往高 recall 偏移，並回報所選閾值下的 precision/recall 成對數值，
+-  不准只報閾值 0.5 的結果。
+-- CatBoost 只能作**受控 challenger**：只有使用者或已確認的比較方案明確要求時才執行，
+-  不加入預設模型清單；必須保留原始 categorical 欄位、禁止先 one-hot，並以相同
+-  CV/search budget/guards 與 incumbent 公平比較。未同時改善 PR-AUC、成本與 verdict 時不得取代預設模型。
+-
+-### 2.3 設限資料（censoring）
+-
+-- 「還沒壞 ≠ 不會壞」。預測性維護資料中仍在服役的設備是右設限觀察，
+-  把它們當成「未故障負樣本」跑普通二分類會低估風險。
+-- 有壽命資料（裝機→故障時間）時走存活分析（見 §3.3），不要二分類硬套。
+-
+-### 2.4 量測系統誤差（Gage R&R）
+-
+-- 若量測變異佔總變異 >10%（%GRR>10% 可接受上限，>30% 量測系統不合格），
+-  任何模型學到的「訊號」可能只是量測噪音。資料含重複量測時先估量測變異比例，
+-  無法估計時在限制欄明確聲明「量測系統能力未知」。
+-
+-### 2.5 混雜因子
+-
+-- 批次、換線、班別、季節、原料供應商常同時影響 X 與 Y。
+-- 迴歸至少控制批號固定效應或加入批次層特徵；看見參數「顯著」前先問：
+-  換一批/換一個班別還顯著嗎？可用交互項或分層檢定抽查穩定性。
+-
+-### 2.6 因果紀律
+-
+-- ERP/o11y 都是觀察性資料。相關係數、SHAP、特徵重要性都**不是因果證據**。
+-- 要宣稱「調降參數 X 可提升良率」，唯一正當路徑是 DOE/受控實驗；
+-  分析結論只能寫到「X 與 Y 存在統計關聯，建議以實驗驗證」。
+-
+-## 3. 設備分析
++| What changed, and where? | Comparisons, distributions, time trends or population-mix decomposition may suffice. | Check denominators, units, grain, missingness, join multiplicity and competing explanations; a segment difference is not a cause. |
++| Are groups meaningfully different? | An effect estimate or statistical model appropriate to paired/independent/repeated observations, scale and study design. | Check dependence, confounding and model assumptions; report relevant effect sizes and uncertainty, not p-values alone. Distinguish exploratory from confirmatory claims and account for multiple testing/selection when applicable. |
++| Can an outcome be predicted? | Supported supervised models with a relevant baseline, selected using training evidence. | Split must reflect future use: time order for future prediction, group separation for unseen entities, or a justified independent split. Prevent future information and preprocessing leakage; report out-of-sample performance and limits. |
++| What is unusual? | Supported robust summaries, residual models, IsolationForest or multivariate approaches when their assumptions fit. | Anomaly means deviation from a reference, not confirmed failure. Justify the reference and any operating threshold from evidence and approved costs/limits; do not invent contamination or alarm cutoffs. |
++| Are there recurring patterns? | Group summaries, dimension reduction or clustering if useful to the decision. | Check scaling, correlated variables, stability and interpretation; clusters are not known business labels. |
++| Equipment health / predictive maintenance / 健康度 HI | A health summary needs a defensible reference; time-to-event questions may require methods that handle censoring. | A still-operating asset is not evidence of indefinite survival. No universal minimum-event cutoff or unvalidated RUL promise; disclose insufficient events and measurement uncertainty. |
++| SPC / process capability / Cpk | Relevant only with known specification limits, suitable measurement quality and assessed process stability/distribution. | Do not invent engineering limits or treat a conventional capability/PSI/Gage R&R cutoff as universal. Statistical control is not proof of business acceptability. |
++| Forecasting | Supported trend/seasonal models or a simpler baseline according to time coverage and decision horizon. | Validate in time order at relevant horizons, consider structural breaks and interval coverage. No fixed sequence-length threshold substitutes for checking seasonal evidence. |
+ 
+-### 3.1 感測器異常偵測（無標籤）
++SHAP and feature importance describe model associations, not intervention effects or causal proof. Correlated features can share importance. Observational findings require explicit identification assumptions or additional evidence before causal interpretation; propose a controlled validation when appropriate, never promise improvement from correlation alone. Do not choose a test after feature screening and present it as a pre-specified confirmatory result.
+ 
+-- **單變數快篩**：穩態製程下用 robust z-score（median/MAD），
+-  |z|>3 為候選異常點；資料有趨勢時先差分或用滾動窗 z-score，否則漂移會被誤判為異常。
+-- **多元變數 IsolationForest**：`contamination` 不要留 "auto"——
+-  依歷史已知異常比例設定（無知識時 0.01–0.05 起步）；
+-  用 `score_samples` 排序輸出 top-N 而非二元标签，讓人判讀嚴重度。
+-- **PCA 重構誤差（SPE/Q 統計量）**：適合多感測器聯合監控，控制限取訓練期
+-  Q 統計量的 99 百分位。主成分數以解釋變異 ≥90–95% 起步。
+-- 解讀紀律：異常分數高只代表「偏離訓練分布」，
+-  必須回到原始感測器值指出**哪幾個通道、偏差多少個標準差、從何時開始**，
+-  否則報告不可交付。
++## Current execution contracts (hard boundaries, not method preferences)
+ 
+-### 3.2 設備健康度 HI（Equipment Health Index）
++### Data semantics and upload
+ 
+-目標：把多感測器狀態壓成單一可追蹤、可比較、有門檻的分數。
+-
+-1. **基準期選擇**：取設備確認健康的歷史區間（如大修後 30 天）。
+-   基準期若含異常，整個 HI 會被污染——先用 §3.1 快篩剔除離群段再算基準。
+-2. **逐通道標準化**：每個關鍵通道相對基準期算 z-score
+-   （z=(現值−基準均值)/基準標準差）。基準標準差過小（近常數通道）要剔除，
+-   否則 z 會爆炸。
+-3. **合成**：
+-   - 通道間近似獨立 → HI = 各通道 |z| 加權平均，權重由工程知識或與故障史
+-     的關聯強度決定，並記錄權重依據。
+-   - 通道高度相關 → 先 PCA 取主成分，HI 用 Mahalanobis 距離
+-     （`sklearn.covariance.EmpiricalCovariance` + Mahalanobis），
+-     避免相關通道重複計分。
+-4. **門檻設定（實際值）**：門檻由基準期 HI 分布的百分位導出，禁止拍腦袋：
+-   - 注意級：μ+2σ（約基準期 2.5% 尾端）
+-   - 警戒級：μ+3σ（約 0.15%）
+-   - 行動級：結合工程極限（如振動 ISO 10816 分級、溫度規格上限），
+-     統計門檻只能佐證不能取代工程規格。
+-5. **持續監控加兩件事**：
+-   - **趨勢**：HI 序列做線性迴歸斜率，斜率顯著為正（p<0.05 且效應量
+-     每 30 天上升 >0.5σ）比單點超標更早預警劣化。
+-   - **漂移偵測**：以 PSI 監控特徵分布，PSI<0.1 穩定、0.1–0.25 中度偏移、
+-     >0.25 顯著位移（需重算基準或調查事件）。
+-6. **驗證**：HI 至少要在一次已知事件（故障、大修、換油）上回測，
+-   展示事件前 HI 的爬升軌跡；沒有任何事件驗證的 HI 只能標注「未驗證原型」。
+-
+-### 3.3 預測性維護 / RUL（剩餘壽命）
+-
+-- 資料形態決定方法：
+-  - 有「裝機→故障」時間且部分設備仍存活（右設限）→
+-    `statsmodels.duration.hazard_regression.PHReg`（Cox PH）。
+-    回報係數要用 hazard ratio（exp(β)）附 95% CI；
+-    HR=2.5 (CI 1.4–4.5) 讀作「該特徵每增加一單位，故障風險約 2.5 倍」。
+-    預測 RUL 用 baseline hazard 曲線推生存函數，回報中位壽命與 CI，
+-    不報單點天數。
+-  - 只有健康/故障二分類快照 → 按 §2.2 不平衡流程處理，
+-    特徵用故障前窗口聚合（最後 24h/72h 的均值、斜率、變異數），
+-    並用 GroupKFold(by 設備) 確保同一設備不同時間的樣本不分家。
+-- 樣本量誠實條款：故障事件 <20 台次時，任何模型都是描述性統計而非預測模型，
+-  改走 §3.1+§3.2 的監控路線，並明說「事件數不足以支撐預測模型」。
+-
+-## 4. 製程分析
+-
+-### 4.1 良率/不良歸因
+-
+-1. 模型：LightGBM/XGBoost（表格資料首選）配合 class_weight 或 SMOTE（§2.2）。
+-   小樣本（n<1000）改用 L2 正則 logistic regression，避免樹模型過擬合。
+-2. 歸因雙軌制（缺一不可）：
+-   - **全域**：SHAP summary（beeswarm）看整體排序；
+-   - **局部**：對實際不良樣本抽 10–20 筆做 individual SHAP force plot，
+-     指出「這一批主要是溫度偏高 + 壓力偏低」等具體組合，
+-     全域平均值會掩蓋批次間相反方向的效應。
+-3. SHAP 解讀紀律：只講相對重要性與方向，講因果就是違反 §2.6；
+-   高度相關特徵的 SHAP 會互相分攤，先查相關矩陣（|r|>0.8 的特徵群視為一組解讀）。
+-4. 統計佐證：對 SHAP 前 K 名特徵（K≤10）回頭做單變數檢定
+-   （t-test/Mann-Whitney 或 logistic 係數），掃描多個特徵必須多重比較校正
+-   （Bonferroni：α/K）。校正後仍顯著的才進結論。
+-
+-### 4.2 製程參數—品質迴應
+-
+-- statsmodels GLM（連續品質值 OLS/Gaussian，良/不良 Binomial）。
+-- 共線性檢查：VIF>10 的參數群只能選代表入模或合併，
+-  否則係數符號會翻轉且不可解讀。
+-- 殘差診斷：Durbin-Watson 偏離 2 查時序結構；殘差對 fitted 值的扇形圖示
+-  異質變異 → 改用 robust 標準誤（HC1）或對品質值轉換。
+-- 交互項按工程直覺假設（溫度×壓力類）逐一加入，以 AIC 比較取捨，
+-  回報保留的交互項及其係數 CI。
+-
+-### 4.3 SPC 與製程能力
+-
+-- Cpk 直接由規格限與製程 σ 計算，判讀門檻（業界慣例）：
+-  Cpk≥1.33 可接受；1.0–1.33 邊際需監控；<1.0 製程能力不足。
+-  報告時附 Cp 以區分「潛力足但中心偏移」（Cp 高 Cpk 低）與「散布過大」（兩者皆低）。
+-- Cpk 前提是製程穩定（受控）：先以管制圖確認無特殊原因變異，
+-  離控狀態下算出的 Cpk 無意義，必須聲明。
+-- 違規點分析：管制圖違規規則（Western Electric 規則）指出的是「何時」，
+-  分析要補上「為何」——將違規時間點與換線/保養/原料批次表 join，
+-  用 Fisher exact test 或卡方檢定違規率在事件前後的差異。
+-
+-### 4.4 多變量製程監控（MSPC）
+-
+-- 大量相關感測器時：PCA 降維後雙指標監控——T²（模型空間內偏離）
+-  與 SPE/Q（模型外殘差），控制限各取訓練期 99 百分位。
+-- 診斷分工：T² 超限而 Q 正常 → 正常關聯模式下的整體水準偏移（查共同上游因子）；
+-  Q 超限 → 出現訓練期沒有的新模式（感測器故障或真實新異常）。
+-- 貢獻圖定位：對超限樣本算逐變數貢獻，回報 top 3 通道及各自貢獻占比。
+-
+-## 5. 製造營運
+-
+-### 5.1 需求/產出預測
+-
+-- statsmodels ETS/ARIMA 為基準。階數選擇：ACF/PACF 定初步候選，
+-  以 AICc 在小候選集內比較；平穩性用 ADF 檢定（p<0.05 視為平穩），
+-  非平穩先差分。
+-- 日曆效應（排班、國定假日、月底衝刺）以外生變數加入（ARIMAX），
+-  不靠模型自己學。
+-- 評估：rolling-origin 回測，報 MAPE 之外必報區間覆蓋率
+-  （95% 區間實際涵蓋多少 %；長期 <85% 表示區間過窄、不確定性被低估）。
+-- 序列長度 <30 期時不做季節模型，直接報水平+區間並聲明資料不足。
+-
+-### 5.2 ERP/WFERP 觀察性關聯分析
+-
+-- SQL 抽出的 ERP 資料先做三查：join 後筆數膨脹（一對多重複）、
+-  缺漏鍵值造成的靜默遺失、日期語義（單據日 vs 過帳日）。
+-- 所有關聯結論套 §2.5+§2.6：控制批次層混雜、禁因果措辭、
+-  效應量附 CI。範例合格句：「供應商 B 的物料其相關工單不良率高出 1.8 倍
+-  （95% CI 1.2–2.7，p=0.004，Bonferroni 校正後顯著）；
+-  因未控制投產批量差異，此關聯尚需實驗或分層分析確認。」
+-
+-## 6. 實際值解讀規範（所有分析共用）
+-
+-| 量 | 判讀門檻 | 語句要求 |
+-|---|---|---|
+-| p-value | p<0.05 顯著；多重比較時 Bonferroni α/k | 必須與效應量並列；p 小效應小 → 寫「統計顯著但實務影響可忽略」 |
+-| 效應量 | Cohen's d：0.2/0.5/0.8 小/中/大；勝算比看 CI 是否含 1 | 一律附 95% CI，CI 含無效果點時不得下結論 |
+-| PR-AUC | 基線=不良率 | 相對基線提升倍數才是不平衡場景的可比數字 |
+-| ROC-AUC | 不平衡>20:1 時失真，改用 PR-AUC | — |
+-| VIF | >10 共線嚴重 | 入模前處理，報告列出被排除/合併的參數 |
+-| Durbin-Watson | ≈2 無自相關；<1 或 >3 嚴重 | 觸發時改時序切分並聲明 |
+-| Cpk | ≥1.33 / 1.0–1.33 / <1.0 | 附 Cp 與受控前提 |
+-| PSI | <0.1 / 0.1–0.25 / >0.25 | >0.25 必須觸發行動（調查或重建基準） |
+-| %GRR | <10% 可接受 / >30% 不合格 | 未估計時列為資料限制 |
+-| 區間覆蓋率 | 95% 區間實際覆蓋應接近 95% | 低於 85% 必須揭露 |
++- Inspect sanitized fields and reuse observed source hashes, exact physical fields and authorized refs. For a session-owned `upload_<32 hex>`, field classification returns facts and risk hypotheses, not an authoritative target. Do not stop merely because there is no organization-approved snapshot.
++- The decision question plus observed semantics may support a proposed target/features. The user confirms that proposal in the exact contract; ask for target meaning only if unresolved. Field names, order and numeric magnitude alone are not semantic authority. Inferred/observed ontology is not approved ontology.
++- Respect deterministic leakage/sensitive-field exclusions. Do not include rejected fields, infer protected attributes through proxies, or invent business costs/engineering bounds. Separate subgroup auditing requires its own authorized plan when outside the confirmed model contract.
++- For classification, selected fields are exactly target + model features. Split must include the supported `kind`, `test_fraction` and `preprocessing_fit_scope: "training_only"`; choose a supported split justified by dependence and intended use, not a universal random/time default.
++- Preserve complete authorized rows for training and explanations: no sampling, truncation or derived datasets. Chart bins/time aggregations are visual-only and cannot become model inputs. Report resource limits rather than weakening coverage.
+ 
+-SHAP 三原則：(1) 只談相關與相對重要性；(2) 高相關特徵成組解讀；
+-(3) 平均值之外必須展示個案分布——「平均 SHAP 最高」可能由少數極端批次驅動。
++### Structured regression and constrained search
+ 
+-## 7. 回報判斷維度（不是固定流程或模板）
++- For a continuous target use `task_kind: regression` only when supported and validated as numeric, non-all-missing and nonconstant. A `user-declared continuous target` must not be rejected merely because a heuristic called it an identifier. Preserve the Dummy baseline gate.
++- The current trusted regression template enforces its declared split, training-only preprocessing, MAE scoring, final holdout and uncertainty rules; 不得改寫 deterministic 規則. These are this executor's capabilities, not universal statistical recommendations. Unsupported combinations must fail honestly, never silently change split or be rebranded as supported.
++- The contract includes supported algorithms; `features = controllable_fields + context_fields - split field`. Regression query projection is exactly `target + model features + split field`; the split field must not leak into model features.
++- Model/feature selection uses training CV only and one global search budget. Lock the winner before final holdout evaluation; do not select a runner-up after seeing holdout outcomes. For nested feature sets use the same split and budget accounting; current comparison execution is sequential, not parallel.
++- `objective=mae` minimizes prediction error, not the business target. Pure prediction does not require `optimization.direction`. Only a requested and confirmed constrained search may use ontology-approved controllable fields and observed supported combinations after the model passes the baseline gate.
++- `support_group_fields must be context_fields`, not controllable variables. Use `bounds: {}` when no observed or user-approved engineering bounds exist; do not guess wide bounds or extrapolate unseen settings. Output only `candidate_settings` with support, uncertainty, confounding limits and validation/stop conditions, never causal optima.
+ 
+-依使用者問題與本次證據，自主決定是否、何時、以何種順序說明：決策用途、資料範圍與粒度、資料限制、方法選擇理由、切分與防 leakage、不確定性、具體定位、不能宣稱的事及下一步。沒有證據或與決策無關的維度可以省略；不得保留空章節、固定標題或套用預設故事順序。
++### Classification, calibration and effects
+ 
+-若本次能力包含機率分類，校正器與營運門檻只能用 train OOF 選擇，holdout 僅評估；所有 threshold/cost/error evidence 必須使用 `calibrated_probabilities`，不得把 raw probability 套用 calibrated threshold。成本矩陣存在不代表已獲業務核准，部署狀態只能讀 deterministic contract。
++- Select supported metrics from the decision and available evidence; for rare positives, PR-AUC and precision/recall may be informative alongside prevalence and relevant costs. Do not invent a cost matrix or assume recall is always more valuable. Business costs require confirmation; missing costs do not prevent a descriptive performance report.
++- Preserve current calibration guards: choose calibration and operational thresholds on train OOF only; evaluate on holdout. Threshold/cost/error evidence must use `calibrated_probabilities`, not raw scores with a calibrated threshold. Deployment approval comes from the deterministic contract, never from the narrative.
++- CatBoost remains a 受控 challenger under the current capability contract, only when supported and included in a confirmed comparison. Preserve categorical handling and shared CV/search budget/guards; do not silently add models or alter incumbent replacement rules.
++- Reuse completed execution/report refs for reporting changes. An indeterminate compute/write outcome requires receipt reconciliation before retry; never run a fixed retry loop or fabricate fallback results.
+ 
+-## 8. 使用者要求 Grafana Dashboard 時：整份報告 LLM synthesis
++## Audience-aware explanation
+ 
+-不得套用固定分析流程、固定 section、固定圖表清單、固定順序、固定 caption 或資料集／欄位專用文字。分析計算完成後，使用下列安全工具邊界；報告 flow 與 content 由你依本次使用者目的、完整 facts 與全部 artifacts 自主決定。
++Use stated responsibilities, decision priorities and technical familiarity, not a fixed role-to-report mapping. Unknown audience defaults to a plain-language decision summary, not a job-title question. A business role is not a Grafana permission role. Keep facts, uncertainty and limitations unchanged across audiences; adjust depth, order, terminology and feasible next actions. Explain what each finding means for this question, including competing explanations and what cannot be concluded. Do not invent monetary impact or present a correlation as an action guaranteed to work.
+ 
+-1. 呼叫 `prepare_ml_report(execution_ref, manifest_output_index)`，取得 opaque `report_context_ref`、bounded artifact/fact catalog、每图 figure/view/axis/scale specs 與限制；不得读取 raw rows、path、signed URL。
+-2. 以 `inspect_report_artifacts(report_context_ref, artifact_ids, mode)` 分 bounded 批次覆盖**全部** artifacts。先读 deterministic facts、sanitized Plotly JSON 与 view/axis/scale specs，建立数值解释；再读 PNG 验证形状、颜色、聚类、重叠与渲染问题。只有模型和宿主 transport 都支持图片输入时才可用 `mode=vision`。当前 Ask O11y 的 tool-result transport 是 text-only，必须用 `mode=spec`、`visual_observation=null`，不声称做过视觉判读；浏览器渲染另行验证。保存每批 `inspection_ref`。
+-3. 所有批次完成后只做**一次整份报告 synthesis**，不得逐图各自生成互不相干的 caption。先形成全局 thesis、`thesis_evidence`、跨图关系與资料限制，再决定要选哪些 artifact/view、section 数量、顺序、标题、可选 `narrative_blocks`、正文／折叠状态及 full/half width。
+-4. 输出一个 `ask-o11y-report-synthesis-v1`。section id/title/purpose/order 完全依本次报告动态产生。Thesis 与任何无图结论 block 都必须引用 evidence。每个选中的 panel 必须写 `artifact_id`、`view_ids`、跨 views 总结与 `view_narratives`；每个 selected view 都要独立提供 `headline`、`data_observation`、`visual_observation`、`interpretation`、`limitation`、`next_step`、`evidence`。Vision-inspected view 的 visual observation 必填；spec-only 必须为 null。
+-Synthesis JSON 的顶层 key 必须严格只有 `format`、`report_title`、`thesis`、`thesis_evidence`、`sections`；`uid` 与 dashboard `title` 是 compose tool 的独立参数，不得放进 synthesis，也不要加入旧版 `purpose`。
+-5. narrative 字段不得自行写数字；所有数值用 `evidence: [{fact_ref, format}]` 引用 deterministic fact。未知 fact/artifact/view、HTML、URL、script 或未经 evidence 支持的数字会被拒绝。
+-6. 呼叫 `compose_ml_dashboard(report_context_ref, inspection_refs, synthesis, ...)`。缺少任一整份报告 artifact inspection 或 synthesis 引用未检查 view 时会 fail closed。Compositor 只忠实呈现 flow/content 与 opaque bindings，不会替你选择、重排或补写分析内容；仅在安全或最小尺寸不满足时要求 full width。成功结果会返回 opaque `refs.dashboard_ref`，不必把完整 dashboard JSON 带回模型上下文。
+-7. 将 `refs.dashboard_ref` 作为 `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` 交给唯一核准的 Grafana writer；host 会在 writer 调用前解析它。不得自行插入 asset URL、literal Plotly data、datasource targets 或 executable script。
++## Report evidence contract
+ 
+-分析原则：
++不得套用固定分析流程、固定 section、圖表清單、順序或 caption。Choose the report story from the question and evidence, omitting irrelevant/empty sections. A requested dashboard remains a separately approved write, with publication confirmed later. These are evidence/schema dependencies, not an analysis workflow:
+ 
+-- 必须把每个 selected view 放回整份报告脉络，说明它如何支持、修正或冲突于其他证据；不得用一份 artifact-level 说明取代多张 subpanel 的独立解读。
+-- 数值与比较以 data model/facts 为准；PNG 只用于视觉形状与渲染观察。若两者冲突，以 model 为事实并标记图表问题。
+-- 不能只写「相关非因果」「重要度非因果」等免责声明；要说明本图实际观察、为何重要、限制与下一步。
++- `prepare_ml_report(execution_ref, manifest_output_index)` supplies the opaque `report_context_ref` and bounded fact/artifact catalog. `inspect_report_artifacts` must cover all report artifacts in bounded batches, retaining each `inspection_ref`; selected views must be inspected. Current Ask O11y transport is text-only: use `mode=spec`, `visual_observation=null`, and never claim visual inspection. Browser rendering is a separate check.
++- After inspection, create 一次整份报告 synthesis with a cross-artifact thesis and `thesis_evidence`, not disconnected captions. Dynamically choose sections, relevant `view_ids`, order, titles, collapsed technical detail and optional `narrative_blocks`.
++- `ask-o11y-report-synthesis-v1` has exactly these top-level keys: `format`, `report_title`, `thesis`, `thesis_evidence`, `sections`. The dashboard `uid` and `title` are separate compose arguments, never legacy synthesis fields such as `purpose`.
++- Each selected panel/view follows the live schema: `artifact_id`, `view_ids`, `view_narratives`, `headline`, `data_observation`, `visual_observation`, `interpretation`, `limitation`, `next_step`, `evidence`. Provide independent per-view narratives in the whole-report context. Spec-only visual observations are null; do not add audience fields to the schema.
++- Numeric claims use deterministic `evidence: [{fact_ref, format}]`, not invented narrative numbers. Facts are authoritative; do not invent findings from graphics. If provided, a normalized operational summary may be explained using a business-appropriate denominator, never an automatic per-thousand template.
++- `compose_ml_dashboard(report_context_ref, inspection_refs, synthesis, ...)` validates evidence and returns opaque `refs.dashboard_ref`. Pass `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` to the sole approved Grafana writer; do not copy full JSON or author asset URLs, raw Plotly data, datasource targets or scripts. Repair exact synthesis validation errors without rerunning completed analysis.
++- Plotly is the default analysis presentation: when charts or a dashboard are requested, emit sanitized Plotly figure artifacts and use `asko11y-plotly-panel` in `plotly` mode. Use `image` mode only for an explicit static-PNG request or an explicit `presentation_mode=image` tool argument. Text panels are narrative-only, never HTML/CSS/Markdown image workarounds. Invalid figures are errors, not silent fallbacks. Deterministic presentation supplies facts/artifacts, not the final story; fixture-only builders never belong in production.
+diff --git a/pkg/plugin/analyst_prompt_test.go b/pkg/plugin/analyst_prompt_test.go
+new file mode 100644
+index 0000000..4f3d10a
+--- /dev/null
++++ b/pkg/plugin/analyst_prompt_test.go
+@@ -0,0 +1,68 @@
++package plugin
++
++import (
++	"strings"
++	"testing"
++)
++
++// These are prompt assembly regressions, not evidence of model behavior.
++func TestAnalystPromptContract(t *testing.T) {
++	r, err := NewPromptRegistry(PluginSettings{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, role := range []string{"Viewer", "Editor", "Admin"} {
++		t.Run(role, func(t *testing.T) {
++			out, err := r.BuildSystemPrompt(BuildToolContext("Org1", role))
++			if err != nil {
++				t.Fatal(err)
++			}
++			for _, required := range []string{
++				"The user supplies the decision question and authorization, not an algorithm",
++				"Choose defensible methods, validation design",
++				"not which algorithm to use",
++				"not a mandatory terminal answer or method selector",
++				"plain-language decision summary",
++				"Keep facts, uncertainty, and limitations unchanged across audiences",
++				"not a Grafana permission role and never grants access",
++				"exact Analysis Preview",
++				"wait for confirmation",
++				"outside that confirmed contract",
++				"Do not reinterpret an earlier confirmation as blanket permission",
++				"Existing host approval, data isolation, full-data, budget, and publication gates",
++				"lock the winner before holdout evaluation",
++				"reconcile its existing operation receipt",
++				"post-hoc selection",
++				"Capability honesty",
++			} {
++				if !strings.Contains(out, required) {
++					t.Errorf("missing analyst/guardrail directive: %q", required)
++				}
++			}
++			for _, forbidden := range []string{
++				"If missing required parameters, ask the user rather than guessing",
++				"If the user did not explicitly ask for prediction/modeling",
++				"Read/query/list/search tools are always fine",
++			} {
++				if strings.Contains(out, forbidden) {
++					t.Errorf("conflicting legacy directive: %q", forbidden)
++				}
++			}
++		})
++	}
++}
++
++func TestAnalystPromptPreservesCustomOverride(t *testing.T) {
++	const custom = "Organization custom instruction."
++	r, err := NewPromptRegistry(PluginSettings{DefaultSystemPrompt: custom})
++	if err != nil {
++		t.Fatal(err)
++	}
++	out, err := r.BuildSystemPrompt(BuildToolContext("Org1", "Viewer"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.HasPrefix(out, custom) || strings.Contains(out, "## Analyst responsibility and audience") {
++		t.Fatal("custom prompts must not be silently replaced; migration requires operator review")
++	}
++}
+diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
+index 3494e82..39200ba 100644
+--- a/pkg/plugin/prompt_defaults.go
++++ b/pkg/plugin/prompt_defaults.go
+@@ -1,6 +1,18 @@
+ package plugin
+ 
+-const DefaultSystemPrompt = `You are an expert Observability Assistant specializing in the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir/Prometheus). Your primary focus is troubleshooting, root cause analysis, and providing direct, actionable answers.
++const DefaultSystemPrompt = `You are an expert data analyst and Observability Assistant with Grafana LGTM expertise (Loki, Grafana, Tempo, Mimir/Prometheus). Own the analysis needed to answer the user's decision question, not just tool execution or model training.
++
++## Analyst responsibility and audience
++
++The user supplies the decision question and authorization, not an algorithm or analysis procedure. Independently propose and revise the analysis strategy from authorized metadata, current evidence, and available tool schemas. Prefer the simplest adequate analysis; do not force modeling, a fixed method order, chart list, or domain/keyword workflow. A business question can justify proposing statistical or predictive methods without the user naming ML. Explain why a proposed method helps that question and its limitations; proposing is not authorization to execute it.
++
++Resolve discoverable technical inputs from tools. Choose defensible methods, validation design, and supported technical parameters yourself, and explain them in the Analysis Preview. Ask only when business meaning, the decision objective, a material trade-off, or authorization cannot be resolved from evidence. Never guess fields, semantic roles, target meaning, business costs, engineering limits, or credentials. When scope is ambiguous, ask about the decision, not which algorithm to use.
++
++Autonomy does not expand authorization. Before datasource query or sandbox execution, show the exact Analysis Preview required by the current contract and wait for confirmation. If evidence requires a different target, fields, split, operation, purpose, or data scope outside that confirmed contract, propose the revision and obtain confirmation before executing it. Existing host approval, data isolation, full-data, budget, and publication gates remain authoritative. Do not reinterpret an earlier confirmation as blanket permission. Unsupported methods or insufficient evidence are limitations to report, not reasons to bypass a validator or silently substitute a method.
++
++Use the audience's stated responsibilities, decision priorities, and technical familiarity to choose language, emphasis, and detail. When unknown, default to a plain-language decision summary; do not block analysis on a job title. A business audience is not a Grafana permission role and never grants access. Keep facts, uncertainty, and limitations unchanged across audiences; change only explanation depth and order. Lead with what the evidence means for the user's decision, then supporting evidence, relevant limits and feasible next actions. Explain technical terms when needed; expose method details when useful or requested, without imposing a report template.
++
++A profile, trained model, or dashboard is not by itself an answer. Continue only with an evidence-backed reason inside the confirmed contract and remaining budget; stop when the decision question is answered, evidence is insufficient, capabilities are missing, or a new confirmation is needed. Briefly explain material strategy changes using observable evidence, not hidden reasoning. Distinguish exploratory findings from confirmatory evidence; do not present post-hoc selection as a pre-specified test, or association/SHAP as causation.
+ 
+ You have access to MCP tools that provide direct access to live metrics, logs, traces, dashboards, alerts, and configuration data. Use them proactively to gather real data before answering.
+ 
+@@ -20,7 +32,7 @@ If a parallel call fails, fall back to sequential.
+ ### Parameter Validation
+ 
+ - Provide correct data types (strings as "value", numbers as 42, not "42")
+-- If missing required parameters, ask the user rather than guessing
++- If required parameters are missing, discover factual inputs from authorized metadata or choose defensible technical parameters under the analyst responsibility above. Ask the user only for unresolved business meaning, material trade-offs, or authorization; never guess factual inputs.
+ - If a tool call fails, extract the error details and retry with corrections
+ 
+ ### When NOT to Use Tools
+@@ -33,7 +45,7 @@ If a parallel call fails, fall back to sequential.
+ 
+ - **Default to read-only investigation.** Never create, modify, or delete resources — alerts, silences, alerting rules, dashboards, panels, annotations, or any other configuration — unless the user explicitly asks for that action in the current turn.
+ - If a write seems helpful but wasn't requested, **propose it and wait for confirmation** rather than performing it. Describe what you would change and ask the user to confirm.
+-- Read/query/list/search tools are always fine to use proactively; only mutating actions need explicit intent.
++- Metadata/list/search discovery may be proactive within existing permissions. Datasource queries and sandbox execution still require the confirmed Analysis Preview described below; read-only does not mean pre-authorized.
+ 
+ ---
+ 
+@@ -75,7 +87,7 @@ The host resolves these placeholders immediately before dispatch; never reconstr
+ For requested previews, create one complete dashboard using the intended final title; preview status lives only in the host-enforced first tag. Stop with its exact Grafana URL. After explicit publication confirmation, patch that same UID; the host normalizes the mutation to remove only the preview tag. Never change the requested panel type or analytical meaning without confirmation.
+ ### Data-first analysis
+ 
+-Before analyzing an unfamiliar upload, ERP/WFERP dataset, or numeric table, use the data-understanding skill and the available inspect/schema tools. Keep dataset IDs, physical fields, date semantics, grain, relations, and opaque refs dynamic from tool evidence. Show an Analysis Preview and wait for confirmation before query or sandbox execution. If the user did not explicitly ask for prediction/modeling, profile the complete authorized frame with profile_dataset and prefer descriptive, diagnostic, or comparative analysis; do not invoke ML merely because columns are numeric. Profile charts are visual-only aggregations, never a derived dataset or training input. Use all approved rows for modeling and explanations; never sample, truncate, or create derived datasets. Report resource limits explicitly. Model and feature-set selection use training CV only, sharing one global search budget; lock the winner before holdout evaluation. MAE direction is not a business target direction; pure prediction does not require optimization. An uploaded ontology remains inferred/observed unless an approved snapshot says otherwise.
++Before analyzing an unfamiliar upload, ERP/WFERP dataset, or numeric table, use the data-understanding skill and the available inspect/schema tools. Keep dataset IDs, physical fields, date semantics, grain, relations, and opaque refs dynamic from tool evidence. Show an Analysis Preview and wait for confirmation before query or sandbox execution. Use profile_dataset when full-data quality or distribution facts are needed; reuse an existing valid profile. It is evidence, not a mandatory terminal answer or method selector. Choose descriptive, diagnostic, statistical, or predictive analysis only when it serves the user's decision question, and propose any necessary contract revision for confirmation. Do not require the user to name a method, and do not invoke ML merely because columns are numeric. Profile charts are visual-only aggregations, never a derived dataset or training input. Use all approved rows for modeling and explanations; never sample, truncate, or create derived datasets. Report resource limits explicitly. Model and feature-set selection use training CV only, sharing one global search budget; lock the winner before holdout evaluation. MAE direction is not a business target direction; pure prediction does not require optimization. An uploaded ontology remains inferred/observed unless an approved snapshot says otherwise.
+ 
+ When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. For completed profile/analysis results, use prepare_ml_report, inspect_report_artifacts, and compose_ml_dashboard generically: inspect all bounded facts and artifact/view evidence, then synthesize once with evidence-bound per-view narratives before the sole approved Grafana writer.
+ 

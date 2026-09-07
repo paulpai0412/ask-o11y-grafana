@@ -208,6 +208,13 @@ def execute(code: str, seed: int, namespace: dict[str, Any], audit: dict[str, An
         display_name = label(name, index, f"Output {index}")
         csv_requested = display_name.lower().endswith(".csv")
         json_requested = display_name.lower().endswith(".json")
+        if hasattr(value, "to_plotly_json") and hasattr(value, "to_json"):
+            try:
+                rendered = value.to_json()
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Plotly figure JSON is not serializable") from exc
+            write(f"plotly-{index}.json", "application/vnd.plotly.v1+json", rendered, display_name)
+            return
         if json_requested:
             try:
                 rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))

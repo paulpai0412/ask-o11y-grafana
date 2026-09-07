@@ -380,8 +380,18 @@ def _validate_evidence(evidence: Any, catalog: dict[str, dict[str, Any]], where:
 
 def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any]) -> dict[str, Any]:
     """Validate LLM-authored flow/content against deterministic artifacts and facts."""
-    if not isinstance(synthesis, dict) or set(synthesis) != {"format", "report_title", "thesis", "thesis_evidence", "sections"}:
-        raise ValueError("report synthesis shape is invalid")
+    expected_keys = {"format", "report_title", "thesis", "thesis_evidence", "sections"}
+    if not isinstance(synthesis, dict):
+        raise ValueError("report synthesis must be an object")
+    unexpected_keys = sorted(set(synthesis) - expected_keys)
+    missing_keys = sorted(expected_keys - set(synthesis))
+    if unexpected_keys or missing_keys:
+        details = []
+        if missing_keys:
+            details.append("missing: " + ", ".join(missing_keys))
+        if unexpected_keys:
+            details.append("unexpected: " + ", ".join(unexpected_keys))
+        raise ValueError("report synthesis shape is invalid (" + "; ".join(details) + ")")
     if synthesis.get("format") != REPORT_FORMAT:
         raise ValueError("report synthesis format is invalid")
     _safe_text(synthesis.get("report_title"), "report_title")

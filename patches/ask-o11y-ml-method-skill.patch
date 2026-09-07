@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..355736e
 --- /dev/null
 +++ b/pkg/agent/skills/ml-method-selection/SKILL.md
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,269 @@
 +---
 +name: ml-method-selection
 +description: REQUIRED for any machine-learning or statistical analysis turn. Always select for 模型訓練、自動調參、分類、迴歸、分群、異常偵測、時間序列、預測、特徵重要性、結果解釋，或要求把 ML 過程/結果做成 Grafana Dashboard；亦涵蓋智慧製造設備健康、預測性維護 predictive maintenance、異常偵測 anomaly detection、良率/不良、製程參數、SPC/Cpk/OEE、需求預測。
@@ -263,6 +263,7 @@ index 0000000..355736e
 +2. 以 `inspect_report_artifacts(report_context_ref, artifact_ids, mode)` 分 bounded 批次覆盖**全部** artifacts。先读 deterministic facts、sanitized Plotly JSON 与 view/axis/scale specs，建立数值解释；再读 PNG 验证形状、颜色、聚类、重叠与渲染问题。模型支持 vision 时用 `mode=vision`；不支持 vision 时用 `mode=spec`，并明确不声称做过视觉判读。保存每批 `inspection_ref`。
 +3. 所有批次完成后只做**一次整份报告 synthesis**，不得逐图各自生成互不相干的 caption。先形成全局 thesis、`thesis_evidence`、跨图关系與资料限制，再决定要选哪些 artifact/view、section 数量、顺序、标题、可选 `narrative_blocks`、正文／折叠状态及 full/half width。
 +4. 输出一个 `ask-o11y-report-synthesis-v1`。section id/title/purpose/order 完全依本次报告动态产生。Thesis 与任何无图结论 block 都必须引用 evidence。每个选中的 panel 必须写 `artifact_id`、`view_ids`、跨 views 总结与 `view_narratives`；每个 selected view 都要独立提供 `headline`、`data_observation`、`visual_observation`、`interpretation`、`limitation`、`next_step`、`evidence`。Vision-inspected view 的 visual observation 必填；spec-only 必须为 null。
++Synthesis JSON 的顶层 key 必须严格只有 `format`、`report_title`、`thesis`、`thesis_evidence`、`sections`；`uid` 与 dashboard `title` 是 compose tool 的独立参数，不得放进 synthesis，也不要加入旧版 `purpose`。
 +5. narrative 字段不得自行写数字；所有数值用 `evidence: [{fact_ref, format}]` 引用 deterministic fact。未知 fact/artifact/view、HTML、URL、script 或未经 evidence 支持的数字会被拒绝。
 +6. 呼叫 `compose_ml_dashboard(report_context_ref, inspection_refs, synthesis, ...)`。缺少任一整份报告 artifact inspection 或 synthesis 引用未检查 view 时会 fail closed。Compositor 只忠实呈现 flow/content 与 opaque bindings，不会替你选择、重排或补写分析内容；仅在安全或最小尺寸不满足时要求 full width。成功结果会返回 opaque `refs.dashboard_ref`，不必把完整 dashboard JSON 带回模型上下文。
 +7. 将 `refs.dashboard_ref` 作为 `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` 交给唯一核准的 Grafana writer；host 会在 writer 调用前解析它。不得自行插入 asset URL、literal Plotly data、datasource targets 或 executable script。
