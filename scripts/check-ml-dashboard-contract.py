@@ -54,6 +54,32 @@ def main() -> int:
     contract.validate_preview_dashboard(value)
     contract.validate_ml_dashboard_minimum(value)
 
+    minimal = copy.deepcopy(value)
+    panel = next(item for item in minimal["panels"] if item.get("askO11yArtifactId"))
+    for field in ("cross_chart_context", "next_step"):
+        panel["askO11yNarrative"].pop(field)
+    panel["askO11yViewNarratives"] = []
+    panel["options"]["narrative"] = copy.deepcopy(panel["askO11yNarrative"])
+    panel["options"]["viewNarratives"] = []
+    contract.validate_preview_dashboard(minimal)
+    for field in ("headline", "observation", "interpretation", "limitation", "evidence"):
+        invalid = copy.deepcopy(minimal)
+        next(item for item in invalid["panels"] if item.get("askO11yArtifactId"))["askO11yNarrative"].pop(field)
+        expect_reject(invalid)
+    for mutation in ("duplicate-view", "unknown-field", "unknown-view-narrative", "empty-optional"):
+        invalid = copy.deepcopy(minimal)
+        target = next(item for item in invalid["panels"] if item.get("askO11yArtifactId"))
+        if mutation == "duplicate-view":
+            target["askO11yViewIds"] *= 2
+        elif mutation == "unknown-field":
+            target["askO11yNarrative"]["invented"] = "unexpected"
+        elif mutation == "empty-optional":
+            target["askO11yNarrative"]["next_step"] = ""
+        else:
+            target["askO11yViewNarratives"] = copy.deepcopy(next(item for item in value["panels"] if item.get("askO11yArtifactId"))["askO11yViewNarratives"])
+            target["askO11yViewNarratives"][0]["view_id"] = "unknown"
+        expect_reject(invalid)
+
     missing_tag = copy.deepcopy(value); missing_tag["tags"] = ["ask-o11y-preview"]
     expect_reject(missing_tag)
     missing_section = copy.deepcopy(value); next(item for item in missing_section["panels"] if item.get("type") == "row").pop("askO11ySectionId")

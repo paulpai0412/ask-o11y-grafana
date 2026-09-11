@@ -38,7 +38,7 @@ def report(module):
             "model_family": "xgboost", "search_budget": 2, "completed_trials": 2, "cv_folds": 2,
             "preprocessing_fit_scope": "training_only", "calibration_method": "isotonic", "best_params": {},
         },
-        baseline_metrics={"accuracy": 0.5},
+        baseline_metrics={"accuracy": 0.5, "pr_auc": 0.45, "roc_auc": 0.55},
         selected_metrics={"accuracy": 0.75, "pr_auc": 0.8, "roc_auc": 0.8},
         guards={"generalization_gap": 0.01, "importance_stability": 0.8, "max_psi": 0.01, "verdict": "accepted"},
         trials=[], features=[], limitations=["測試資料。"],
@@ -95,8 +95,8 @@ def main() -> int:
     invalid["evaluation_evidence"]["calibration"]["selected_on"] = "holdout"
     try:
         module.validate_manifest(invalid)
-    except ValueError:
-        pass
+    except ValueError as exc:
+        assert str(exc), "invalid calibration evidence error must be descriptive"
     else:
         raise AssertionError("manifest accepted holdout-selected calibration evidence")
 

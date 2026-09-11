@@ -1,0 +1,16 @@
+[Unit]
+Description=Grafana OpenSandbox control plane
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+WorkingDirectory=%h/apps/grafana
+ExecStart=/bin/bash -c 'set -a; source .env; set +a; exec %h/.local/bin/uvx --offline opensandbox-server --config config/opensandbox.local.toml'
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=append:%h/apps/grafana/.scratch/live-services/opensandbox.log
+StandardError=inherit
+
+[Install]
+WantedBy=default.target

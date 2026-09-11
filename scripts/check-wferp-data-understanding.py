@@ -162,7 +162,10 @@ def main() -> int:
     manifest, manifest_index = read_profile_manifest(execution_ref)
     if manifest["data"]["rows"] != queried["validation"]["row_count"] or not manifest["data"]["full_data"] or manifest["data"]["sampling"] or manifest["data"]["derived_dataset"]:
         raise RuntimeError("WFERP profile violated complete-data invariants")
-    report = mcp(8773, "prepare_ml_report", {"execution_ref": execution_ref, "manifest_output_index": manifest_index})
+    report_manifest_ref = profiled["refs"].get("report_manifest_ref")
+    if not isinstance(report_manifest_ref, str):
+        raise RuntimeError("profile execution did not return a canonical report_manifest_ref")
+    report = mcp(8773, "prepare_ml_report", {"report_manifest_ref": report_manifest_ref})
     artifact_ids = [item["artifact_id"] for item in report["report_context"]["artifacts"]]
     inspection = mcp(8773, "inspect_report_artifacts", {"report_context_ref": report["refs"]["report_context_ref"], "artifact_ids": artifact_ids, "mode": "spec"})
     composed = request_json(8773, {"jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": "tools/call", "params": {"name": "compose_ml_dashboard", "arguments": {"report_context_ref": report["refs"]["report_context_ref"], "inspection_refs": [inspection["refs"]["inspection_ref"]], "synthesis": make_synthesis(report["report_context"]), "uid": "wferp-profile-check", "title": "WFERP 資料理解報告", "output_mode": "full"}}})

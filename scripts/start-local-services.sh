@@ -36,31 +36,16 @@ if [[ ${1:-} != --mcp-only ]]; then
 	docker exec -i wferp-mssql-test /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -i /init/01_create_wferp_test.sql >/dev/null
 fi
 
-start() {
-	local name=$1 log=$2 restart=$3
-	shift 3
-	local pid_file="$RUNTIME_DIR/$name.pid"
-	if [[ -s $pid_file ]] && kill -0 "$(<"$pid_file")" 2>/dev/null; then
-		[[ $restart == 0 ]] && return
-		kill "$(<"$pid_file")"
-		for _ in {1..30}; do
-			kill -0 "$(<"$pid_file")" 2>/dev/null || break
-			sleep 0.1
-		done
-	fi
-	rm -f "$pid_file"
-	nohup "$@" >>"$RUNTIME_DIR/$log" 2>&1 &
-	echo $! >"$pid_file"
-}
-
-# The OpenSandbox daemon may be reused. Python MCPs must restart so imported
-# contract/snapshot validation code cannot remain stale across local deploys.
-start opensandbox opensandbox.log 0 uvx opensandbox-server --config config/opensandbox.local.toml
-start ontology ontology.log 1 uv run python ontology-mcp/server.py
-start data-query-planner data-query-planner.log 1 uv run python data-query-planner-mcp/server.py
-start grafana-query grafana-query.log 1 uv run python grafana-query-mcp/server.py
-start sandbox sandbox.log 1 uv run python sandbox-analysis-mcp/server.py
-start artifact-bridge artifact-bridge.log 1 uv run python artifact-bridge-mcp/server.py
+# User units (with loginctl linger enabled) survive logout and start after WSL boots.
+# Keep imported Python modules fresh on deploy without unmanaged duplicate workers.
+systemctl --user daemon-reload
+systemctl --user start grafana-opensandbox.service
+systemctl --user restart \
+	grafana-mcp@ontology-mcp.service \
+	grafana-mcp@data-query-planner-mcp.service \
+	grafana-mcp@grafana-query-mcp.service \
+	grafana-mcp@sandbox-analysis-mcp.service \
+	grafana-mcp@artifact-bridge-mcp.service
 
 if ! curl -fsS http://127.0.0.1:4000/healthz >/dev/null 2>&1; then
 	[[ -f $GATEWAY_CLI ]] || {

@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { PanelPlugin } from "@grafana/data";
 import { useTheme2 } from "@grafana/ui";
 import Plotly from "plotly.js-dist-min";
@@ -14,6 +20,7 @@ type PlotlyFigure = {
   data: Array<Record<string, unknown>>;
   layout: Record<string, unknown>;
   config?: Record<string, unknown>;
+  error?: string;
 };
 
 type PlotlyRuntime = typeof Plotly & {
@@ -29,7 +36,7 @@ type ViewNarrative = {
   visual_observation: string | null;
   interpretation: string;
   limitation: string;
-  next_step: string;
+  next_step?: string;
   evidence: NarrativeEvidence[];
 };
 
@@ -37,14 +44,15 @@ type Narrative = {
   headline: string;
   observation: string;
   interpretation: string;
-  cross_chart_context: string;
+  cross_chart_context?: string;
   limitation: string;
-  next_step: string;
+  next_step?: string;
   evidence: NarrativeEvidence[];
 };
 
 type Options = {
   renderMode?: "image" | "plotly";
+  figureFormat?: string;
   figure?: PlotlyFigure;
   fallbackUrl?: string;
   alt?: string;
@@ -91,12 +99,14 @@ function NarrativeBlock({ narrative }: { narrative?: Narrative }) {
           </span>
         ))}
       </div>
-      {rows.map(([label, text]) => (
-        <div key={label} style={{ marginTop: 6 }}>
-          <b>{label}：</b>
-          {text}
-        </div>
-      ))}
+      {rows
+        .filter(([, text]) => text)
+        .map(([label, text]) => (
+          <div key={label} style={{ marginTop: 6 }}>
+            <b>{label}：</b>
+            {text}
+          </div>
+        ))}
     </div>
   );
 }
@@ -147,10 +157,12 @@ function ViewNarrativeBlock({ narrative }: { narrative?: ViewNarrative }) {
         <b>限制：</b>
         {narrative.limitation}
       </div>
-      <div style={{ marginTop: 4 }}>
-        <b>下一步：</b>
-        {narrative.next_step}
-      </div>
+      {narrative.next_step ? (
+        <div style={{ marginTop: 4 }}>
+          <b>下一步：</b>
+          {narrative.next_step}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -192,10 +204,12 @@ function ImagePanel({ options }: { options: Options }) {
 function PlotView({
   view,
   theme,
+  height,
   onFailure,
 }: {
   view: PlotlyView;
   theme: Theme;
+  height: number;
   onFailure: () => void;
 }) {
   const container = useRef<HTMLDivElement | null>(null);
@@ -206,21 +220,23 @@ function PlotView({
     }
     const element = container.current;
     let active = true;
-    const layout = applyGrafanaTheme(view.figure.layout, theme);
+    // Plotly mutates inputs; retained report options must remain unchanged.
+    const figure = structuredClone(view.figure);
+    const layout = applyGrafanaTheme(figure.layout, theme);
     const config = {
-      ...view.figure.config,
+      ...figure.config,
       displaylogo: false,
       responsive: true,
       scrollZoom: false,
     };
     try {
-      Promise.resolve(
-        Plotly.react(element, view.figure.data, layout, config),
-      ).catch(() => {
-        if (active) {
-          onFailure();
-        }
-      });
+      Promise.resolve(Plotly.react(element, figure.data, layout, config)).catch(
+        () => {
+          if (active) {
+            onFailure();
+          }
+        },
+      );
     } catch {
       onFailure();
     }
@@ -238,27 +254,56 @@ function PlotView({
   return (
     <div
       ref={container}
+      role="figure"
       aria-label={view.title}
-      style={{ width: "100%", height: 320, minHeight: 260 }}
+      style={{ width: "100%", height, minHeight: 320 }}
     />
   );
 }
 
-function PlotlyPanel({ options }: { options: Options }) {
+function PlotlyPanel({
+  options,
+  height,
+}: {
+  options: Options;
+  height: number;
+}) {
   const theme = useTheme2();
   const [failedFigure, setFailedFigure] = useState<PlotlyFigure | null>(null);
   const failed = !!options.figure && failedFigure === options.figure;
   const mode = failed ? "error" : resolveRenderMode(options);
+  const onFailure = useCallback(
+    () => setFailedFigure(options.figure ?? null),
+    [options.figure],
+  );
+  const native = options.figureFormat === "ask-o11y-ml-plotly-v2";
   const views = useMemo(
     () =>
       options.figure
-        ? splitFigureViews(
-            options.figure,
-            options.selectedViewIds,
-            options.viewSpecs,
-          )
+        ? native
+          ? [
+              {
+                viewId: "figure",
+                title: options.alt || "分析圖表",
+                figure: {
+                  ...options.figure,
+                  config: options.figure.config || {},
+                },
+              },
+            ]
+          : splitFigureViews(
+              options.figure,
+              options.selectedViewIds,
+              options.viewSpecs,
+            )
         : [],
-    [options.figure, options.selectedViewIds, options.viewSpecs],
+    [
+      native,
+      options.figure,
+      options.alt,
+      options.selectedViewIds,
+      options.viewSpecs,
+    ],
   );
 
   if (mode === "image") {
@@ -266,30 +311,33 @@ function PlotlyPanel({ options }: { options: Options }) {
   }
   if (mode === "error" || views.length === 0) {
     return (
-      <div role="alert" style={{ padding: 16 }}>
-        圖表無法呈現。請檢查 figure／artifact；未自動降級或修改資料。
+      <div style={{ padding: 16, height: "100%", overflow: "auto" }}>
+        <div role="alert">
+          圖表無法呈現；已保留原圖與錯誤，未自動降級或修改資料。以下分析證據仍可閱讀。
+        </div>
+        <NarrativeBlock narrative={options.narrative} />
+        {options.viewNarratives?.map((narrative) => (
+          <ViewNarrativeBlock key={narrative.view_id} narrative={narrative} />
+        ))}
       </div>
     );
   }
-  const showPanelNarrative = shouldShowPanelNarrative(views.length);
+  const showPanelNarrative =
+    shouldShowPanelNarrative(views.length) || !options.viewNarratives?.length;
   return (
     <div
       style={{
         height: "100%",
-        display: "grid",
-        gridTemplateRows:
-          showPanelNarrative && options.narrative
-            ? "minmax(260px, 3fr) minmax(140px, 2fr)"
-            : "1fr",
-        overflow: "hidden",
+        overflow: "auto",
       }}
     >
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+          gridTemplateColumns:
+            "repeat(auto-fit, minmax(min(100%, 480px), 1fr))",
+          alignItems: "start",
           gap: 12,
-          overflow: "auto",
           padding: 8,
         }}
       >
@@ -307,18 +355,33 @@ function PlotlyPanel({ options }: { options: Options }) {
             <PlotView
               view={view}
               theme={theme}
-              onFailure={() => setFailedFigure(options.figure ?? null)}
+              height={Math.max(320, height - 100)}
+              onFailure={onFailure}
             />
-            <ViewNarrativeBlock
-              narrative={options.viewNarratives?.find(
-                (narrative) => narrative.view_id === view.viewId,
-              )}
-            />
+            {options.viewNarratives?.some(
+              (item) => item.view_id === view.viewId,
+            ) ? (
+              <details>
+                <summary style={{ cursor: "pointer", padding: "8px 0" }}>
+                  解讀與證據
+                </summary>
+                <ViewNarrativeBlock
+                  narrative={options.viewNarratives.find(
+                    (narrative) => narrative.view_id === view.viewId,
+                  )}
+                />
+              </details>
+            ) : null}
           </section>
         ))}
       </div>
-      {showPanelNarrative ? (
-        <NarrativeBlock narrative={options.narrative} />
+      {showPanelNarrative && options.narrative ? (
+        <details style={{ padding: "0 16px 8px" }}>
+          <summary style={{ cursor: "pointer" }}>
+            {views.length > 1 ? "跨圖解讀與證據" : "解讀與證據"}
+          </summary>
+          <NarrativeBlock narrative={options.narrative} />
+        </details>
       ) : null}
     </div>
   );

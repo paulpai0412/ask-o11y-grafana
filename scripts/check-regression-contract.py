@@ -86,6 +86,25 @@ def main() -> int:
         assert plan["analysis_input_contract"]["execution_template"] == "ask_o11y_regression_v1"
         assert plan["analysis_input_contract"]["autoresearch"] == {"objective": "mae", "objective_minimum": None, "search_budget": 6, "max_search_budget": 40}
         assert plan["analysis_contract"]["interpretation"] == "predictive_association_not_causation"
+        assert plan["analysis_contract"]["missing_value_policy"] == {"mode": "reject", "approved": False}
+        assert plan["analysis_input_contract"]["missing_value_policy"] == {"mode": "reject", "approved": False}
+
+        approved_policy = {"mode": "drop_invalid_target_split", "approved": True}
+        approved_base = {**base, "missing_value_policy": approved_policy}
+        approved_plan_result = planner.tool_plan_query({"dataset_metadata_ref": metadata_ref, "selected_fields": selected, "minimum_rows": 20, "analysis_contract": approved_base, "_server_context": context})
+        assert approved_plan_result["ok"], approved_plan_result
+        approved_plan = artifacts.read_json(context, approved_plan_result["plan_ref"])
+        assert approved_plan["analysis_contract"]["missing_value_policy"] == approved_policy
+        assert approved_plan["analysis_input_contract"]["missing_value_policy"] == approved_policy
+        assert approved_plan["plan_sha256"] != plan["plan_sha256"]
+
+        for unsafe_policy in (
+            {"mode": "drop_invalid_target_split", "approved": False},
+            {"mode": "drop_invalid_target_split"},
+            {"mode": "reject", "approved": True},
+        ):
+            unsafe = planner.tool_plan_query({"dataset_metadata_ref": metadata_ref, "selected_fields": selected, "minimum_rows": 20, "analysis_contract": {**base, "missing_value_policy": unsafe_policy}, "_server_context": context})
+            assert not unsafe["ok"] and "missing_value_policy" in unsafe["error"], unsafe
 
         filtered = {**base, "features": ["setpoint", "load"], "context_fields": ["date", "load"], "population_filter": {"source": "s0"}, "constrained_search": {"enabled": False, "minimum_support": 2, "top_k": 3, "support_group_fields": [], "bounds": {}}}
         filtered_plan = planner.tool_plan_query({"dataset_metadata_ref": metadata_ref, "selected_fields": ["date", "target", "setpoint", "load"], "minimum_rows": 20, "analysis_contract": filtered, "_server_context": context})
@@ -115,8 +134,10 @@ def main() -> int:
 
     schema = next(tool["inputSchema"] for tool in planner.TOOLS if tool["name"] == "plan_query")["properties"]["analysis_contract"]
     properties = schema["properties"]
-    for name in ("task_kind", "algorithms", "target_direction", "controllable_fields", "context_fields", "forbidden_fields", "constrained_search"):
+    for name in ("task_kind", "algorithms", "target_direction", "controllable_fields", "context_fields", "forbidden_fields", "constrained_search", "missing_value_policy"):
         assert name in properties
+    assert properties["missing_value_policy"]["properties"]["mode"]["enum"] == ["reject", "drop_invalid_target_split"]
+    assert properties["missing_value_policy"]["required"] == ["mode", "approved"]
     assert properties["task_kind"]["enum"] == ["binary_classification", "regression"]
     assert "support_group_fields" in properties["constrained_search"]["properties"]
 

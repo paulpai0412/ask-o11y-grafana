@@ -19,9 +19,13 @@ stop_pidfile() {
 	rm -f "$pid_file"
 }
 
-for name in artifact-bridge sandbox grafana-query data-query-planner ontology opensandbox; do
-	stop_pidfile "$RUNTIME_DIR/$name.pid"
-done
+systemctl --user stop \
+	grafana-mcp@artifact-bridge-mcp.service \
+	grafana-mcp@sandbox-analysis-mcp.service \
+	grafana-mcp@grafana-query-mcp.service \
+	grafana-mcp@data-query-planner-mcp.service \
+	grafana-mcp@ontology-mcp.service \
+	grafana-opensandbox.service
 stop_pidfile "$HOME/.pi/agent/gateway.pid"
 
 cd "$ROOT"

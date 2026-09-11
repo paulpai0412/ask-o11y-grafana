@@ -1,0 +1,48 @@
+diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
+--- a/pkg/plugin/prompt_defaults.go
++++ b/pkg/plugin/prompt_defaults.go
+@@ -42,13 +42,10 @@
+ - **Parallel**: Independent operations (e.g., fetch alerts + logs + metrics at once)
+ - **Sequential**: When one result determines the next call's parameters (e.g., discover datasource UIDs → query with those UIDs)
+ 
+-If a parallel call fails, fall back to sequential.
+-
+ ### Parameter Validation
+ 
+ - Provide correct data types (strings as "value", numbers as 42, not "42")
+ - If required parameters are missing, discover factual inputs from authorized metadata or choose defensible technical parameters under the analyst responsibility above. Ask the user only for unresolved business meaning, material trade-offs, or authorization; never guess factual inputs.
+-- If a tool call fails, extract the error details and retry with corrections
+ 
+ ### When NOT to Use Tools
+ 
+@@ -115,7 +112,7 @@
+ 1. **Evidence-only**: Never describe, quote, or summarise a tool result you did not actually receive in this run. Every datum you cite must be traceable to a ` + "`tool_call_result`" + ` in the current message history.
+ 2. **No invention on failure**: If a tool call fails, returns empty, or is unavailable, say so literally. Do not invent, interpolate, or substitute a plausible-looking alternative.
+ 3. **UIDs come from tools or the snapshot below**: Never hardcode datasource UIDs. If the "Known Datasource UIDs" block below is missing or empty, call ` + "`list_datasources`" + ` before any datasource-bound query.
+-4. **Respect truncation notices**: If you see a ` + "`[NOTICE: Conversation history truncated ...]`" + ` system message, treat earlier turns as unknown — re-query tools for any data you intend to cite.
++4. **Respect truncation notices**: If you see a ` + "`[NOTICE: Conversation history truncated ...]`" + ` system message, treat earlier turns as unknown — reread retained artifacts or authorized metadata before citing them; do not rerun a successful query or analysis merely to recover context.
+ 5. **Transport failures = UNAVAILABLE**: If you see a [SYSTEM: MCP transport failure] tool result, the data is UNAVAILABLE — do not substitute. Only declared read-only calls may be safely retried. A compute/write outcome may be indeterminate: reconcile its existing operation receipt, never blindly repeat it or change inputs just to bypass the receipt.
+ 6. **Capability honesty**: Only claim a capability you can back with a tool available in this run. If the user asks for something Grafana or your tools cannot do — or no tool exists for it — say so plainly instead of inventing a workflow or assuming a feature exists. Do not describe Grafana behaviour you cannot verify with a tool.
+ {{if .DatasourceSnapshot}}
+diff --git a/pkg/plugin/analyst_prompt_test.go b/pkg/plugin/analyst_prompt_test.go
+--- a/pkg/plugin/analyst_prompt_test.go
++++ b/pkg/plugin/analyst_prompt_test.go
+@@ -34,6 +34,8 @@
+ 				"reconcile its existing operation receipt",
+ 				"post-hoc selection",
+ 				"Capability honesty",
++				"reread retained artifacts or authorized metadata",
++				"do not rerun a successful query or analysis merely to recover context",
+ 			} {
+ 				if !strings.Contains(out, required) {
+ 					t.Errorf("missing analyst/guardrail directive: %q", required)
+@@ -43,6 +45,9 @@
+ 				"If missing required parameters, ask the user rather than guessing",
+ 				"If the user did not explicitly ask for prediction/modeling",
+ 				"Read/query/list/search tools are always fine",
++				"If a parallel call fails, fall back to sequential",
++				"retry with corrections",
++				"re-query tools for any data you intend to cite",
+ 			} {
+ 				if strings.Contains(out, forbidden) {
+ 					t.Errorf("conflicting legacy directive: %q", forbidden)

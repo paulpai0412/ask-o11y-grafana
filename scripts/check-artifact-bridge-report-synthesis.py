@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -28,19 +29,19 @@ def load_bridge():
 def synthesis() -> dict:
     return {
         "format": "ask-o11y-report-synthesis-v1", "report_title": "动态报告", "thesis": "完整证据支持当前解释，但行动前仍需验证。",
-        "thesis_evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}],
+        "thesis_evidence": [{"fact_ref": "facts.signal", "format": "percent_1"}],
         "sections": [{"section_id": "model-choice", "title": "本次重点", "purpose": "根据完整报告说明最重要的判断。", "collapsed": False, "narrative_blocks": [], "panels": [{
             "artifact_id": "chart", "view_ids": ["view-1", "view-2", "view-3", "view-4"],
             "view_narratives": [{
                 "view_id": view_id, "headline": "此视图呈现主要证据", "data_observation": "资料模型显示明确结构。",
                 "visual_observation": "图形呈现清楚分层。", "interpretation": "这会影响判断重点。",
                 "limitation": "目前不能建立因果结论。", "next_step": "使用额外资料验证。",
-                "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}],
+                "evidence": [{"fact_ref": "facts.signal", "format": "percent_1"}],
             } for view_id in ("view-1", "view-2", "view-3", "view-4")],
             "headline": "主要证据呈现明显结构", "observation": "本图与完整报告事实一致。",
             "interpretation": "此结构会影响判断重点。", "cross_chart_context": "应与其他证据和限制共同阅读。",
             "limitation": "目前不能建立因果结论。", "next_step": "使用额外资料继续验证。",
-            "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}], "priority": "primary", "preferred_width": "full",
+            "evidence": [{"fact_ref": "facts.signal", "format": "percent_1"}], "priority": "primary", "preferred_width": "full",
         }]}],
     }
 
@@ -56,33 +57,44 @@ def main() -> int:
     assert "separate compose arguments" in synthesis_schema["description"]
     assert "separately from synthesis" in compose_schema["properties"]["title"]["description"]
     section_schema = synthesis_schema["properties"]["sections"]["items"]
-    assert set(section_schema["required"]) == {"section_id", "title", "purpose", "collapsed", "narrative_blocks", "panels"}
+    assert set(section_schema["required"]) == {"section_id", "title", "purpose", "panels"}
     panel_schema = section_schema["properties"]["panels"]["items"]
-    assert {"preferred_width", "view_narratives", "cross_chart_context"} <= set(panel_schema["required"])
+    assert set(panel_schema["required"]) == {"artifact_id", "view_ids", "headline", "observation", "interpretation", "limitation", "evidence"}
+    assert panel_schema["properties"]["preferred_width"]["default"] == "full"
     assert panel_schema["properties"]["view_narratives"]["type"] == "array"
     with tempfile.TemporaryDirectory() as tmp:
         setattr(bridge, "ARTIFACTS", bridge.ArtifactStore(Path(tmp) / "runs"))
         context = {"org_id": "1", "user_id": "report-tools"}
         run_id = bridge.ARTIFACTS.create_run(context)
-        manifest = {"format": "fixture", "metrics": {"signal": 0.42}, "artifacts": [{"name": "chart.png", "caption": "x", "alt_text": "x"}, {"name": "static.png", "caption": "static", "alt_text": "static"}]}
-        execution_ref = bridge.ARTIFACTS.write_json(context, run_id, "sandbox-execution", {"results": [
-            {"mime": {"image/png": "iVBORw0KGgo="}, "display_name": "chart.png"},
-            {"mime": {"application/json": json.dumps({
-                "data": [
-                    {"type": "bar", "x": ["a"], "y": [1]},
-                    {"type": "bar", "x": ["b"], "y": [2], "xaxis": "x2", "yaxis": "y2"},
-                    {"type": "bar", "x": ["c"], "y": [3], "xaxis": "x3", "yaxis": "y3"},
-                    {"type": "bar", "x": ["d"], "y": [4], "xaxis": "x4", "yaxis": "y4"},
-                ],
-                "layout": {"xaxis": {}, "yaxis": {}, "xaxis2": {}, "yaxis2": {}, "xaxis3": {}, "yaxis3": {}, "xaxis4": {}, "yaxis4": {}},
-            })}, "display_name": "ml-plotly-chart.json"},
-            {"mime": {"image/png": "iVBORw0KGgo="}, "display_name": "static.png"},
-            {"mime": {"application/json": json.dumps(manifest)}, "display_name": "ml-presentation.json"},
-        ], "error": None})
+        png_1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        source = {"format": "ask-o11y-report-source-v1", "purpose": "fixture question", "conclusion": "fixture evidence", "facts": {"signal": {"kind": "number", "label": "Signal", "value": 0.42}}, "artifacts": [
+            {"artifact_id": "chart", "fact_refs": ["signal"], "plotly_output_name": "ml-plotly-chart.json", "png_output_name": "chart.png"},
+            {"artifact_id": "static", "fact_refs": ["signal"], "png_output_name": "static.png"},
+        ]}
+        figure = {
+            "data": [
+                {"type": "bar", "x": ["a"], "y": [1]},
+                {"type": "bar", "x": ["b"], "y": [2], "xaxis": "x2", "yaxis": "y2"},
+                {"type": "bar", "x": ["c"], "y": [3], "xaxis": "x3", "yaxis": "y3"},
+                {"type": "bar", "x": ["d"], "y": [4], "xaxis": "x4", "yaxis": "y4"},
+            ],
+            "layout": {"xaxis": {}, "yaxis": {}, "xaxis2": {}, "yaxis2": {}, "xaxis3": {}, "yaxis3": {}, "xaxis4": {}, "yaxis4": {}},
+            "config": {"displaylogo": False, "responsive": True},
+        }
+        results = [
+            {"mime": {"application/json": json.dumps(source)}, "display_name": "report-source.json"},
+            {"mime": {"image/png": png_1x1}, "display_name": "chart.png"},
+            {"mime": {"application/vnd.plotly.v1+json": json.dumps(figure)}, "display_name": "ml-plotly-chart.json"},
+            {"mime": {"image/png": png_1x1}, "display_name": "static.png"},
+        ]
+        execution_ref = bridge.ARTIFACTS.write_json(context, run_id, "sandbox-execution", {"results": results, "error": None})
+        report_manifest = bridge.ml_report_contract.normalize_report_manifest(execution_ref=execution_ref, results=results, manifest_format=bridge.ml_report_contract.LEGACY_REPORT_MANIFEST_FORMAT)
+        report_manifest_ref = bridge.ARTIFACTS.write_json(context, run_id, "report-manifest", report_manifest)
+        bridge.ARTIFACTS.write_json(context, run_id, "sandbox-provenance", {"executor_kind": "profile_dataset", "trusted_ml_contract": False, "report_manifest_ref": report_manifest_ref})
 
-        prepared = bridge.prepare_ml_report({"execution_ref": execution_ref, "manifest_output_index": 3, "_server_context": context})
+        prepared = bridge.prepare_ml_report({"report_manifest_ref": report_manifest_ref, "_server_context": context})
         assert prepared["ok"], prepared
-        assert prepared["report_context"]["facts"]["metrics.signal"]["value"] == 0.42, prepared
+        assert prepared["report_context"]["facts"]["facts.signal"]["value"] == 0.42, prepared
         report_context_ref = prepared["refs"]["report_context_ref"]
         assert len(prepared["report_context"]["artifacts"]) == 2, prepared
         artifact = prepared["report_context"]["artifacts"][0]
@@ -158,6 +170,42 @@ def main() -> int:
         assert compact["ok"] and "dashboard_ref" in compact["refs"] and "dashboard" not in compact, compact
         resolved = bridge.resolve_dashboard_refs({"dashboard": {"$dashboard_ref": compact["refs"]["dashboard_ref"]}, "_server_context": context})
         assert resolved["ok"] and "主要证据呈现明显结构" in str(resolved["dashboard"]), resolved
+
+        minimal = synthesis()
+        section = minimal["sections"][0]
+        for key in ("collapsed", "narrative_blocks"):
+            section.pop(key)
+        panel = section["panels"][0]
+        for key in ("view_narratives", "cross_chart_context", "next_step", "priority", "preferred_width"):
+            panel.pop(key)
+        panel["view_ids"] = ["view-1"]
+        before = copy.deepcopy(minimal)
+        rpc_args = {"report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": minimal, "uid": "minimal-report", "title": "Minimal report", "_server_context": context}
+        rpc = bridge.handle_rpc({"jsonrpc": "2.0", "id": 20, "method": "tools/call", "params": {"name": "compose_ml_dashboard", "arguments": rpc_args}})
+        try:
+            compact_minimal = json.loads(rpc["result"]["content"][0]["text"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AssertionError("invalid compose RPC response") from exc
+        assert compact_minimal["ok"], compact_minimal
+        assert minimal == before
+        resolved_minimal = bridge.resolve_dashboard_refs({"dashboard": {"$dashboard_ref": compact_minimal["refs"]["dashboard_ref"]}, "_server_context": context})
+        assert resolved_minimal["ok"], resolved_minimal
+        minimal_panel = next(p for p in resolved_minimal["dashboard"]["panels"] if p.get("askO11yArtifactId"))
+        assert minimal_panel["askO11yViewNarratives"] == []
+        assert minimal_panel["askO11yNarrative"]["evidence"][0]["display"] == "42.0%"
+        assert "cross_chart_context" not in minimal_panel["askO11yNarrative"] and "next_step" not in minimal_panel["askO11yNarrative"]
+        assert minimal_panel["options"]["narrative"]["interpretation"] == panel["interpretation"]
+        for field in ("observation", "interpretation", "limitation", "evidence"):
+            invalid = copy.deepcopy(minimal); invalid["sections"][0]["panels"][0].pop(field)
+            rejected = bridge.compose_ml_dashboard({**rpc_args, "synthesis": invalid})
+            assert not rejected["ok"], field
+        incomplete = bridge.compose_ml_dashboard({**rpc_args, "inspection_refs": [inspection_ref]})
+        assert not incomplete["ok"] and "incomplete" in incomplete["error"]
+        with_view = copy.deepcopy(minimal)
+        with_view["sections"][0]["panels"][0]["view_narratives"] = [{k: v for k, v in synthesis()["sections"][0]["panels"][0]["view_narratives"][0].items() if k not in {"next_step", "visual_observation"}}]
+        assert bridge.compose_ml_dashboard({**rpc_args, "synthesis": with_view})["ok"]
+        if output := os.environ.get("REPORT_SYNTHESIS_FIXTURE_OUT"):
+            Path(output).write_text(json.dumps({"minimal": minimal_panel["options"], "legacy": next(p for p in resolved["dashboard"]["panels"] if p.get("askO11yArtifactId"))["options"]}, ensure_ascii=False))
 
         bad = synthesis(); bad["sections"][0]["panels"][0]["evidence"][0]["fact_ref"] = "unknown"
         denied = bridge.compose_ml_dashboard({

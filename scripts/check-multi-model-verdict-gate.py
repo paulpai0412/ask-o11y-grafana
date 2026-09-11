@@ -28,11 +28,20 @@ def main() -> int:
         return {"kind": kind, "cv_score": scores[kind], "n_iter": 1, "search": SimpleNamespace(best_params_={}), "fit_counts": research.fit_counts(1, 3), "cv_receipts": []}
     def evaluate(candidate, *args, **kwargs):
         evaluated.append(candidate["kind"])
-        return {**candidate, "verdict": "unstable"}
+        return {
+            **candidate,
+            "verdict": "unstable",
+            "metrics": {"accuracy": 0.5, "roc_auc": 0.5, "pr_auc": 0.5},
+            "calibrated_probabilities": [0.0, 1.0] * 3,
+            "operating_threshold": 0.5,
+        }
     setattr(research, "run_classification_autoresearch", select)
     setattr(research, "evaluate_classification_candidate", evaluate)
-    empty = pd.DataFrame()
-    outcome = research.run_multi_model_comparison(empty, [], empty, [], kinds=KINDS, n_iter=3, cv_folds=3)
+    # Candidate selection is stubbed in this control-flow check, but the real
+    # no-fit baseline now needs a valid labeled holdout rather than empty data.
+    frame = pd.DataFrame({"signal": [0, 1] * 3})
+    labels = [0, 1] * 3
+    outcome = research.run_multi_model_comparison(frame, labels, frame, labels, kinds=KINDS, n_iter=3, cv_folds=3)
     assert outcome["best_kind"] == KINDS[0]
     assert evaluated == [KINDS[0]], "holdout was exposed for multiple candidates"
     assert outcome["best_result"]["verdict"] == "unstable"

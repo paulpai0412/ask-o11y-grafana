@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,12 +50,19 @@ def main() -> int:
     if theme_result.returncode:
         raise AssertionError(f"Grafana theme contract failed: {theme_result.stderr}")
 
-    dist = PANEL / "dist/module.js"
     if not (PANEL / "node_modules").is_dir():
-        subprocess.run(["npm", "ci", "--prefix", str(PANEL)], check=True)
-    subprocess.run(["npm", "--prefix", str(PANEL), "run", "build"], check=True)
-    assert dist.stat().st_size > 1_000_000, dist
-    bundle = dist.read_text(errors="ignore")
+        raise RuntimeError("panel dependencies are missing; this check does not install packages")
+    with tempfile.TemporaryDirectory(prefix="plotly-panel-check-") as folder:
+        build = Path(folder)
+        for name in ("src", "scripts"):
+            shutil.copytree(PANEL / name, build / name)
+        for name in ("package.json", "tsconfig.json", "webpack.config.cjs"):
+            shutil.copyfile(PANEL / name, build / name)
+        (build / "node_modules").symlink_to(PANEL / "node_modules", target_is_directory=True)
+        subprocess.run(["npm", "run", "build"], cwd=build, check=True, timeout=180)
+        dist = build / "dist/module.js"
+        assert dist.stat().st_size > 1_000_000, dist
+        bundle = dist.read_text(errors="ignore")
     assert "Plotly" in bundle and "fallbackUrl" in bundle, "Plotly/fallback missing from built panel"
     assert "new Function" not in bundle and "eval(" not in bundle, "dynamic code execution remains in built panel"
 
@@ -62,7 +71,7 @@ def main() -> int:
     assert "asko11y-plotly-panel" in compose, "unsigned plugin allowlist missing"
     assert "grafana-panels/asko11y-plotly-panel" in installer, "panel build/install step missing"
 
-    print("ok: rebuilt Grafana plugin + explicit image/plotly/error modes")
+    print("ok: isolated rebuilt Grafana plugin + explicit image/plotly/error modes; no install or source dist writes")
     return 0
 
 

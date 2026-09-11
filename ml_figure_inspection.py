@@ -56,17 +56,29 @@ def _matrix_values(value: Any) -> list[float]:
 
 
 def _point_count(trace: dict[str, Any]) -> int:
-    if trace.get("type") == "heatmap":
-        return len(_matrix_values(trace.get("z")))
-    lengths = [len(trace[key]) for key in ("x", "y") if isinstance(trace.get(key), list)]
-    return max(lengths, default=0)
+    matrix_count = len(_matrix_values(trace.get("z")))
+    lengths = [
+        len(trace[key])
+        for key in ("x", "y", "labels", "values", "parents", "open", "high", "low", "close")
+        if isinstance(trace.get(key), list)
+    ]
+    return max([matrix_count, *lengths], default=0)
 
 
-def inspect_figure(artifact_id: str, figure: dict[str, Any]) -> dict[str, Any]:
-    """Describe views, axes, scales, and bounded aggregate extents without raw rows."""
-    sanitized = ml_plotly_contract.sanitize_figure(figure)
+def inspect_figure(artifact_id: str, figure: dict[str, Any], *, whole: bool = False) -> dict[str, Any]:
+    """New reports inspect the complete native figure; v1 view identities stay stable."""
+    sanitized = ml_plotly_contract.sanitize_figure(figure, legacy=not whole)
     data = sanitized["data"]
     layout = sanitized["layout"]
+    if whole:
+        title = layout.get("title")
+        title = title.get("text") if isinstance(title, dict) else title
+        return {"artifact_id": artifact_id, "kind": "plotly", "title": title,
+                "trace_count": len(data),
+                "views": [{"view_id": "figure", "title": title or artifact_id, "kind": "plotly",
+                           "trace_types": list(dict.fromkeys(t.get("type", "scatter") for t in data)),
+                           "trace_count": len(data)}],
+                "inspection_note": "Complete native figure supplied; point counts and axes are not inferred across different native trace types. Spec inspection is not visual verification."}
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for trace in data:
         x_ref = str(trace.get("xaxis") or "x")

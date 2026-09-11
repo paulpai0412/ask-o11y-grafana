@@ -6,6 +6,8 @@ import re
 from html.parser import HTMLParser
 from typing import Any
 
+from ml_plotly_contract import contains_markup
+
 FORBIDDEN_KEYS = {"raw_rows", "frame", "python_code", "credentials", "physical_path", "signed_url"}
 PREVIEW_TAG = "ask-o11y-preview"
 REPORT_TAG = "ask-o11y-report"
@@ -67,7 +69,7 @@ def _safe_text(value: Any, where: str) -> None:
     if not isinstance(value, str) or not value.strip() or len(value) > 800:
         raise ValueError(f"{where} is invalid")
     lowered = value.lower()
-    if any(token in lowered for token in ("<", ">", "javascript:", "http://", "https://")):
+    if contains_markup(value) or any(token in lowered for token in ("javascript:", "http://", "https://")):
         raise ValueError(f"{where} contains unsafe text")
 
 
@@ -83,9 +85,10 @@ def _validate_display_evidence(evidence: Any, where: str) -> None:
 
 def _validate_narrative(panel: dict[str, Any]) -> None:
     narrative = panel.get("askO11yNarrative")
-    if not isinstance(narrative, dict) or set(narrative) != NARRATIVE_FIELDS:
-        raise ValueError("evidence panel requires a complete askO11yNarrative")
-    for key in NARRATIVE_FIELDS - {"evidence"}:
+    required = NARRATIVE_FIELDS - {"cross_chart_context", "next_step"}
+    if not isinstance(narrative, dict) or not required <= set(narrative) <= NARRATIVE_FIELDS:
+        raise ValueError("evidence panel requires an evidence-bound askO11yNarrative")
+    for key in set(narrative) - {"evidence"}:
         _safe_text(narrative.get(key), f"narrative.{key}")
     evidence = narrative.get("evidence")
     if not isinstance(evidence, list) or not 1 <= len(evidence) <= 8:
@@ -99,22 +102,22 @@ def _validate_narrative(panel: dict[str, Any]) -> None:
 
 def _validate_view_narratives(panel: dict[str, Any], view_ids: list[str]) -> None:
     narratives = panel.get("askO11yViewNarratives")
-    if not isinstance(narratives, list) or len(narratives) != len(view_ids):
-        raise ValueError("evidence panel requires one narrative per selected view")
+    if not isinstance(narratives, list) or len(narratives) > len(view_ids):
+        raise ValueError("view narratives exceed selected views")
     narrative_ids = []
-    required = {"view_id", "headline", "data_observation", "visual_observation", "interpretation", "limitation", "next_step", "evidence"}
+    required = {"view_id", "headline", "data_observation", "visual_observation", "interpretation", "limitation", "evidence"}
     for narrative in narratives:
-        if not isinstance(narrative, dict) or set(narrative) != required:
+        if not isinstance(narrative, dict) or not required <= set(narrative) <= required | {"next_step"}:
             raise ValueError("view narrative shape is invalid")
         narrative_ids.append(narrative.get("view_id"))
-        for key in required - {"view_id", "visual_observation", "evidence"}:
+        for key in set(narrative) - {"view_id", "visual_observation", "evidence"}:
             _safe_text(narrative.get(key), f"view narrative {key}")
         if narrative.get("visual_observation") is not None:
             _safe_text(narrative["visual_observation"], "view narrative visual observation")
         evidence = narrative.get("evidence")
         if not isinstance(evidence, list) or not evidence:
             raise ValueError("view narrative evidence is required")
-    if set(narrative_ids) != set(view_ids) or len(set(narrative_ids)) != len(narrative_ids):
+    if not set(narrative_ids).issubset(view_ids) or len(set(narrative_ids)) != len(narrative_ids):
         raise ValueError("view narratives do not match selected view ids")
 
 
@@ -144,6 +147,10 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
     thesis_panels = [item for item in top_level if isinstance(item, dict) and item.get("askO11yReportThesis") is not None]
     if len(thesis_panels) != 1 or thesis_panels[0].get("type") != "text":
         raise ValueError("report dashboard requires one LLM-authored thesis panel")
+    question_panel = thesis_panels[0]
+    if question_panel.get("askO11yBusinessQuestionSource") not in {"host_retained_plan", "retained_question_unverified"}:
+        raise ValueError("report dashboard requires a recognized retained-question source")
+    _safe_text(question_panel.get("askO11yBusinessQuestion"), "business question")
     _safe_text(thesis_panels[0].get("askO11yReportThesis"), "report thesis")
     _validate_display_evidence(thesis_panels[0].get("askO11yThesisEvidence"), "report thesis")
     flattened = _panels([item for item in top_level if isinstance(item, dict)])
@@ -175,7 +182,7 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
         if not isinstance(artifact_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", artifact_id):
             raise ValueError("evidence panel artifact id is invalid")
         view_ids = panel.get("askO11yViewIds")
-        if not isinstance(view_ids, list) or not 1 <= len(view_ids) <= 12 or any(not isinstance(view_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", view_id) for view_id in view_ids):
+        if not isinstance(view_ids, list) or not 1 <= len(view_ids) <= 12 or any(not isinstance(view_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", view_id) for view_id in view_ids) or len(set(view_ids)) != len(view_ids):
             raise ValueError("evidence panel view ids are invalid")
         _validate_narrative(panel)
         _validate_view_narratives(panel, view_ids)

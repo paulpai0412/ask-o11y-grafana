@@ -1,0 +1,80 @@
+--- a/pkg/agent/dashboard_resolver.go
++++ b/pkg/agent/dashboard_resolver.go
+@@ -13,6 +13,7 @@
+ 
+ const artifactBridgeResolveTool = "artifact-bridge_resolve_dashboard_refs"
+ const previewDashboardTag = "ask-o11y-preview"
++const reportDashboardTag = "ask-o11y-report"
+ 
+ var narrativeStylePattern = regexp.MustCompile(`^[A-Za-z0-9\s:;#.,%+\-]*$`)
+ 
+@@ -95,7 +96,7 @@
+ 	if err != nil {
+ 		return false, fmt.Errorf("dashboard JSON is invalid: %w", err)
+ 	}
+-	return strings.Contains(string(encoded), `"$plan_ref"`) || strings.Contains(string(encoded), `"$execution_ref"`) || strings.Contains(string(encoded), `"$dashboard_ref"`), nil
++	return strings.Contains(string(encoded), `"$plan_ref"`) || strings.Contains(string(encoded), `"$execution_ref"`) || strings.Contains(string(encoded), `"$dashboard_ref"`) || strings.Contains(string(encoded), `"$report_manifest_ref"`), nil
+ }
+ 
+ func canonicalDashboardRef(dashboard map[string]interface{}) string {
+@@ -111,6 +112,32 @@
+ 	return strings.TrimSpace(uid)
+ }
+ 
++func isReportDashboard(dashboard map[string]interface{}) bool {
++	tags, ok := dashboard["tags"]
++	if !ok {
++		return false
++	}
++	containsReportTag := func(tag interface{}) bool {
++		text := strings.ToLower(strings.TrimSpace(fmt.Sprint(tag)))
++		return text == reportDashboardTag || strings.Contains(text, "ml")
++	}
++	switch values := tags.(type) {
++	case []interface{}:
++		for _, tag := range values {
++			if containsReportTag(tag) {
++				return true
++			}
++		}
++	case []string:
++		for _, tag := range values {
++			if containsReportTag(tag) {
++				return true
++			}
++		}
++	}
++	return false
++}
++
+ func dashboardTargetUID(args map[string]interface{}) string {
+ 	if dashboard, ok := args["dashboard"].(map[string]interface{}); ok {
+ 		return dashboardUID(dashboard)
+@@ -279,6 +306,15 @@
+ 
+ func (a *AgentLoop) prepareBuiltInDashboardArgs(args map[string]interface{}, req LoopRequest) (map[string]interface{}, error) {
+ 	dashboard, hasDashboard := args["dashboard"].(map[string]interface{})
++	if hasDashboard && isReportDashboard(dashboard) {
++		hasRefs, err := hasOpaqueDashboardRefs(dashboard)
++		if err != nil {
++			return nil, err
++		}
++		if !hasRefs {
++			return nil, fmt.Errorf("report dashboards require the opaque composed dashboard ref; manual binding is not accepted")
++		}
++	}
+ 	if req.ForceGrafanaPreview && !hasDashboard {
+ 		return nil, fmt.Errorf("Grafana Preview creation requires one complete dashboard JSON; patch mode is reserved for later confirmed publication")
+ 	}
+--- a/pkg/agent/dashboard_resolver_test.go
++++ b/pkg/agent/dashboard_resolver_test.go
+@@ -158,6 +158,9 @@
+ 	if record, err := loadReportDashboardProvenance("org-1", "report-uid"); err != nil || record == nil || record.ReportRef != "artifact://report-2" {
+ 		t.Fatalf("revised provenance = %#v, err=%v", record, err)
+ 	}
++	if _, isError, _ := runDashboardBoundaryCall(t, loop, req, `{"dashboard":{"uid":"manual-report","tags":["ask-o11y-report"],"panels":[]}}`); !isError || writerCalls.Load() != 2 {
++		t.Fatal("manual report dashboard bypassed the opaque composed ref gate")
++	}
+ 
+ 	// Replaying an older completed effect must not roll provenance back.
+ 	_, replayError, _ := runDashboardBoundaryCall(t, loop, req, `{"dashboard":{"$dashboard_ref":"artifact://report-1"}}`)

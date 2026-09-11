@@ -31,7 +31,7 @@ def report(module):
         objective={"target": "churn", "task_kind": "binary_classification", "primary_metric": "pr_auc", "positive_class": "1", "threshold": 0.5, "threshold_cost_approved": False},
         data={"rows": 5, "features": 4, "train_rows": 4, "holdout_rows": 1, "split_kind": "stratified_holdout", "excluded_fields": [{"name": "leak", "reason": "target proxy"}]},
         process={"model_family": "xgboost", "search_budget": 2, "completed_trials": 2, "cv_folds": 2, "preprocessing_fit_scope": "training_only", "best_params": {}},
-        baseline_metrics={"accuracy": 0.6}, selected_metrics={"accuracy": 0.8},
+        baseline_metrics={"accuracy": 0.6, "pr_auc": 0.55, "roc_auc": 0.6}, selected_metrics={"accuracy": 0.8, "pr_auc": 0.75, "roc_auc": 0.8},
         guards={"generalization_gap": 0.01, "importance_stability": 0.8, "max_psi": 0.02, "verdict": "accepted"},
         trials=[], features=[{"name": "temp", "importance": 0.6, "explanation": "關聯非因果"}], limitations=["測試資料。"],
     )

@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np  # type: ignore[reportMissingImports]
 import pandas as pd  # type: ignore[reportMissingImports]
 import shap  # type: ignore[reportMissingImports]
+from sklearn.metrics import average_precision_score, roc_auc_score  # type: ignore[reportMissingImports]
 from sklearn.model_selection import train_test_split  # type: ignore[reportMissingImports]
 
 from ml_autoresearch import run_classification_autoresearch  # type: ignore[reportMissingImports]
@@ -55,6 +56,11 @@ def main() -> int:
     )
     probabilities = result["calibrated_probabilities"]
     baseline_accuracy = number((y_hold == 0).mean(), "baseline accuracy")
+    try:
+        baseline_pr_auc = float(average_precision_score(y_hold, np.zeros(len(y_hold))))
+        baseline_roc_auc = float(roc_auc_score(y_hold, np.zeros(len(y_hold))))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("constant-negative baseline metrics are unavailable") from exc
     fields_view = []
     for name in features:
         if pd.api.types.is_numeric_dtype(data[name]):
@@ -77,7 +83,7 @@ def main() -> int:
         objective={"target": target, "task_kind": "binary_classification", "primary_metric": "pr_auc", "positive_class": 1, "threshold": result["operating_threshold"], "threshold_cost_approved": False, "cost_matrix": {"false_negative": 3.0, "false_positive": 1.0}, "normalization_denominator": 1000},
         data={"rows": len(data), "features": len(features), "train_rows": len(x_train), "holdout_rows": len(x_hold), "split_kind": "stratified_holdout", "minority_rate": round(number(y.mean(), "minority rate"), 4), "excluded_fields": [{"name": name, "reason": "ontology forbidden"} for name in sorted(excluded - {target})]},
         process={"model_family": "xgboost", "search_budget": 2, "completed_trials": 2, "cv_folds": 3, "preprocessing_fit_scope": "training_only", "calibration_method": "isotonic", "best_params": result["best_params"]},
-        baseline_metrics={"accuracy": baseline_accuracy},
+        baseline_metrics={"accuracy": baseline_accuracy, "pr_auc": baseline_pr_auc, "roc_auc": baseline_roc_auc},
         selected_metrics=result["metrics"],
         guards={**result["guards"], "verdict": result["verdict"]},
         trials=result["trials"],

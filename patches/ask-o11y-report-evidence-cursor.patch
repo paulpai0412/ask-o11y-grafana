@@ -1,0 +1,473 @@
+diff --git a/pkg/agent/analysis_authority.go b/pkg/agent/analysis_authority.go
+--- a/pkg/agent/analysis_authority.go
++++ b/pkg/agent/analysis_authority.go
+@@ -22,7 +22,7 @@
+ 	}
+ }
+ 
+-// Bind trusted refs before emitting the event and asking approval, not after approval.
++// Bind trusted refs and supported transport defaults before events/approval, not after.
+ func bindTrustedToolCall(call ToolCall, req LoopRequest) ToolCall {
+ 	var args map[string]interface{}
+ 	if json.Unmarshal([]byte(call.Function.Arguments), &args) != nil || args == nil {
+@@ -38,6 +38,10 @@
+ 		}
+ 	}
+ 	switch call.Function.Name {
++	case "artifact-bridge_inspect_report_artifacts":
++		if _, supplied := args["mode"]; !supplied {
++			args["mode"] = "spec"
++		}
+ 	case "grafana-query_execute_planned_query":
+ 		bind("plan_ref", req.OpaquePlanRef)
+ 	case "sandbox-analysis_execute_ml_contract":
+diff --git a/pkg/agent/delivery_state.go b/pkg/agent/delivery_state.go
+--- a/pkg/agent/delivery_state.go
++++ b/pkg/agent/delivery_state.go
+@@ -109,7 +109,7 @@
+ 		}
+ 		return // Question context only; no coverage or permission promotion.
+ 	}
+-	isReport := name == "artifact-bridge_prepare_ml_report" || name == "artifact-bridge_compose_ml_dashboard"
++	isReport := name == "artifact-bridge_prepare_ml_report" || name == "artifact-bridge_inspect_report_artifacts" || name == "artifact-bridge_compose_ml_dashboard"
+ 	if !isReport {
+ 		// All recognized producers, including repair/reexport, may retain outputs.
+ 		// A successful artifact is not a report-coverage assessment.
+@@ -227,7 +227,7 @@
+ 
+ func trustedDeliveryToolName(name string) bool {
+ 	switch name {
+-	case "data-query-planner_plan_query", "grafana-query_execute_planned_query", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_execute_ml_contract", "sandbox-analysis_profile_dataset", "sandbox-analysis_reexport_trusted_report", "sandbox-analysis_repair_generic_report", "sandbox-analysis_revise_python_analysis", "artifact-bridge_prepare_ml_report", "artifact-bridge_compose_ml_dashboard", "mcp-grafana_update_dashboard":
++	case "data-query-planner_plan_query", "grafana-query_execute_planned_query", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_execute_ml_contract", "sandbox-analysis_profile_dataset", "sandbox-analysis_reexport_trusted_report", "sandbox-analysis_repair_generic_report", "sandbox-analysis_revise_python_analysis", "artifact-bridge_prepare_ml_report", "artifact-bridge_inspect_report_artifacts", "artifact-bridge_compose_ml_dashboard", "mcp-grafana_update_dashboard":
+ 		return true
+ 	default:
+ 		return false
+@@ -247,9 +247,21 @@
+ 		}
+ 	}
+ 	switch name {
+-	case "artifact-bridge_prepare_ml_report":
++	case "artifact-bridge_prepare_ml_report", "artifact-bridge_inspect_report_artifacts":
+ 		manifest, context := firstRef(payload, "report_manifest_ref"), firstRef(payload, "report_context_ref")
+-		if !success || manifest == "" || context == "" || firstString(args, "report_manifest_ref") != manifest {
++		if !success || manifest == "" || context == "" {
++			return false
++		}
++		requested := firstString(args, "report_manifest_ref")
++		if name == "artifact-bridge_inspect_report_artifacts" && requested == "" {
++			if requestedContext := firstString(args, "report_context_ref"); requestedContext != "" {
++				if requestedContext != context {
++					return false
++				}
++			} else if previous := firstString(args, "inspection_ref"); previous == "" || previous != firstRef(payload, "previous_inspection_ref") {
++				return false
++			}
++		} else if requested != manifest {
+ 			return false
+ 		}
+ 		if qref := firstString(question, "report_manifest_ref"); qref != "" && qref != manifest {
+@@ -259,23 +271,36 @@
+ 		return true
+ 	case "artifact-bridge_compose_ml_dashboard":
+ 		context := firstString(args, "report_context_ref")
++		if inspection := firstString(args, "inspection_ref"); inspection != "" {
++			if context != "" || !success || firstRef(payload, "inspection_ref") != inspection {
++				return false
++			}
++			context = firstRef(payload, "report_context_ref")
++		}
+ 		if context == "" {
+ 			return false
+ 		}
++		manifest := firstString(question, "report_manifest_ref")
++		if supplied := firstRef(payload, "report_manifest_ref"); supplied != "" {
++			if manifest != "" && manifest != supplied {
++				return false
++			}
++			manifest = supplied
++		}
+ 		if s.reportContextRef != "" {
+ 			if context != s.reportContextRef {
+ 				return false
+ 			}
+-			if qref := firstString(question, "report_manifest_ref"); qref != "" && qref != s.reportManifestRef {
++			if manifest != "" && manifest != s.reportManifestRef {
+ 				return false
+ 			}
+ 		} else {
+ 			// A directly resumed context is authorized/validated by the Bridge itself.
+ 			// Do not invent a local requirement to recompute or prepare it again.
+-			if !success || firstString(question, "report_manifest_ref") == "" {
+-				return false
+-			}
+-			s.reportManifestRef, s.reportContextRef = firstString(question, "report_manifest_ref"), context
++			if !success || manifest == "" {
++				return false
++			}
++			s.reportManifestRef, s.reportContextRef = manifest, context
+ 		}
+ 		return true
+ 	}
+diff --git a/pkg/agent/report_cursor_test.go b/pkg/agent/report_cursor_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/agent/report_cursor_test.go
+@@ -0,0 +1,231 @@
++package agent
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"testing"
++
++	"consensys-asko11y-app/pkg/mcp"
++	"github.com/grafana/grafana-plugin-sdk-go/backend/httpclient"
++	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
++)
++
++// Uses actual Bridge RPC outputs; does not assert live model understanding.
++func TestReportCursorDeliveryBinding(t *testing.T) {
++	path := os.Getenv("REPORT_CURSOR_FIXTURE_OUT")
++	if path == "" {
++		t.Skip("set REPORT_CURSOR_FIXTURE_OUT from scripts/check-report-evidence-cursor.py")
++	}
++	data, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var f map[string]json.RawMessage
++	if err := json.Unmarshal(data, &f); err != nil {
++		t.Fatal(err)
++	}
++	decode := func(key string) map[string]interface{} {
++		var value map[string]interface{}
++		if err := json.Unmarshal(f[key], &value); err != nil {
++			t.Fatal(err)
++		}
++		return value
++	}
++	manifest := firstRef(decode("initial"), "report_manifest_ref")
++	context := firstRef(decode("initial"), "report_context_ref")
++	state := newDeliveryState("Compare observed signals")
++	state.setResolvedToolNames([]string{"artifact-bridge_inspect_report_artifacts", "artifact-bridge_compose_ml_dashboard"})
++	for _, step := range []string{"initial", "continuation", "compose"} {
++		tool, payload := "artifact-bridge_inspect_report_artifacts", step
++		if step == "compose" {
++			tool, payload = "artifact-bridge_compose_ml_dashboard", "composed"
++		}
++		state.observeCall(tool, string(f[step+"_args"]), string(f[payload]), false)
++		if state.reportContextRef != context || state.reportManifestRef != manifest {
++			t.Fatalf("%s lost actual report binding: %+v", step, state)
++		}
++		if strings.Contains(strings.Join(state.gaps, " "), "REPORT_BINDING_NOT_VERIFIED") {
++			t.Fatalf("%s: %+v", step, state.gaps)
++		}
++		if state.delivery != "not_assessed" || state.writerStatus != "" {
++			t.Fatalf("inspection/composition promoted analysis or writing: %+v", state)
++		}
++	}
++	for _, key := range []string{"inspection_ref", "report_context_ref", "report_manifest_ref"} {
++		bad := decode("composed")
++		bad["refs"].(map[string]interface{})[key] = "artifact://wrong/report-inspection"
++		raw, err := json.Marshal(bad)
++		if err != nil {
++			t.Fatal(err)
++		}
++		state.observeCall("artifact-bridge_compose_ml_dashboard", string(f["compose_args"]), string(raw), false)
++		if !strings.Contains(strings.Join(state.gaps, " "), "REPORT_BINDING_NOT_VERIFIED") {
++			t.Fatalf("accepted mismatched %s", key)
++		}
++	}
++	resumed := newDeliveryState("Compare observed signals")
++	resumed.observeCall("artifact-bridge_compose_ml_dashboard", string(f["compose_args"]), string(f["composed"]), false)
++	if resumed.reportContextRef != context {
++		t.Fatal("could not bind authorized retained cursor on resume")
++	}
++	rejected := newDeliveryState("Different plan")
++	rejected.planRef, rejected.planSHA = "artifact://current/query-plan", "different-plan-hash"
++	rejected.observeCall("artifact-bridge_inspect_report_artifacts", string(f["initial_args"]), string(f["initial"]), false)
++	if rejected.reportContextRef != "" {
++		t.Fatal("inspection bypassed current plan binding")
++	}
++	ignored := newDeliveryState("Unselected tool")
++	ignored.setResolvedToolNames([]string{"mcp-grafana_update_dashboard"})
++	ignored.observeCall("artifact-bridge_inspect_report_artifacts", string(f["initial_args"]), string(f["initial"]), false)
++	if ignored.reportContextRef != "" {
++		t.Fatal("unselected inspection tool gained authority")
++	}
++}
++
++func TestReportCursorSchemaReachesLLM(t *testing.T) {
++	path := os.Getenv("REPORT_CURSOR_FIXTURE_OUT")
++	if path == "" {
++		t.Skip("generate REPORT_CURSOR_FIXTURE_OUT with the public Bridge regression")
++	}
++	data, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var fixture struct {
++		Tools       []mcp.Tool      `json:"tools"`
++		Initial     json.RawMessage `json:"initial"`
++		InitialArgs json.RawMessage `json:"initial_args"`
++	}
++	if err := json.Unmarshal(data, &fixture); err != nil {
++		t.Fatal(err)
++	}
++	if len(fixture.Tools) != 2 {
++		t.Fatal("missing public report tools")
++	}
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path == "/mcp/list-tools" {
++			_ = json.NewEncoder(w).Encode(map[string]interface{}{"tools": fixture.Tools})
++			return
++		}
++		_ = json.NewEncoder(w).Encode(mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: string(fixture.Initial)}}})
++	}))
++	defer server.Close()
++	requests := make(chan ChatCompletionRequest, 8)
++	calls := 0
++	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		var body ChatCompletionRequest
++		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
++			t.Error(err)
++			return
++		}
++		requests <- body
++		message := Message{Role: "assistant", Content: "More evidence remains; do not compose yet."}
++		if calls == 0 {
++			message.Content = `{"tools":["artifact-bridge_inspect_report_artifacts","artifact-bridge_compose_ml_dashboard"],"skills":[]}`
++		} else if calls == 1 {
++			message = Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "read-report", Type: "function", Function: FunctionCall{Name: "artifact-bridge_inspect_report_artifacts", Arguments: string(fixture.InitialArgs)}}}}
++		}
++		calls++
++		respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: message, FinishReason: "stop"}}})
++	}))
++	defer llm.Close()
++	proxy := mcp.NewProxy(context.Background(), log.DefaultLogger)
++	defer proxy.Close()
++	if err := proxy.EnsureServer(mcp.ServerConfig{ID: "artifact-bridge", URL: server.URL, Type: "standard", Enabled: true}); err != nil {
++		t.Fatal(err)
++	}
++	client, err := httpclient.New()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.CloseIdleConnections()
++	loop := NewAgentLoop(NewLLMClient(log.DefaultLogger, client), proxy, log.DefaultLogger)
++	events := make(chan SSEEvent, 64)
++	req := LoopRequest{Messages: []Message{{Role: "user", Content: "Prepare a report from retained evidence."}}, SystemPrompt: "Custom prompt", MaxIterations: 3, GrafanaURL: llm.URL, AuthToken: "synthetic", UserRole: "Admin", UserID: "cursor-check", SessionID: "cursor-session", OrgID: "1", MCPServers: []mcp.ServerConfig{{ID: "artifact-bridge", Enabled: true}}}
++	req.RegisterApproval = func(_ context.Context, a ApprovalRequestEvent) (ApprovalWaitFunc, error) {
++		return func(context.Context) (ApprovalResolvedEvent, error) {
++			return ApprovalResolvedEvent{ApprovalID: a.ApprovalID, Decision: "approved"}, nil
++		}, nil
++	}
++	go loop.Run(context.Background(), req, events)
++	for event := range events {
++		if event.Type == "error" {
++			t.Errorf("loop error: %+v", event)
++		}
++		if event.Type == "tool_call_start" {
++			var args map[string]interface{}
++			if err := json.Unmarshal([]byte(event.Data.(ToolCallStartEvent).Arguments), &args); err != nil || args["mode"] != "spec" {
++				t.Error("transport default was not bound before dispatch/approval")
++			}
++		}
++	}
++	seen := map[string]bool{}
++	seenEvidence := false
++	for len(requests) > 0 {
++		request := <-requests
++		for _, message := range request.Messages {
++			if message.Role == "tool" && message.Content == string(fixture.Initial) {
++				seenEvidence = true
++			} else if message.Role == "tool" {
++				t.Logf("non-fixture tool message: %.600s", message.Content)
++			}
++		}
++		for _, definition := range request.Tools {
++			for _, tool := range fixture.Tools {
++				if definition.Function.Name != "artifact-bridge_"+tool.Name {
++					continue
++				}
++				want, err := json.Marshal(tool.InputSchema)
++				if err != nil {
++					t.Fatal(err)
++				}
++				got, err := json.Marshal(definition.Function.Parameters)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if string(got) != string(want) || definition.Function.Description != tool.Description {
++					t.Fatalf("public schema/description drifted for %s", tool.Name)
++				}
++				seen[tool.Name] = true
++			}
++		}
++	}
++	if len(seen) != 2 || !seenEvidence {
++		t.Fatalf("report schemas/evidence did not reach actual LLM requests: schemas=%v evidence=%v", seen, seenEvidence)
++	}
++}
++
++func TestReportCursorTransportDefault(t *testing.T) {
++	name := "artifact-bridge_inspect_report_artifacts"
++	call := ToolCall{Function: FunctionCall{Name: name, Arguments: `{"inspection_ref":"artifact://retained/report-inspection"}`}}
++	bound := bindTrustedToolCall(call, LoopRequest{})
++	var args map[string]interface{}
++	if err := json.Unmarshal([]byte(bound.Function.Arguments), &args); err != nil {
++		t.Fatal(err)
++	}
++	if args["mode"] != "spec" || validateInspectionTransport(name, args) != nil {
++		t.Fatal("absent mode did not bind to supported text transport")
++	}
++	for _, mode := range []interface{}{nil, "", "vision", false, 0, []string{"spec"}} {
++		raw, err := json.Marshal(map[string]interface{}{"inspection_ref": "artifact://retained/report-inspection", "mode": mode})
++		if err != nil {
++			t.Fatal(err)
++		}
++		call.Function.Arguments = string(raw)
++		bound := bindTrustedToolCall(call, LoopRequest{})
++		if bound.Function.Arguments != string(raw) {
++			t.Fatal("explicit invalid mode was silently changed")
++		}
++		if err := json.Unmarshal([]byte(bound.Function.Arguments), &args); err != nil {
++			t.Fatal(err)
++		}
++		if validateInspectionTransport(name, args) == nil {
++			t.Fatalf("unsupported mode accepted: %v", mode)
++		}
++	}
++}
+diff --git a/pkg/plugin/report_cursor_test.go b/pkg/plugin/report_cursor_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/plugin/report_cursor_test.go
+@@ -0,0 +1,54 @@
++package plugin
++
++import (
++	"encoding/json"
++	"os"
++	"testing"
++)
++
++func TestReportCursorOpaqueState(t *testing.T) {
++	path := os.Getenv("REPORT_CURSOR_FIXTURE_OUT")
++	if path == "" {
++		t.Skip("set REPORT_CURSOR_FIXTURE_OUT from scripts/check-report-evidence-cursor.py")
++	}
++	data, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var fixture map[string]json.RawMessage
++	if err := json.Unmarshal(data, &fixture); err != nil {
++		t.Fatal(err)
++	}
++	calls := []map[string]interface{}{}
++	for _, key := range []string{"initial", "continuation", "composed"} {
++		calls = append(calls, map[string]interface{}{
++			"name":     "artifact-bridge_inspect_report_artifacts",
++			"response": map[string]interface{}{"content": []map[string]interface{}{{"type": "text", "text": string(fixture[key])}}},
++		})
++	}
++	calls[2]["name"] = "artifact-bridge_compose_ml_dashboard"
++	raw, err := json.Marshal(calls)
++	if err != nil {
++		t.Fatal(err)
++	}
++	state := compactPriorToolState(raw)
++	records := decodePriorState(t, state) // The host wraps bounded JSON in a context marker.
++	if len(records) != 3 {
++		t.Fatal("cursor tool records were lost")
++	}
++	refs, ok := records[2]["refs"].(map[string]interface{})
++	if !ok {
++		t.Fatal("latest cursor refs were lost")
++	}
++	var composed struct {
++		Refs map[string]string `json:"refs"`
++	}
++	if err := json.Unmarshal(fixture["composed"], &composed); err != nil {
++		t.Fatal(err)
++	}
++	for _, key := range []string{"inspection_ref", "report_manifest_ref", "report_context_ref", "dashboard_ref"} {
++		if composed.Refs[key] == "" || refs[key] != composed.Refs[key] {
++			t.Fatalf("lost %s", key)
++		}
++	}
++}
+diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
+--- a/pkg/plugin/prompt_defaults.go
++++ b/pkg/plugin/prompt_defaults.go
+@@ -104,7 +104,7 @@
+ 
+ Before analyzing an unfamiliar upload, ERP/WFERP dataset, or numeric table, use the data-understanding skill and the available inspect/schema tools. Keep dataset IDs, physical fields, date semantics, grain, relations, and opaque refs dynamic from tool evidence. Show an Analysis Preview and wait for confirmation before query or sandbox execution. Use profile_dataset when full-data quality or distribution facts are needed; reuse an existing valid profile. It is evidence, not a mandatory terminal answer or method selector. Choose descriptive, diagnostic, statistical, or predictive analysis only when it serves the user's decision question, and propose any necessary contract revision for confirmation. Do not require the user to name a method, and do not invoke ML merely because columns are numeric. Profile charts are visual-only aggregations, never a derived dataset or training input. Use all approved rows for modeling and explanations; never sample, truncate, or create derived datasets. Report resource limits explicitly. Model and feature-set selection use training CV only, sharing one global search budget; lock the winner before holdout evaluation. MAE direction is not a business target direction; pure prediction does not require optimization. An uploaded ontology remains inferred/observed unless an approved snapshot says otherwise.
+ 
+-When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. When the currently agreed work includes a Dashboard report from completed profile/analysis results, use prepare_ml_report, inspect_report_artifacts, and compose_ml_dashboard generically: inspect all bounded facts and artifact/view evidence, then synthesize one evidence-bound report before the sole approved Grafana writer. Each panel needs a plain-language observation, interpretation and limitation; add per-view details only where useful, not a repeated template.
++When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. When the currently agreed work includes a Dashboard report from completed profile/analysis results, read report_manifest_ref through inspect_report_artifacts, which prepares and returns bounded facts and actual artifact evidence. Continue with its latest inspection_ref while remaining_artifact_count is nonzero; then pass that ref and your evidence-bound synthesis to compose_ml_dashboard before the sole approved Grafana writer. Do not collect inspection-ref arrays or add a separate prepare_ml_report call; that interface remains for legacy callers. If evidence context was lost, reread retained artifacts, not the query or analysis. Each panel needs a plain-language observation, interpretation and limitation; add per-view details only where useful, not a repeated template.
+ 
+ The compose_ml_dashboard synthesis must contain exactly format, report_title, thesis, thesis_evidence, and sections; pass uid and title as separate tool arguments, never as legacy top-level synthesis fields.
+ 
+diff --git a/pkg/agent/analyst_skills_test.go b/pkg/agent/analyst_skills_test.go
+--- a/pkg/agent/analyst_skills_test.go
++++ b/pkg/agent/analyst_skills_test.go
+@@ -16,7 +16,7 @@
+ 			"Keep facts, uncertainty and limitations unchanged across audiences",
+ 			"indeterminate compute/write outcomes", "Dummy baseline gate",
+ 			"mode=spec", "visual_observation=null", "thesis_evidence",
+-			"refs.dashboard_ref", "per-view details only when useful",
++			"refs.dashboard_ref", "per-view details only when useful", "remaining_artifact_count", "inspection_ref", "retained manifest",
+ 		},
+ 		"ml-method-selection": {
+ 			"advisory knowledge", "Do not ask the user to choose algorithms",
+@@ -29,6 +29,7 @@
+ 			"pre-specified confirmatory result", "mode=spec", "visual_observation=null",
+ 			"Keep facts, uncertainty and limitations unchanged across audiences",
+ 			"refs.dashboard_ref", "thesis_evidence", "optional when useful", "does not reduce inspection or fact coverage",
++			"remaining_artifact_count", "inspection_ref", "retained manifest",
+ 		},
+ 	}
+ 	found := 0
+@@ -53,6 +54,7 @@
+ 			}
+ 			for _, forbidden := range []string{
+ 				"independent per-view narratives", "every selected view needs its own",
++				"retaining each `inspection_ref`", "compose_ml_dashboard(report_context_ref, inspection_refs",
+ 				"Only after the user explicitly asks", "一般無時間欄的二元分類使用 stratified holdout",
+ 				"一律 `TimeSeriesSplit`", "處理順序：", "小樣本（n<1000）",
+ 				"預設往高 recall 偏移", "PSI<0.1", "Cpk≥1.33",
+diff --git a/pkg/agent/skills/data-understanding/SKILL.md b/pkg/agent/skills/data-understanding/SKILL.md
+--- a/pkg/agent/skills/data-understanding/SKILL.md
++++ b/pkg/agent/skills/data-understanding/SKILL.md
+@@ -52,7 +52,7 @@
+ 
+ ## Dashboard/report safety
+ 
+-A dashboard presents completed evidence; it is not the analysis objective unless requested. Preview writes require explicit write intent and publication a separate confirmation. For a requested profile/analysis report, use `prepare_ml_report`, `inspect_report_artifacts`, and `compose_ml_dashboard` under their current schemas: inspect all bounded facts and artifact/view specs, then create one cross-artifact synthesis, adding per-view details only when useful. The current host is text-only: use `mode=spec` and `visual_observation=null`, never claim visual inspection. Do not author asset URLs, raw figure data, datasource targets or scripts.
++A dashboard presents completed evidence; it is not the analysis objective unless requested. Preview writes require explicit write intent and publication a separate confirmation. For a requested profile/analysis report, read `report_manifest_ref` with `inspect_report_artifacts`, continue with the latest `inspection_ref` while `remaining_artifact_count` is nonzero, then pass that ref and your synthesis to `compose_ml_dashboard`. Read all returned facts and artifact evidence; a receipt does not prove understanding. Reread the retained manifest if context was lost, without rerunning analysis. `prepare_ml_report` remains available for legacy callers, not a required step. Create one cross-artifact synthesis, adding per-view details only when useful. The current host is text-only: use `mode=spec` and `visual_observation=null`, never claim visual inspection. Do not author asset URLs, raw figure data, datasource targets or scripts.
+ 
+ Choose sections, ordering, titles, collapsed state and relevant views from the question and evidence, not a fixed report template. Every numeric claim must reference a deterministic fact. Each panel needs a plain-language observation, interpretation and limitation with evidence; per-view details, cross-chart context and next steps are optional, not repetitive required fields. Spec-only visual observations remain null, and all required evidence must still be inspected. The compositor/validator is authoritative: repair the exact rejected fields without rerunning completed analysis. Pass the returned opaque `refs.dashboard_ref` to the sole writer as `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` rather than copying dashboard JSON.
+ 
+diff --git a/pkg/agent/skills/ml-method-selection/SKILL.md b/pkg/agent/skills/ml-method-selection/SKILL.md
+--- a/pkg/agent/skills/ml-method-selection/SKILL.md
++++ b/pkg/agent/skills/ml-method-selection/SKILL.md
+@@ -69,10 +69,10 @@
+ 
+ 不得套用固定分析流程、固定 section、圖表清單、順序或 caption。Choose the report story from the question and evidence, omitting irrelevant/empty sections. A requested dashboard remains a separately approved write, with publication confirmed later. These are evidence/schema dependencies, not an analysis workflow:
+ 
+-- First use the host-owned `report_manifest_ref` returned by Sandbox; if a qualifying pre-manifest trusted profile/ML execution is returned by an older service, call `sandbox-analysis_reexport_trusted_report` once to obtain a fresh ref, then call `prepare_ml_report(report_manifest_ref)`. Never choose an execution output index. `inspect_report_artifacts` must cover all report artifacts in bounded batches, retaining each `inspection_ref`; selected views must be inspected. Current Ask O11y transport is text-only: use `mode=spec`, `visual_observation=null`, and never claim visual inspection. Browser rendering is a separate check.
++- Read the host-owned `report_manifest_ref` with `inspect_report_artifacts`. It returns facts, actual artifact evidence, `inspection_ref` and `remaining_artifact_count`; continue with the latest ref until coverage is complete. Do not collect ref arrays or choose output indexes. If tool context was lost, reread the retained manifest, not the data query/analysis. Older pre-manifest trusted profile/ML executions may need `sandbox-analysis_reexport_trusted_report` once. `prepare_ml_report` remains a legacy interface, not a required extra call. Current Ask O11y transport is text-only: use `mode=spec`, `visual_observation=null`, never claim visual inspection. Browser rendering is separate.
+ - After inspection, create 一次整份报告 synthesis with a cross-artifact thesis and `thesis_evidence`, not disconnected captions. Dynamically choose sections, relevant `view_ids`, order, titles, collapsed technical detail and optional `narrative_blocks`.
+ - `ask-o11y-report-synthesis-v1` has exactly these top-level keys: `format`, `report_title`, `thesis`, `thesis_evidence`, `sections`. The dashboard `uid` and `title` are separate compose arguments, never legacy synthesis fields such as `purpose`.
+ - Follow the live synthesis schema: explain each panel's observation, interpretation and limitation with evidence. Per-view narratives, cross-chart context and next steps are optional when useful; do not repeat a panel explanation for every view. Spec-only visual observations remain null; optional prose does not reduce inspection or fact coverage. Do not add audience fields to the schema.
+ - Numeric claims use deterministic `evidence: [{fact_ref, format}]`, not invented narrative numbers. Facts are authoritative; do not invent findings from graphics. If provided, a normalized operational summary may be explained using a business-appropriate denominator, never an automatic per-thousand template.
+-- `compose_ml_dashboard(report_context_ref, inspection_refs, synthesis, ...)` validates evidence and returns opaque `refs.dashboard_ref`. Pass `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` to the sole approved Grafana writer; do not copy full JSON or author asset URLs, raw Plotly data, datasource targets or scripts. Repair exact synthesis validation errors without rerunning completed analysis.
++- `compose_ml_dashboard(inspection_ref, synthesis, ...)` uses the last receipt to verify all batches and returns opaque `refs.dashboard_ref`. Pass `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` to the sole approved Grafana writer; do not copy full JSON or author asset URLs, raw Plotly data, datasource targets or scripts. Repair exact synthesis validation errors without rerunning completed analysis.
+ - Plotly is the default analysis presentation: when charts or a dashboard are requested, emit sanitized Plotly figure artifacts and use `asko11y-plotly-panel` in `plotly` mode. Use `image` mode only for an explicit static-PNG request or an explicit `presentation_mode=image` tool argument. Text panels are narrative-only, never HTML/CSS/Markdown image workarounds. Invalid figures are errors, not silent fallbacks. Deterministic presentation supplies facts/artifacts, not the final story; fixture-only builders never belong in production.

@@ -159,13 +159,18 @@ def main() -> int:
     }
     context = {"org_id": "1", "user_id": "regression-success-demo"}
     run_id = bridge.ARTIFACTS.create_run(context)
+    source = bridge.ml_presentation.build_report_source(manifest)
     results = [
+        {"mime": {"application/json": json.dumps(source, ensure_ascii=False)}, "display_name": "report-source.json"},
         {"mime": {"image/png": comparison_png}, "display_name": "demo_model_comparison.png"},
         {"mime": {"image/png": candidate_png}, "display_name": "demo_candidate_settings.png"},
         {"mime": {"application/json": json.dumps(manifest, ensure_ascii=False)}, "display_name": "ml-regression.json"},
     ]
     execution_ref = bridge.ARTIFACTS.write_json(context, run_id, "sandbox-execution", {"results": results, "error": None})
-    prepared = bridge.prepare_ml_report({"execution_ref": execution_ref, "manifest_output_index": 2, "_server_context": context})
+    report_manifest = bridge.ml_report_contract.normalize_report_manifest(execution_ref=execution_ref, results=results)
+    report_manifest_ref = bridge.ARTIFACTS.write_json(context, run_id, "report-manifest", report_manifest)
+    bridge.ARTIFACTS.write_json(context, run_id, "sandbox-provenance", {"executor_kind": "profile_dataset", "trusted_ml_contract": False, "report_manifest_ref": report_manifest_ref})
+    prepared = bridge.prepare_ml_report({"report_manifest_ref": report_manifest_ref, "_server_context": context})
     if not prepared.get("ok"):
         raise RuntimeError(f"demo report prepare failed: {prepared}")
     report_context_ref = prepared["refs"]["report_context_ref"]
@@ -175,7 +180,7 @@ def main() -> int:
     composed = bridge.compose_ml_dashboard({"report_context_ref": report_context_ref, "inspection_refs": [inspection["refs"]["inspection_ref"]], "synthesis": synthesis(), "uid": UID, "title": "Regression Success Demo (synthetic; not U1 evidence)", "_server_context": context})
     if not composed.get("ok"):
         raise RuntimeError(f"demo dashboard composition failed: {composed}")
-    resolved = bridge.resolve_dashboard_refs({"dashboard": composed["dashboard"], "_server_context": context})
+    resolved = bridge.resolve_dashboard_refs({"dashboard": {"$dashboard_ref": composed["refs"]["dashboard_ref"]}, "_server_context": context})
     if not resolved.get("ok"):
         raise RuntimeError(f"demo dashboard resolution failed: {resolved}")
     written = grafana_write(resolved["dashboard"])

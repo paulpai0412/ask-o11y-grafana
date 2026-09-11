@@ -1,0 +1,869 @@
+diff --git a/pkg/agent/delivery_producer_test.go b/pkg/agent/delivery_producer_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/agent/delivery_producer_test.go
+@@ -0,0 +1,183 @@
++package agent
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"sync/atomic"
++	"testing"
++
++	"consensys-asko11y-app/pkg/mcp"
++	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
++)
++
++type deliveryReplayCall struct {
++	Name      string                 `json:"name"`
++	Arguments map[string]interface{} `json:"arguments"`
++	Result    json.RawMessage        `json:"result"`
++}
++
++// Each response is exported unchanged by the public Python producers in an
++// isolated fixture run. Only LLM planning and the network transport are faked.
++func TestDeliveryPublicProducerReplay(t *testing.T) {
++	path := os.Getenv("Y5_DELIVERY_FIXTURE_OUT")
++	if path == "" {
++		t.Skip("run scripts/check-y5-minimal-repair.py with Y5_DELIVERY_FIXTURE_OUT first")
++	}
++	data, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var fixture struct {
++		Cases []struct {
++			Name, Question, Status string
++			Calls                  []deliveryReplayCall
++		} `json:"cases"`
++		OriginalsUnchanged bool `json:"originals_unchanged"`
++		AddedCompute       int  `json:"repair_added_compute_calls"`
++	}
++	if err := json.Unmarshal(data, &fixture); err != nil {
++		t.Fatal(err)
++	}
++	if !fixture.OriginalsUnchanged || fixture.AddedCompute != 0 || len(fixture.Cases) == 0 {
++		t.Fatal("invalid producer preservation receipt")
++	}
++	for _, tc := range fixture.Cases {
++		for _, ending := range []string{"normal", "budget", "llm_error", "truncated"} {
++			t.Run(tc.Name+"/"+ending, func(t *testing.T) {
++				events := replayDeliveryCalls(t, tc.Calls, ending)
++				var report *FinalReportEvent
++				var content string
++				for _, event := range events {
++					if event.Type == "final_report" {
++						value := event.Data.(FinalReportEvent)
++						report = &value
++					}
++					if event.Type == "content" {
++						content += event.Data.(ContentEvent).Content
++					}
++				}
++				if report == nil || report.DeliveryStatus != tc.Status || report.BusinessQuestion != tc.Question {
++					t.Fatalf("real producer delivery lost at %s: %#v; want %s / %s", ending, report, tc.Status, tc.Question)
++				}
++				if len(report.Gaps) == 0 || !strings.Contains(content, tc.Question) || !strings.Contains(content, "REQUIREMENTS_NOT_RECORDED") {
++					t.Fatalf("original question/gaps absent from final content: report=%#v content=%q", report, content)
++				}
++				wantLast := "error"
++				if ending == "normal" {
++					wantLast = "done"
++				}
++				if events[len(events)-1].Type != wantLast {
++					t.Fatalf("transport terminal changed: %#v", events[len(events)-1])
++				}
++			})
++		}
++	}
++}
++
++func replayDeliveryCalls(t *testing.T, calls []deliveryReplayCall, ending string) []SSEEvent {
++	t.Helper()
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	proxy := mcp.NewProxy(context.Background(), log.DefaultLogger)
++	t.Cleanup(proxy.Close)
++	groups := map[string][]mcp.Tool{}
++	var names []string
++	for _, call := range calls {
++		server, name, ok := strings.Cut(call.Name, "_")
++		if !ok {
++			t.Fatal(call.Name)
++		}
++		duplicate := false
++		for _, tool := range groups[server] {
++			if tool.Name == name {
++				duplicate = true
++			}
++		}
++		if !duplicate {
++			groups[server] = append(groups[server], mcp.Tool{Name: name, InputSchema: map[string]interface{}{"type": "object"}})
++			names = append(names, call.Name)
++		}
++	}
++	var received atomic.Int32
++	var configs []mcp.ServerConfig
++	for server, tools := range groups {
++		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			switch r.URL.Path {
++			case "/mcp/list-tools":
++				_ = json.NewEncoder(w).Encode(map[string]interface{}{"tools": tools})
++			case "/mcp/call-tool":
++				var rpc mcp.MCPRequest
++				if err := json.NewDecoder(r.Body).Decode(&rpc); err != nil {
++					t.Error(err)
++					return
++				}
++				var params mcp.CallToolParams
++				if err := json.Unmarshal(rpc.Params, &params); err != nil {
++					t.Error(err)
++					return
++				}
++				i := int(received.Add(1)) - 1
++				if i >= len(calls) {
++					t.Error("unexpected extra tool dispatch")
++					http.Error(w, "extra dispatch", 500)
++					return
++				}
++				call := calls[i]
++				if server+"_"+params.Name != call.Name {
++					t.Errorf("wrong actual dispatcher: %s_%s want %s", server, params.Name, call.Name)
++				}
++				var result map[string]interface{}
++				_ = json.Unmarshal(call.Result, &result)
++				_ = json.NewEncoder(w).Encode(mcp.CallToolResult{IsError: result["ok"] != true, Content: []mcp.ContentBlock{{Type: "text", Text: string(call.Result)}}})
++			default:
++				http.NotFound(w, r)
++			}
++		}))
++		t.Cleanup(srv.Close)
++		config := mcp.ServerConfig{ID: server, URL: srv.URL, Type: "standard", Enabled: true}
++		if err := proxy.EnsureServer(config); err != nil {
++			t.Fatal(err)
++		}
++		configs = append(configs, config)
++	}
++	var llmCalls atomic.Int32
++	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		i := int(llmCalls.Add(1)) - 1
++		var msg Message
++		finish := "stop"
++		if i == 0 {
++			selection, _ := json.Marshal(map[string]interface{}{"tools": names, "skills": []string{}, "datasource_families": []string{}, "prepare_grafana_preview_after_execution": false, "publish_reviewed_grafana_preview": false})
++			msg = Message{Role: "assistant", Content: string(selection)}
++		} else if i <= len(calls) {
++			args, _ := json.Marshal(calls[i-1].Arguments)
++			msg = Message{Role: "assistant", ToolCalls: []ToolCall{{ID: fmt.Sprintf("call-%d", i), Type: "function", Function: FunctionCall{Name: calls[i-1].Name, Arguments: string(args)}}}}
++			finish = "tool_calls"
++		} else if ending == "llm_error" {
++			http.Error(w, "offline terminal failure", http.StatusBadRequest)
++			return
++		} else if ending == "truncated" {
++			msg = Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "cut", Type: "function", Function: FunctionCall{Name: calls[0].Name, Arguments: "{"}}}}
++			finish = "length"
++		} else {
++			msg = Message{Role: "assistant", Content: "The model says it is complete."}
++		}
++		respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: msg, FinishReason: finish}}})
++	}))
++	t.Cleanup(llm.Close)
++	max := len(calls) + 1
++	if ending == "budget" {
++		max = len(calls)
++	}
++	loop := NewAgentLoop(NewLLMClient(log.DefaultLogger, llm.Client()), proxy, log.DefaultLogger)
++	events := make(chan SSEEvent, 128)
++	go loop.Run(context.Background(), LoopRequest{Messages: []Message{{Role: "user", Content: "Continue the existing report"}}, OriginalBusinessQuestion: "Continue the existing report", SystemPrompt: "offline replay", GrafanaURL: llm.URL, UserRole: "Admin", UserID: "7", OrgID: "1", SessionID: "replay-session", MCPServers: configs, MaxIterations: max, ApprovalPolicy: "approved"}, events)
++	got := collectEvents(events)
++	if int(received.Load()) != len(calls) {
++		t.Fatalf("producer sequence not reached: got %d/%d calls, events=%#v", received.Load(), len(calls), got)
++	}
++	return got
++}
+diff --git a/pkg/agent/delivery_state.go b/pkg/agent/delivery_state.go
+--- a/pkg/agent/delivery_state.go
++++ b/pkg/agent/delivery_state.go
+@@ -6,144 +6,138 @@
+ 	"strings"
+ )
+ 
+-// deliveryState is host-owned state derived only from known MCP contracts. It
+-// deliberately does not infer coverage from assistant prose or arbitrary JSON.
++// This is delivery transport, not a second artifact authorization/ML validator.
++// The Bridge authenticates retained evidence; we pair its response with the
++// actual call and any current plan identity. No current-turn compute is needed.
+ type deliveryState struct {
+-	originalQuestion string
+-	planQuestion     string
+-	planRef          string
+-	delivery         string
+-	gaps             []string
+-	writerStatus     string
+-	profileOnly      bool
+-	explicitPartial  bool
+-
+-	// resolvedTools is populated from the proxy's actual tools/list response.
+-	// It is an additional guard: a foreign server cannot claim a contract merely
+-	// by choosing a similar short name.
+-	resolvedTools      map[string]struct{}
+-	reportManifestRef  string
+-	reportContextRef   string
+-	reportExecutionRef string
+-	reportPlanRef      string
+-}
+-
+-func newDeliveryState(originalQuestion string) *deliveryState {
+-	return &deliveryState{originalQuestion: strings.TrimSpace(originalQuestion), resolvedTools: make(map[string]struct{})}
++	originalQuestion, planQuestion, planRef, planSHA string
++	delivery, writerStatus                           string
++	gaps                                             []string
++	profileOnly                                      bool
++	resolvedTools                                    map[string]struct{}
++	reportManifestRef, reportContextRef              string
++}
++
++func newDeliveryState(question string) *deliveryState {
++	return &deliveryState{originalQuestion: strings.TrimSpace(question), resolvedTools: make(map[string]struct{})}
+ }
+ 
+ func (s *deliveryState) setResolvedToolNames(names []string) {
+-	if s == nil {
+-		return
+-	}
+ 	for _, name := range names {
+-		if strings.TrimSpace(name) != "" {
+-			s.resolvedTools[name] = struct{}{}
+-		}
+-	}
+-}
+-
+-// observe is retained for package-level callers and tests that already have a
+-// normalized tool result. The loop uses observeCall so report refs can be
+-// checked against the actual arguments sent to the producer.
+-func (s *deliveryState) observe(toolName, content string, isError bool) {
+-	s.observeCall(toolName, "", content, isError)
+-}
+-
+-func (s *deliveryState) observeCall(toolName, arguments, content string, isError bool) {
+-	if s == nil || isError || !s.acceptsTool(toolName) {
+-		return
+-	}
+-	payload := make(map[string]interface{})
+-	if err := json.Unmarshal([]byte(content), &payload); err != nil || payload["ok"] != true {
+-		return
+-	}
+-
+-	if toolName == "mcp-grafana_update_dashboard" {
+-		s.writerStatus = "succeeded"
+-		return
+-	}
+-
+-	if toolName == "data-query-planner_plan_query" {
+-		if s.planQuestion == "" {
+-			s.planQuestion = businessQuestion(payload["business_question"])
++		s.resolvedTools[name] = struct{}{}
++	}
++}
++
++func (s *deliveryState) observe(name, content string, isError bool) {
++	s.observeCall(name, "", content, isError)
++}
++
++func (s *deliveryState) observeCall(name, arguments, content string, isError bool) {
++	if s == nil || !s.acceptsTool(name) {
++		return
++	}
++	payload, args := map[string]interface{}{}, map[string]interface{}{}
++	_ = json.Unmarshal([]byte(arguments), &args)
++	parseErr := json.Unmarshal([]byte(content), &payload)
++	if name == "mcp-grafana_update_dashboard" {
++		s.writerStatus = "indeterminate"
++		if !isError && parseErr == nil && (payload["ok"] == true || firstString(payload, "uid") != "") {
++			s.writerStatus = "succeeded"
++		}
++		return // Persistence never promotes analytical coverage.
++	}
++	success := parseErr == nil && !isError && payload["ok"] == true
++	if name == "data-query-planner_plan_query" {
++		if !success {
++			return
++		}
++		ref := firstRef(payload, "plan_ref")
++		if ref == "" {
++			return
++		}
++		if ref != s.planRef {
++			s.resetReport()
++			s.planRef, s.planSHA = ref, firstRef(payload, "plan_sha256")
++			// The real planner returns no question field: retain the host-bound call.
++			s.planQuestion = businessQuestion(args["business_question"])
+ 			if s.planQuestion == "" {
+-				s.planQuestion = businessQuestion(payload["plan"])
+-			}
+-		}
+-		if planRef := firstRef(payload, "plan_ref"); planRef != "" && planRef != s.planRef {
+-			s.planRef = planRef
+-			s.reportManifestRef, s.reportContextRef, s.reportExecutionRef, s.reportPlanRef = "", "", "", ""
+-		}
+-		return
+-	}
+-
+-	knownCoverageTool := toolName == "sandbox-analysis_execute_python_analysis" ||
+-		toolName == "sandbox-analysis_profile_dataset" ||
+-		toolName == "artifact-bridge_prepare_ml_report" ||
+-		toolName == "artifact-bridge_compose_ml_dashboard"
+-	if !knownCoverageTool {
+-		return
+-	}
+-
+-	// A successful Sandbox producer establishes the only report lineage that a
+-	// later report tool may use. This rejects stale report refs from a prior run.
+-	if toolName == "sandbox-analysis_execute_python_analysis" {
+-		s.recordExecutionRefs(payload)
+-	}
+-
++				s.planQuestion = businessQuestion(payload["business_question"])
++			}
++			s.delivery = "not_assessed"
++			s.addGap("PLAN_NOT_ASSESSED: No report coverage has been verified for this plan.")
++		}
++		return
++	}
++	isReport := name == "artifact-bridge_prepare_ml_report" || name == "artifact-bridge_compose_ml_dashboard"
++	if !isReport {
++		// All recognized producers, including repair/reexport, may retain outputs.
++		// A successful artifact is not a report-coverage assessment.
++		s.resetReport()
++		if s.planRef == "" {
++			s.planQuestion = ""
++		}
++		if name == "sandbox-analysis_profile_dataset" && success {
++			s.profileOnly = true
++		}
++		if coverageObject(payload) == nil {
++			if !s.profileOnly {
++				s.delivery = "not_assessed"
++				s.addGap("REPORT_NOT_ASSESSED: Retained output has not established report coverage.")
++			}
++			if !success {
++				s.addGap("REPORT_UNAVAILABLE: The producer did not return an accepted report; retain its execution receipt.")
++			}
++			return
++		}
++	}
+ 	coverage := coverageObject(payload)
+ 	if coverage == nil {
+-		if toolName == "sandbox-analysis_profile_dataset" {
+-			s.profileOnly = true
+-		}
+-		return
+-	}
+-
++		if isReport {
++			s.delivery = "not_assessed"
++			s.addGap("REPORT_UNAVAILABLE: Report coverage is missing or the report request failed.")
++		}
++		return
++	}
++	bound := isReport && s.coverageBound(name, args, payload, coverage, success)
+ 	status, _ := coverage["status"].(string)
+-	bound := s.coverageBound(toolName, arguments, payload, status)
+-	// A bare not_assessed result is useful as an unresolved host warning, but
+-	// it must not import a question or promote an unrelated report. All other
+-	// report statuses require current-run report/ref lineage.
+-	explicitPartial, _ := payload["delivery_status"].(string)
+-	if !bound && status != "not_assessed" && !(explicitPartial == "partial" && s.planRef == "" && s.reportContextRef == "") {
+-		return
+-	}
+-
+-	if bound && s.planQuestion == "" {
++	if !bound {
++		// Failed/mismatched reports cannot upgrade, import another question, or hide
++		// known gaps. Bare producer not_assessed is still useful negative evidence.
++		s.delivery = "not_assessed"
++		for _, gap := range coverageGaps(coverage["gaps"]) {
++			s.addGap(gap)
++		}
++		if isReport {
++			s.addGap("REPORT_BINDING_NOT_VERIFIED: Report evidence is not paired with the current request/plan.")
++		}
++		return
++	}
++	s.gaps = coverageGaps(coverage["gaps"])
++	if s.planRef == "" {
+ 		s.planQuestion = businessQuestion(coverage["business_question"])
+-		if s.planQuestion == "" {
+-			if evidence, ok := payload["evidence"].(map[string]interface{}); ok {
+-				s.planQuestion = businessQuestion(evidence["business_question"])
+-			}
+-		}
+-		if s.planQuestion == "" {
+-			s.planQuestion = businessQuestion(payload["business_question"])
+-		}
+-	}
+-	for _, gap := range coverageGaps(coverage["gaps"]) {
+-		s.addGap(gap)
+-	}
+-
+-	if explicit, ok := payload["delivery_status"].(string); ok && explicit == "partial" {
+-		s.explicitPartial = true
++	}
++	switch status {
++	case "not_assessed", "evidence_available":
++		s.delivery = status
++	case "incomplete":
+ 		s.delivery = "partial"
+-		return
+-	}
+-	switch status {
+-	case "not_assessed":
+-		if !s.explicitPartial {
+-			s.delivery = "not_assessed"
+-		}
+-	case "incomplete":
+-		if !s.explicitPartial && bound {
+-			s.delivery = "partial"
+-		}
+-	case "evidence_available":
+-		if !s.explicitPartial && bound {
+-			s.delivery = "evidence_available"
+-		}
+-	}
++	default:
++		s.delivery = "not_assessed"
++		s.addGap("COVERAGE_STATUS_UNKNOWN: The report has no supported coverage assessment.")
++	}
++	if payload["delivery_status"] == "partial" {
++		s.delivery = "partial"
++	}
++	if !success {
++		s.delivery = "partial"
++		s.addGap("REPORT_REJECTED: The report request failed; retained evidence is not a completed delivery.")
++	}
++}
++
++func (s *deliveryState) resetReport() {
++	s.delivery, s.writerStatus = "", ""
++	s.gaps, s.profileOnly = nil, false
++	s.reportManifestRef, s.reportContextRef = "", ""
+ }
+ 
+ func (s *deliveryState) acceptsTool(name string) bool {
+@@ -152,72 +146,66 @@
+ 	}
+ 	if len(s.resolvedTools) == 0 {
+ 		return true
+-	}
++	} // Direct unit callers; Loop sets the resolved catalog.
+ 	_, ok := s.resolvedTools[name]
+ 	return ok
+ }
+ 
+ func trustedDeliveryToolName(name string) bool {
+ 	switch name {
+-	case "data-query-planner_plan_query", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_profile_dataset", "artifact-bridge_prepare_ml_report", "artifact-bridge_compose_ml_dashboard", "mcp-grafana_update_dashboard":
++	case "data-query-planner_plan_query", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_execute_ml_contract", "sandbox-analysis_profile_dataset", "sandbox-analysis_reexport_trusted_report", "sandbox-analysis_repair_generic_report", "sandbox-analysis_revise_python_analysis", "artifact-bridge_prepare_ml_report", "artifact-bridge_compose_ml_dashboard", "mcp-grafana_update_dashboard":
+ 		return true
+ 	default:
+ 		return false
+ 	}
+ }
+ 
+-func (s *deliveryState) recordExecutionRefs(payload map[string]interface{}) {
+-	if refs := firstRef(payload, "report_manifest_ref", "report_context_ref"); refs != "" {
+-		if strings.HasSuffix(refs, "/report-manifest") || strings.Contains(refs, "report-manifest") {
+-			s.reportManifestRef = refs
+-		} else {
+-			s.reportExecutionRef = refs
+-		}
+-	}
+-	if execution := firstRef(payload, "execution_ref"); execution != "" {
+-		s.reportExecutionRef = execution
+-	}
+-}
+-
+-func (s *deliveryState) coverageBound(toolName, arguments string, payload map[string]interface{}, status string) bool {
+-	args := map[string]interface{}{}
+-	if arguments != "" {
+-		_ = json.Unmarshal([]byte(arguments), &args)
+-	}
+-	planLineage := firstRef(payload, "plan_ref", "contract_ref")
+-	if planLineage == "" {
+-		planLineage = firstRefFrom(args, "plan_ref", "contract_ref")
+-	}
+-	if planLineage != "" && s.planRef != "" && planLineage != s.planRef {
+-		return false
+-	}
+-	if status == "evidence_available" && s.planRef != "" && planLineage == "" && s.reportPlanRef != s.planRef {
+-		return false
+-	}
+-
+-	switch toolName {
++func (s *deliveryState) coverageBound(name string, args, payload, coverage map[string]interface{}, success bool) bool {
++	question, _ := coverage["business_question"].(map[string]interface{})
++	if s.planRef != "" {
++		requirement, _ := coverage["requirement"].(map[string]interface{})
++		hash := firstString(requirement, "plan_sha256")
++		if hash == "" {
++			hash = firstString(question, "plan_sha256")
++		}
++		if s.planSHA == "" || hash != s.planSHA {
++			return false
++		}
++	}
++	switch name {
+ 	case "artifact-bridge_prepare_ml_report":
+-		manifest := firstRef(payload, "report_manifest_ref")
+-		context := firstRef(payload, "report_context_ref")
+-		if manifest == "" || context == "" || s.reportManifestRef == "" || manifest != s.reportManifestRef {
++		manifest, context := firstRef(payload, "report_manifest_ref"), firstRef(payload, "report_context_ref")
++		if !success || manifest == "" || context == "" || firstString(args, "report_manifest_ref") != manifest {
+ 			return false
+ 		}
+-		if planLineage := firstRef(payload, "plan_ref", "contract_ref"); planLineage != "" {
+-			if s.planRef != "" && planLineage != s.planRef {
+-				return false
+-			}
+-			s.reportPlanRef = planLineage
+-		}
+-		s.reportContextRef = context
++		if qref := firstString(question, "report_manifest_ref"); qref != "" && qref != manifest {
++			return false
++		}
++		s.reportManifestRef, s.reportContextRef = manifest, context
+ 		return true
+ 	case "artifact-bridge_compose_ml_dashboard":
+-		context := firstRefFrom(args, "report_context_ref")
+-		return context != "" && context == s.reportContextRef
+-	default:
+-		// Compute results may carry coverage directly. Evidence promotion still
+-		// requires a report manifest emitted by this run.
+-		return s.reportManifestRef != "" && status != "not_assessed"
+-	}
++		context := firstString(args, "report_context_ref")
++		if context == "" {
++			return false
++		}
++		if s.reportContextRef != "" {
++			if context != s.reportContextRef {
++				return false
++			}
++			if qref := firstString(question, "report_manifest_ref"); qref != "" && qref != s.reportManifestRef {
++				return false
++			}
++		} else {
++			// A directly resumed context is authorized/validated by the Bridge itself.
++			// Do not invent a local requirement to recompute or prepare it again.
++			if !success || firstString(question, "report_manifest_ref") == "" {
++				return false
++			}
++			s.reportManifestRef, s.reportContextRef = firstString(question, "report_manifest_ref"), context
++		}
++		return true
++	}
++	return false
+ }
+ 
+ func (s *deliveryState) addGap(gap string) {
+@@ -261,19 +249,16 @@
+ 	if status == "" {
+ 		return ""
+ 	}
+-	question := s.question()
+-	var warning string
+-	switch status {
+-	case "profile_only":
+-		warning = "Host delivery status: profile_only. This is a descriptive data profile, not an answer to an unrecorded analytical requirement."
+-	case "evidence_available":
+-		warning = "Host delivery status: evidence_available. Retained evidence is available, but this status does not assert scientific or operational completion."
+-	default:
+-		warning = fmt.Sprintf("Host delivery status: %s. Analytical completion is not established", status)
+-		if question != "" {
+-			warning += fmt.Sprintf(" for the requested question %q", question)
+-		}
+-		warning += "."
++	warning := fmt.Sprintf("Host delivery status: %s. Analytical completion is not established", status)
++	if question := s.question(); question != "" {
++		warning += fmt.Sprintf(" for the requested question %q", question)
++	}
++	warning += "."
++	if status == "profile_only" {
++		warning += " This is a descriptive data profile, not an assessment of unrecorded analytical requirements."
++	}
++	if status == "evidence_available" {
++		warning += " Retained evidence is available; this does not assert scientific or operational completion."
+ 	}
+ 	if len(s.gaps) > 0 {
+ 		warning += " Known gap: " + strings.Join(s.gaps, "; ")
+@@ -285,14 +270,11 @@
+ 	if coverage, ok := payload["analysis_coverage"].(map[string]interface{}); ok {
+ 		return coverage
+ 	}
+-	if evidence, ok := payload["evidence"].(map[string]interface{}); ok {
+-		if coverage, ok := evidence["analysis_coverage"].(map[string]interface{}); ok {
+-			return coverage
+-		}
+-	}
+-	if report, ok := payload["report_context"].(map[string]interface{}); ok {
+-		if coverage, ok := report["analysis_coverage"].(map[string]interface{}); ok {
+-			return coverage
++	for _, key := range []string{"evidence", "report_context"} {
++		if nested, ok := payload[key].(map[string]interface{}); ok {
++			if coverage, ok := nested["analysis_coverage"].(map[string]interface{}); ok {
++				return coverage
++			}
+ 		}
+ 	}
+ 	return nil
+@@ -303,7 +285,9 @@
+ 		return ref
+ 	}
+ 	if refs, ok := payload["refs"].(map[string]interface{}); ok {
+-		return firstString(refs, keys...)
++		if ref := firstString(refs, keys...); ref != "" {
++			return ref
++		}
+ 	}
+ 	if evidence, ok := payload["evidence"].(map[string]interface{}); ok {
+ 		if ref := firstString(evidence, keys...); ref != "" {
+@@ -314,10 +298,6 @@
+ 		}
+ 	}
+ 	return ""
+-}
+-
+-func firstRefFrom(payload map[string]interface{}, keys ...string) string {
+-	return firstString(payload, keys...)
+ }
+ 
+ func firstString(payload map[string]interface{}, keys ...string) string {
+@@ -334,31 +314,20 @@
+ 	case string:
+ 		return strings.TrimSpace(question)
+ 	case map[string]interface{}:
+-		if value, ok := question["value"].(string); ok {
+-			return strings.TrimSpace(value)
+-		}
+-		if value, ok := question["question"].(string); ok {
+-			return strings.TrimSpace(value)
+-		}
++		return firstString(question, "value", "question")
+ 	}
+ 	return ""
+ }
+ 
+ func coverageGaps(value interface{}) []string {
+-	items, ok := value.([]interface{})
+-	if !ok {
+-		return nil
+-	}
+-	gaps := make([]string, 0, len(items))
++	items, _ := value.([]interface{})
++	var gaps []string
+ 	for _, item := range items {
+ 		gap, ok := item.(map[string]interface{})
+ 		if !ok {
+ 			continue
+ 		}
+-		message, _ := gap["message"].(string)
+-		code, _ := gap["code"].(string)
+-		message = strings.TrimSpace(message)
+-		code = strings.TrimSpace(code)
++		message, code := firstString(gap, "message"), firstString(gap, "code")
+ 		if message == "" {
+ 			message = code
+ 		} else if code != "" {
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -175,6 +175,47 @@
+ 		resolvedDeliveryTools = append(resolvedDeliveryTools, tool.Name)
+ 	}
+ 	delivery.setResolvedToolNames(resolvedDeliveryTools)
++	finalized := false
++	emitFinal := func(content string) {
++		if finalized {
++			return
++		}
++		finalized = true
++		status, warning := delivery.deliveryStatus(), delivery.warning()
++		finalContent := content
++		if warning != "" {
++			finalContent = warning
++			if content != "" {
++				finalContent += "\n\nAssistant response (not host-confirmed):\n" + content
++			}
++		}
++		if finalContent == "" && status == "" {
++			return
++		}
++		verdict, summary := finalReportVerdict(req.ConversationType), summarizeFinalContent(content)
++		if status != "" {
++			verdict = strings.ReplaceAll(status, "_", " ")
++		}
++		if warning != "" {
++			summary = warning
++		}
++		// The handler still consumes the channel after cancellation. Retain the
++		// last known delivery state without converting an error/cancel into done.
++		emitCtx := context.WithoutCancel(ctx)
++		a.send(emitCtx, eventCh, SSEEvent{Type: "final_report", Data: FinalReportEvent{
++			Verdict: verdict, Confidence: "medium", Summary: summary,
++			Gaps:                     append([]string(nil), delivery.gaps...),
++			OriginalBusinessQuestion: delivery.originalQuestion, PlanBusinessQuestion: delivery.planQuestion,
++			BusinessQuestion: delivery.question(), DeliveryStatus: status, WriterStatus: delivery.writerStatus,
++		}})
++		a.send(emitCtx, eventCh, SSEEvent{Type: "content", Data: ContentEvent{Content: finalContent}})
++	}
++	emitFailure := func(event SSEEvent) { emitFinal(""); a.send(ctx, eventCh, event) }
++	defer func() {
++		if !finalized && delivery.deliveryStatus() != "" {
++			emitFinal("")
++		}
++	}()
+ 
+ 	for iteration := 0; iteration < maxIter; iteration++ {
+ 		if ctx.Err() != nil {
+@@ -220,7 +261,7 @@
+ 			if ctx.Err() != nil {
+ 				return
+ 			}
+-			a.send(ctx, eventCh, SSEEvent{
++			emitFailure(SSEEvent{
+ 				Type: "error",
+ 				Data: llmErrorEvent(err),
+ 			})
+@@ -257,7 +298,7 @@
+ 					a.logger.Warn("LLM truncated tool calls with no viable retry; aborting run",
+ 						"retries", truncationRetries,
+ 						"iteration", iteration)
+-					a.send(ctx, eventCh, SSEEvent{
++					emitFailure(SSEEvent{
+ 						Type: "error",
+ 						Data: ErrorEvent{
+ 							Message:   "The assistant's tool request was cut off before it finished. Please retry — if this keeps happening, simplify the request or narrow its scope.",
+@@ -276,7 +317,7 @@
+ 		if len(msg.ToolCalls) == 0 {
+ 			if prepareGrafanaPreviewAfterExecution && successfulExecutionObserved && !grafanaPreviewObserved {
+ 				if grafanaPreviewNoProgressNudges >= maxGrafanaPreviewNoProgressNudges || iteration >= maxIter-1 {
+-					a.send(ctx, eventCh, SSEEvent{Type: "error", Data: ErrorEvent{Message: "Analysis completed, but the requested Grafana Preview was not created. Retry using the existing successful refs; do not rerun analysis.", Code: "grafana_preview_missing", Retryable: true}})
++					emitFailure(SSEEvent{Type: "error", Data: ErrorEvent{Message: "Execution produced output, but the requested Grafana Preview was not created. Retain the existing refs; do not rerun analysis.", Code: "grafana_preview_missing", Retryable: true}})
+ 					return
+ 				}
+ 				grafanaPreviewNoProgressNudges++
+@@ -286,44 +327,7 @@
+ 			if prepareGrafanaPreviewAfterExecution && grafanaPreviewObserved && msg.Content != "" && !strings.Contains(msg.Content, publicationQuestion) {
+ 				msg.Content = strings.TrimSpace(msg.Content) + "\n\n" + publicationQuestion
+ 			}
+-			deliveryStatus := delivery.deliveryStatus()
+-			hostWarning := delivery.warning()
+-			finalContent := msg.Content
+-			if hostWarning != "" {
+-				if finalContent != "" {
+-					finalContent = hostWarning + "\n\nAssistant response (not host-confirmed):\n" + finalContent
+-				} else {
+-					finalContent = hostWarning
+-				}
+-			}
+-			if finalContent != "" || deliveryStatus != "" {
+-				verdict := finalReportVerdict(req.ConversationType)
+-				if deliveryStatus != "" {
+-					verdict = strings.ReplaceAll(deliveryStatus, "_", " ")
+-				}
+-				summary := summarizeFinalContent(msg.Content)
+-				if hostWarning != "" {
+-					summary = hostWarning
+-				}
+-				a.send(ctx, eventCh, SSEEvent{
+-					Type: "final_report",
+-					Data: FinalReportEvent{
+-						Verdict:                  verdict,
+-						Confidence:               "medium",
+-						Summary:                  summary,
+-						Gaps:                     append([]string(nil), delivery.gaps...),
+-						OriginalBusinessQuestion: delivery.originalQuestion,
+-						PlanBusinessQuestion:     delivery.planQuestion,
+-						BusinessQuestion:         delivery.question(),
+-						DeliveryStatus:           deliveryStatus,
+-						WriterStatus:             delivery.writerStatus,
+-					},
+-				})
+-				a.send(ctx, eventCh, SSEEvent{
+-					Type: "content",
+-					Data: ContentEvent{Content: finalContent},
+-				})
+-			}
++			emitFinal(msg.Content)
+ 			a.send(ctx, eventCh, SSEEvent{
+ 				Type: "done",
+ 				Data: DoneEvent{TotalIterations: iteration + 1},
+@@ -438,7 +442,7 @@
+ 		}
+ 
+ 	}
+-	a.send(ctx, eventCh, SSEEvent{
++	emitFailure(SSEEvent{
+ 		Type: "error",
+ 		Data: ErrorEvent{Message: fmt.Sprintf("Agent loop reached maximum iterations (%d)", maxIter)},
+ 	})
+diff --git a/pkg/agent/loop_test.go b/pkg/agent/loop_test.go
+--- a/pkg/agent/loop_test.go
++++ b/pkg/agent/loop_test.go
+@@ -1416,7 +1416,7 @@
+ 
+ func TestDeliveryStateKeepsExplicitPartial(t *testing.T) {
+ 	state := newDeliveryState("Which change should we prioritize?")
+-	state.observe("artifact-bridge_compose_ml_dashboard", `{"ok":true,"delivery_status":"partial","evidence":{"analysis_coverage":{"status":"incomplete","gaps":[{"message":"Comparison evidence is unavailable."}]}}}`, false)
++	state.observeCall("artifact-bridge_compose_ml_dashboard", `{"report_context_ref":"artifact://retained/report-context"}`, `{"ok":true,"delivery_status":"partial","evidence":{"analysis_coverage":{"status":"incomplete","business_question":{"value":"Which change should we prioritize?","report_manifest_ref":"artifact://retained/report-manifest"},"gaps":[{"message":"Comparison evidence is unavailable."}]}}}`, false)
+ 	state.observe("mcp-grafana_update_dashboard", `{"ok":true}`, false)
+ 	if got := state.deliveryStatus(); got != "partial" {
+ 		t.Fatalf("partial status = %q", got)
+@@ -1436,24 +1436,24 @@
+ 	stale := newDeliveryState("Original question")
+ 	stale.observe("data-query-planner_plan_query", `{"ok":true,"refs":{"plan_ref":"artifact://plan-1"},"business_question":"Confirmed question"}`, false)
+ 	stale.observe("artifact-bridge_prepare_ml_report", `{"ok":true,"refs":{"report_manifest_ref":"artifact://old/report-manifest","report_context_ref":"artifact://old/report-context"},"evidence":{"analysis_coverage":{"status":"evidence_available","business_question":{"value":"Wrong question"}}}}`, false)
+-	if stale.deliveryStatus() != "" || stale.question() != "Confirmed question" {
++	if stale.deliveryStatus() != "not_assessed" || stale.question() != "Confirmed question" {
+ 		t.Fatalf("stale report changed delivery state: %#v", stale)
+ 	}
+ 
+ 	mismatch := newDeliveryState("Original question")
+-	mismatch.observe("data-query-planner_plan_query", `{"ok":true,"refs":{"plan_ref":"artifact://plan-1"},"business_question":"Confirmed question"}`, false)
++	mismatch.observeCall("data-query-planner_plan_query", `{"business_question":"Confirmed question"}`, `{"ok":true,"refs":{"plan_ref":"artifact://plan-1"},"evidence":{"plan_sha256":"plan-one-hash"}}`, false)
+ 	mismatch.observe("sandbox-analysis_execute_python_analysis", `{"ok":true,"refs":{"report_manifest_ref":"artifact://new/report-manifest","execution_ref":"artifact://new/sandbox-execution"}}`, false)
+-	mismatch.observe("artifact-bridge_prepare_ml_report", `{"ok":true,"refs":{"report_manifest_ref":"artifact://new/report-manifest","report_context_ref":"artifact://new/report-context"},"plan_ref":"artifact://plan-1","analysis_coverage":{"status":"not_assessed","business_question":{"value":"Confirmed question"}}}`, false)
++	mismatch.observeCall("artifact-bridge_prepare_ml_report", `{"report_manifest_ref":"artifact://new/report-manifest"}`, `{"ok":true,"refs":{"report_manifest_ref":"artifact://new/report-manifest","report_context_ref":"artifact://new/report-context"},"report_context":{"analysis_coverage":{"status":"not_assessed","requirement":{"plan_sha256":"plan-one-hash"},"business_question":{"value":"Confirmed question"}}}}`, false)
+ 	mismatch.observeCall("artifact-bridge_compose_ml_dashboard", `{"report_context_ref":"artifact://other/report-context"}`, `{"ok":true,"evidence":{"analysis_coverage":{"status":"evidence_available","business_question":{"value":"Wrong question"}}}}`, false)
+ 	if mismatch.deliveryStatus() != "not_assessed" || mismatch.question() != "Confirmed question" {
+ 		t.Fatalf("mismatched report changed delivery state: %#v", mismatch)
+ 	}
+ 
+ 	same := newDeliveryState("Original question")
+-	same.observe("data-query-planner_plan_query", `{"ok":true,"refs":{"plan_ref":"artifact://plan-1"},"business_question":"Confirmed question"}`, false)
++	same.observeCall("data-query-planner_plan_query", `{"business_question":"Confirmed question"}`, `{"ok":true,"refs":{"plan_ref":"artifact://plan-1"},"evidence":{"plan_sha256":"plan-one-hash"}}`, false)
+ 	same.observe("sandbox-analysis_execute_python_analysis", `{"ok":true,"refs":{"report_manifest_ref":"artifact://new/report-manifest","execution_ref":"artifact://new/sandbox-execution"}}`, false)
+-	same.observe("artifact-bridge_prepare_ml_report", `{"ok":true,"refs":{"report_manifest_ref":"artifact://new/report-manifest","report_context_ref":"artifact://new/report-context"},"plan_ref":"artifact://plan-1","analysis_coverage":{"status":"not_assessed","business_question":{"value":"Confirmed question"}}}`, false)
+-	same.observeCall("artifact-bridge_compose_ml_dashboard", `{"report_context_ref":"artifact://new/report-context"}`, `{"ok":true,"delivery_status":"standard","evidence":{"analysis_coverage":{"status":"evidence_available","business_question":{"value":"Confirmed question"},"gaps":[]}}}`, false)
++	same.observeCall("artifact-bridge_prepare_ml_report", `{"report_manifest_ref":"artifact://new/report-manifest"}`, `{"ok":true,"refs":{"report_manifest_ref":"artifact://new/report-manifest","report_context_ref":"artifact://new/report-context"},"report_context":{"analysis_coverage":{"status":"evidence_available","requirement":{"plan_sha256":"plan-one-hash"},"business_question":{"value":"Confirmed question"},"gaps":[]}}}`, false)
++	same.observeCall("artifact-bridge_compose_ml_dashboard", `{"report_context_ref":"artifact://new/report-context"}`, `{"ok":true,"delivery_status":"standard","evidence":{"analysis_coverage":{"status":"evidence_available","requirement":{"plan_sha256":"plan-one-hash"},"business_question":{"value":"Confirmed question"},"gaps":[]}}}`, false)
+ 	if same.deliveryStatus() != "evidence_available" || same.question() != "Confirmed question" {
+ 		t.Fatalf("same-report evidence was not retained: %#v", same)
+ 	}
+diff --git a/src/components/Chat/components/SidePanel/SidePanel.tsx b/src/components/Chat/components/SidePanel/SidePanel.tsx
+--- a/src/components/Chat/components/SidePanel/SidePanel.tsx
++++ b/src/components/Chat/components/SidePanel/SidePanel.tsx
+@@ -90,7 +90,7 @@
+         <button
+           onClick={onClose}
+           className={cx('p-1.5 rounded-md transition-colors text-secondary', styles.hoverButton)}
+-          aria-label="Hide dashboard preview"
++          aria-label="Close panel"
+           title="Hide preview"
+         >
+           <Icon name="times" size="md" />

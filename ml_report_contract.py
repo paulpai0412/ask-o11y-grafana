@@ -26,7 +26,9 @@ ml_plotly_contract: Any = _plotly_module
 
 REPORT_FORMAT = "ask-o11y-report-synthesis-v1"
 REPORT_SOURCE_FORMAT = "ask-o11y-report-source-v1"
-REPORT_MANIFEST_FORMAT = "ask-o11y-report-manifest-v1"
+LEGACY_REPORT_MANIFEST_FORMAT = "ask-o11y-report-manifest-v1"
+REPORT_MANIFEST_FORMAT = "ask-o11y-report-manifest-v2"
+REPORT_MANIFEST_FORMATS = {LEGACY_REPORT_MANIFEST_FORMAT, REPORT_MANIFEST_FORMAT}
 MAX_FACTS = 1024
 MAX_REPORT_FACTS = 64
 MAX_REPORT_ARTIFACTS = 16
@@ -43,6 +45,9 @@ EVIDENCE_FORMATS = {"auto", "integer", "number_1", "number_2", "percent_1"}
 PRIORITIES = {"primary", "supporting", "technical"}
 WIDTHS = {"full", "half"}
 VIEW_TEXT_FIELDS = ("headline", "data_observation", "interpretation", "limitation", "next_step")
+SECTION_REQUIRED_FIELDS = ("section_id", "title", "purpose", "panels")
+PANEL_REQUIRED_FIELDS = ("artifact_id", "view_ids", "headline", "observation", "interpretation", "limitation", "evidence")
+VIEW_REQUIRED_FIELDS = ("view_id", "headline", "data_observation", "interpretation", "limitation", "evidence")
 
 
 def _safe_segment(value: Any, fallback: str) -> str:
@@ -63,7 +68,7 @@ def _report_text(value: Any, where: str) -> str:
         raise ValueError(f"{where} text is invalid")
     text = value.strip()
     lowered = text.lower()
-    if any(token in lowered for token in ("<", ">", "http://", "https://", "javascript:", "?token=")) or text.startswith("/"):
+    if ml_plotly_contract.contains_markup(text) or any(token in lowered for token in ("http://", "https://", "javascript:", "?token=")) or text.startswith("/"):
         raise ValueError(f"{where} contains unsafe content")
     return text
 
@@ -147,8 +152,17 @@ def _is_plotly_output(result: Any) -> bool:
     return isinstance(value, dict) and set(value) == {"data", "layout", "config"}
 
 
-def normalize_report_manifest(*, execution_ref: str, results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Build a bounded Host-owned manifest from captured execution outputs."""
+def presentation_errors(manifest: dict[str, Any]) -> list[dict[str, str]]:
+    """Presentation availability is not computation or scientific validity."""
+    return [{"artifact_id": item["artifact_id"], "code": item["render"]["error_code"], "message": "This figure is unavailable; retained analysis results are unchanged."}
+            for item in manifest.get("artifacts", []) if item.get("render", {}).get("mode") == "error"]
+
+
+def normalize_report_manifest(*, execution_ref: str, results: list[dict[str, Any]], manifest_format: str = REPORT_MANIFEST_FORMAT) -> dict[str, Any]:
+    """Bind source/results; v2 retains a failed figure without rejecting other evidence."""
+    if manifest_format not in REPORT_MANIFEST_FORMATS:
+        raise ValueError("report manifest format is invalid")
+    legacy = manifest_format == LEGACY_REPORT_MANIFEST_FORMAT
     if not isinstance(execution_ref, str) or not execution_ref.startswith("artifact://"):
         raise ValueError("execution_ref is invalid")
     if not isinstance(results, list) or not results:
@@ -245,10 +259,15 @@ def normalize_report_manifest(*, execution_ref: str, results: list[dict[str, Any
                 raise ValueError("report Plotly output is invalid")
             try:
                 figure = json.loads(figure_payload)
-            except json.JSONDecodeError as exc:
-                raise ValueError("report Plotly output is invalid") from exc
-            clean_figure = ml_plotly_contract.sanitize_figure(figure)
-            render = {"mode": "plotly", "output_index": output_indexes[plotly_name], "mime_type": plotly_mime_type, "sha256": hashlib.sha256(json.dumps(clean_figure, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()}
+                clean_figure = ml_plotly_contract.sanitize_figure(figure, legacy=legacy)
+            except (json.JSONDecodeError, ml_plotly_contract.FigureError) as exc:
+                if legacy:
+                    raise ValueError("report Plotly output is invalid") from exc
+                render = {"mode": "error", "output_index": output_indexes[plotly_name], "mime_type": plotly_mime_type,
+                          "sha256": hashlib.sha256(figure_payload.encode()).hexdigest(),
+                          "error_code": getattr(exc, "code", "invalid_figure_json")}
+            else:
+                render = {"mode": "plotly", "output_index": output_indexes[plotly_name], "mime_type": plotly_mime_type, "sha256": hashlib.sha256(json.dumps(clean_figure, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()}
             if png_name is not None:
                 if png_name not in output_indexes:
                     raise ValueError("report artifact output is missing")
@@ -267,7 +286,7 @@ def normalize_report_manifest(*, execution_ref: str, results: list[dict[str, Any
             encoded = _validate_png(png_payload)
             render = {"mode": "image", "output_index": output_indexes[png_name], "mime_type": "image/png", "sha256": hashlib.sha256(encoded).hexdigest()}
         manifest_artifacts.append({"artifact_id": item["artifact_id"], "fact_refs": item["fact_refs"], "render": render})
-    manifest = {"format": REPORT_MANIFEST_FORMAT, "execution_ref": execution_ref, "source": {"format": REPORT_SOURCE_FORMAT, "output_index": source_index, "display_name": results[source_index]["display_name"]}, "purpose": purpose, "conclusion": conclusion, "facts": facts, "artifacts": manifest_artifacts}
+    manifest = {"format": manifest_format, "execution_ref": execution_ref, "source": {"format": REPORT_SOURCE_FORMAT, "output_index": source_index, "display_name": results[source_index]["display_name"]}, "purpose": purpose, "conclusion": conclusion, "facts": facts, "artifacts": manifest_artifacts}
     return manifest
 
 
@@ -333,7 +352,7 @@ def _safe_text(value: Any, where: str, *, identifier: bool = False) -> str:
         raise ValueError(f"{where} text is invalid")
     text = value.strip()
     lowered = text.lower()
-    if any(token in lowered for token in ("<", ">", "http://", "https://", "javascript:", "script")):
+    if ml_plotly_contract.contains_markup(text) or any(token in lowered for token in ("http://", "https://", "javascript:", "script")):
         raise ValueError(f"{where} contains unsafe text")
     if identifier:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", text):
@@ -379,7 +398,7 @@ def _validate_evidence(evidence: Any, catalog: dict[str, dict[str, Any]], where:
 
 
 def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any]) -> dict[str, Any]:
-    """Validate LLM-authored flow/content against deterministic artifacts and facts."""
+    """Validate evidence-bound content; return a copy with mechanical defaults only."""
     expected_keys = {"format", "report_title", "thesis", "thesis_evidence", "sections"}
     if not isinstance(synthesis, dict):
         raise ValueError("report synthesis must be an object")
@@ -406,7 +425,7 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
     total_panels = 0
     for section_index, section in enumerate(sections):
         where = f"sections[{section_index}]"
-        if not isinstance(section, dict) or set(section) != {"section_id", "title", "purpose", "collapsed", "narrative_blocks", "panels"}:
+        if not isinstance(section, dict) or not set(SECTION_REQUIRED_FIELDS) <= set(section) <= {*SECTION_REQUIRED_FIELDS, "collapsed", "narrative_blocks"}:
             raise ValueError(f"{where} shape is invalid")
         section_id = _safe_text(section.get("section_id"), f"{where}.section_id", identifier=True)
         if section_id in section_ids:
@@ -414,9 +433,9 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
         section_ids.add(section_id)
         _safe_text(section.get("title"), f"{where}.title")
         _safe_text(section.get("purpose"), f"{where}.purpose")
-        if not isinstance(section.get("collapsed"), bool):
+        if not isinstance(section.get("collapsed", False), bool):
             raise ValueError(f"{where}.collapsed must be boolean")
-        narrative_blocks = section.get("narrative_blocks")
+        narrative_blocks = section.get("narrative_blocks", [])
         if not isinstance(narrative_blocks, list) or len(narrative_blocks) > 8:
             raise ValueError(f"{where}.narrative_blocks are outside bounds")
         block_ids = set()
@@ -441,8 +460,8 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
             raise ValueError("report synthesis panel count exceeds bound")
         for panel_index, panel in enumerate(panels):
             panel_where = f"{where}.panels[{panel_index}]"
-            required = {"artifact_id", "view_ids", "view_narratives", *TEXT_FIELDS, "evidence", "priority", "preferred_width"}
-            if not isinstance(panel, dict) or set(panel) != required:
+            allowed = {*PANEL_REQUIRED_FIELDS, *TEXT_FIELDS, "view_narratives", "priority", "preferred_width"}
+            if not isinstance(panel, dict) or not set(PANEL_REQUIRED_FIELDS) <= set(panel) <= allowed:
                 raise ValueError(f"{panel_where} shape is invalid")
             artifact_id = _safe_text(panel.get("artifact_id"), f"{panel_where}.artifact_id", identifier=True)
             if artifact_id not in artifacts:
@@ -452,30 +471,42 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
                 raise ValueError(f"{panel_where} view_ids are outside bounds")
             for view_id in view_ids:
                 _safe_text(view_id, f"{panel_where}.view_id", identifier=True)
-            view_narratives = panel.get("view_narratives")
-            if not isinstance(view_narratives, list) or len(view_narratives) != len(view_ids):
-                raise ValueError(f"{panel_where} view_narratives must cover every selected view")
+            view_narratives = panel.get("view_narratives", [])
+            if not isinstance(view_narratives, list) or len(view_narratives) > len(view_ids):
+                raise ValueError(f"{panel_where} view_narratives exceed selected views")
             narrative_ids = []
             for narrative_index, view_narrative in enumerate(view_narratives):
                 narrative_where = f"{panel_where}.view_narratives[{narrative_index}]"
-                required_view = {"view_id", *VIEW_TEXT_FIELDS, "visual_observation", "evidence"}
-                if not isinstance(view_narrative, dict) or set(view_narrative) != required_view:
+                allowed_view = {*VIEW_REQUIRED_FIELDS, "visual_observation", "next_step"}
+                if not isinstance(view_narrative, dict) or not set(VIEW_REQUIRED_FIELDS) <= set(view_narrative) <= allowed_view:
                     raise ValueError(f"{narrative_where} shape is invalid")
                 narrative_id = _safe_text(view_narrative.get("view_id"), f"{narrative_where}.view_id", identifier=True)
                 narrative_ids.append(narrative_id)
                 for field in VIEW_TEXT_FIELDS:
-                    _safe_text(view_narrative.get(field), f"{narrative_where}.{field}")
+                    if field in view_narrative:
+                        _safe_text(view_narrative[field], f"{narrative_where}.{field}")
                 visual_observation = view_narrative.get("visual_observation")
                 if visual_observation is not None:
                     _safe_text(visual_observation, f"{narrative_where}.visual_observation")
                 _validate_evidence(view_narrative.get("evidence"), catalog, narrative_where)
-            if len(set(narrative_ids)) != len(narrative_ids) or set(narrative_ids) != set(view_ids):
+            if len(set(narrative_ids)) != len(narrative_ids) or not set(narrative_ids).issubset(view_ids):
                 raise ValueError(f"{panel_where} view_narratives do not match selected view_ids")
             for field in TEXT_FIELDS:
-                _safe_text(panel.get(field), f"{panel_where}.{field}")
-            if panel.get("priority") not in PRIORITIES or panel.get("preferred_width") not in WIDTHS:
+                if field in panel:
+                    _safe_text(panel[field], f"{panel_where}.{field}")
+            if panel.get("priority", "supporting") not in PRIORITIES or panel.get("preferred_width", "full") not in WIDTHS:
                 raise ValueError(f"{panel_where} presentation hints are invalid")
             _validate_evidence(panel.get("evidence"), catalog, panel_where)
     if total_panels < 1:
         raise ValueError("report synthesis requires at least one evidence panel")
-    return copy.deepcopy(synthesis)
+    # Validate bounds and shape before copying any untrusted nested content.
+    normalized = copy.deepcopy(synthesis)
+    for section in normalized["sections"]:
+        section.setdefault("collapsed", False)
+        section.setdefault("narrative_blocks", [])
+        for panel in section["panels"]:
+            panel.setdefault("priority", "supporting")
+            panel.setdefault("preferred_width", "full")
+            for view in panel.setdefault("view_narratives", []):
+                view.setdefault("visual_observation", None)
+    return normalized

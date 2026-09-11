@@ -1,0 +1,833 @@
+--- a/pkg/agent/types.go
++++ b/pkg/agent/types.go
+@@ -115,12 +115,17 @@
+ }
+ 
+ type FinalReportEvent struct {
+-	Verdict     string   `json:"verdict,omitempty"`
+-	Confidence  string   `json:"confidence,omitempty"`
+-	Summary     string   `json:"summary"`
+-	EvidenceIDs []string `json:"evidenceIds,omitempty"`
+-	Gaps        []string `json:"gaps,omitempty"`
+-	NextSteps   []string `json:"nextSteps,omitempty"`
++	Verdict                  string   `json:"verdict,omitempty"`
++	Confidence               string   `json:"confidence,omitempty"`
++	Summary                  string   `json:"summary"`
++	EvidenceIDs              []string `json:"evidenceIds,omitempty"`
++	Gaps                     []string `json:"gaps,omitempty"`
++	NextSteps                []string `json:"nextSteps,omitempty"`
++	OriginalBusinessQuestion string   `json:"originalBusinessQuestion,omitempty"`
++	PlanBusinessQuestion     string   `json:"planBusinessQuestion,omitempty"`
++	BusinessQuestion         string   `json:"businessQuestion,omitempty"`
++	DeliveryStatus           string   `json:"deliveryStatus,omitempty"`
++	WriterStatus             string   `json:"writerStatus,omitempty"`
+ }
+ 
+ // MCPUnavailableEvent is emitted at most once per run when enough distinct
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -74,13 +74,16 @@
+ 	GrafanaURL string
+ 	AuthToken  string
+ 
+-	UserRole        string
+-	UserID          string
+-	SessionID       string
+-	UploadDatasetID string
+-	OrgID           string
+-	OrgName         string
+-	ScopeOrgID      string
++	// OriginalBusinessQuestion is host-owned raw input and is kept separate
++	// from a question retained by the confirmed plan.
++	OriginalBusinessQuestion string
++	UserRole                 string
++	UserID                   string
++	SessionID                string
++	UploadDatasetID          string
++	OrgID                    string
++	OrgName                  string
++	ScopeOrgID               string
+ 
+ 	// ExcludeToolNames, when set, removes these tools from the available set
+ 	// before the loop runs. Used to hide graphiti write tools from user sessions.
+@@ -166,6 +169,12 @@
+ 	grafanaPreviewNoProgressNudges := 0
+ 	successfulExecutionObserved := false
+ 	grafanaPreviewObserved := false
++	delivery := newDeliveryState(req.OriginalBusinessQuestion)
++	resolvedDeliveryTools := make([]string, 0, len(authorizedTools))
++	for _, tool := range authorizedTools {
++		resolvedDeliveryTools = append(resolvedDeliveryTools, tool.Name)
++	}
++	delivery.setResolvedToolNames(resolvedDeliveryTools)
+ 
+ 	for iteration := 0; iteration < maxIter; iteration++ {
+ 		if ctx.Err() != nil {
+@@ -277,18 +286,42 @@
+ 			if prepareGrafanaPreviewAfterExecution && grafanaPreviewObserved && msg.Content != "" && !strings.Contains(msg.Content, publicationQuestion) {
+ 				msg.Content = strings.TrimSpace(msg.Content) + "\n\n" + publicationQuestion
+ 			}
+-			if msg.Content != "" {
++			deliveryStatus := delivery.deliveryStatus()
++			hostWarning := delivery.warning()
++			finalContent := msg.Content
++			if hostWarning != "" {
++				if finalContent != "" {
++					finalContent = hostWarning + "\n\nAssistant response (not host-confirmed):\n" + finalContent
++				} else {
++					finalContent = hostWarning
++				}
++			}
++			if finalContent != "" || deliveryStatus != "" {
++				verdict := finalReportVerdict(req.ConversationType)
++				if deliveryStatus != "" {
++					verdict = strings.ReplaceAll(deliveryStatus, "_", " ")
++				}
++				summary := summarizeFinalContent(msg.Content)
++				if hostWarning != "" {
++					summary = hostWarning
++				}
+ 				a.send(ctx, eventCh, SSEEvent{
+ 					Type: "final_report",
+ 					Data: FinalReportEvent{
+-						Verdict:    finalReportVerdict(req.ConversationType),
+-						Confidence: "medium",
+-						Summary:    summarizeFinalContent(msg.Content),
++						Verdict:                  verdict,
++						Confidence:               "medium",
++						Summary:                  summary,
++						Gaps:                     append([]string(nil), delivery.gaps...),
++						OriginalBusinessQuestion: delivery.originalQuestion,
++						PlanBusinessQuestion:     delivery.planQuestion,
++						BusinessQuestion:         delivery.question(),
++						DeliveryStatus:           deliveryStatus,
++						WriterStatus:             delivery.writerStatus,
+ 					},
+ 				})
+ 				a.send(ctx, eventCh, SSEEvent{
+ 					Type: "content",
+-					Data: ContentEvent{Content: msg.Content},
++					Data: ContentEvent{Content: finalContent},
+ 				})
+ 			}
+ 			a.send(ctx, eventCh, SSEEvent{
+@@ -346,6 +379,7 @@
+ 				toolContent, isError, errorKind = a.executeToolWithApproval(ctx, eventCh, tc, req)
+ 			}
+ 			req.autonomy.observeFrame(tc, toolContent, isError)
++			delivery.observeCall(tc.Function.Name, tc.Function.Arguments, toolContent, isError)
+ 
+ 			a.send(ctx, eventCh, SSEEvent{
+ 				Type: "tool_call_result",
+--- a/pkg/agent/loop_test.go
++++ b/pkg/agent/loop_test.go
+@@ -20,7 +20,7 @@
+ 
+ func TestApprovalPolicyAutoApprove(t *testing.T) {
+ 	for policy, want := range map[string]bool{
+-		"approved":             true,
++		"approved":              true,
+ 		"approval-gated-writes": false,
+ 		"off":                   false,
+ 	} {
+@@ -1381,3 +1381,200 @@
+ 		t.Fatal("successful profile result was not recognized")
+ 	}
+ }
++
++func TestDeliveryStateTracksTrustedCoverageAndWriterWithoutPromotion(t *testing.T) {
++	state := newDeliveryState("Current follow-up request")
++	state.observe("data-query-planner_plan_query", `{"ok":true,"refs":{"plan_ref":"artifact://plan-1"},"business_question":"Previously confirmed question"}`, false)
++	state.observe("sandbox-analysis_execute_python_analysis", `{"ok":true,"step":"execute_python_analysis","analysis_coverage":{"status":"not_assessed","business_question":{"value":"Previously confirmed question"},"gaps":[{"code":"REQUIREMENTS_NOT_RECORDED","message":"No assessable delivery requirement was recorded."}]}}`, false)
++	state.observe("mcp-grafana_update_dashboard", `{"ok":true,"step":"update_dashboard"}`, false)
++
++	if state.deliveryStatus() != "not_assessed" {
++		t.Fatalf("delivery status = %q, want not_assessed", state.deliveryStatus())
++	}
++	if state.planQuestion != "Previously confirmed question" || state.originalQuestion != "Current follow-up request" {
++		t.Fatalf("question lineage lost: %#v", state)
++	}
++	if len(state.gaps) != 1 || !strings.Contains(state.gaps[0], "REQUIREMENTS_NOT_RECORDED") {
++		t.Fatalf("gaps = %#v", state.gaps)
++	}
++	if state.writerStatus != "succeeded" {
++		t.Fatalf("writer status = %q, want succeeded", state.writerStatus)
++	}
++}
++
++func TestDeliveryStateIgnoresUntrustedCoverageAndAllowsProfileOnly(t *testing.T) {
++	state := newDeliveryState("Describe this dataset")
++	state.observe("unrelated_tool", `{"ok":true,"analysis_coverage":{"status":"evidence_available"}}`, false)
++	if got := state.deliveryStatus(); got != "" {
++		t.Fatalf("untrusted delivery status = %q", got)
++	}
++	state.observe("sandbox-analysis_profile_dataset", `{"ok":true,"step":"profile_dataset"}`, false)
++	if got := state.deliveryStatus(); got != "profile_only" {
++		t.Fatalf("profile-only status = %q", got)
++	}
++}
++
++func TestDeliveryStateKeepsExplicitPartial(t *testing.T) {
++	state := newDeliveryState("Which change should we prioritize?")
++	state.observe("artifact-bridge_compose_ml_dashboard", `{"ok":true,"delivery_status":"partial","evidence":{"analysis_coverage":{"status":"incomplete","gaps":[{"message":"Comparison evidence is unavailable."}]}}}`, false)
++	state.observe("mcp-grafana_update_dashboard", `{"ok":true}`, false)
++	if got := state.deliveryStatus(); got != "partial" {
++		t.Fatalf("partial status = %q", got)
++	}
++	if len(state.gaps) != 1 || state.gaps[0] != "Comparison evidence is unavailable." {
++		t.Fatalf("partial gaps = %#v", state.gaps)
++	}
++}
++
++func TestDeliveryStateRejectsAliasAndStaleReportBindings(t *testing.T) {
++	alias := newDeliveryState("Original question")
++	alias.observe("foreign_prepare_ml_report", `{"ok":true,"analysis_coverage":{"status":"evidence_available","business_question":{"value":"Different question"}}}`, false)
++	if alias.deliveryStatus() != "" || alias.question() != "Original question" {
++		t.Fatalf("alias tool changed delivery state: %#v", alias)
++	}
++
++	stale := newDeliveryState("Original question")
++	stale.observe("data-query-planner_plan_query", `{"ok":true,"refs":{"plan_ref":"artifact://plan-1"},"business_question":"Confirmed question"}`, false)
++	stale.observe("artifact-bridge_prepare_ml_report", `{"ok":true,"refs":{"report_manifest_ref":"artifact://old/report-manifest","report_context_ref":"artifact://old/report-context"},"evidence":{"analysis_coverage":{"status":"evidence_available","business_question":{"value":"Wrong question"}}}}`, false)
++	if stale.deliveryStatus() != "" || stale.question() != "Confirmed question" {
++		t.Fatalf("stale report changed delivery state: %#v", stale)
++	}
++
++	mismatch := newDeliveryState("Original question")
++	mismatch.observe("data-query-planner_plan_query", `{"ok":true,"refs":{"plan_ref":"artifact://plan-1"},"business_question":"Confirmed question"}`, false)
++	mismatch.observe("sandbox-analysis_execute_python_analysis", `{"ok":true,"refs":{"report_manifest_ref":"artifact://new/report-manifest","execution_ref":"artifact://new/sandbox-execution"}}`, false)
++	mismatch.observe("artifact-bridge_prepare_ml_report", `{"ok":true,"refs":{"report_manifest_ref":"artifact://new/report-manifest","report_context_ref":"artifact://new/report-context"},"plan_ref":"artifact://plan-1","analysis_coverage":{"status":"not_assessed","business_question":{"value":"Confirmed question"}}}`, false)
++	mismatch.observeCall("artifact-bridge_compose_ml_dashboard", `{"report_context_ref":"artifact://other/report-context"}`, `{"ok":true,"evidence":{"analysis_coverage":{"status":"evidence_available","business_question":{"value":"Wrong question"}}}}`, false)
++	if mismatch.deliveryStatus() != "not_assessed" || mismatch.question() != "Confirmed question" {
++		t.Fatalf("mismatched report changed delivery state: %#v", mismatch)
++	}
++
++	same := newDeliveryState("Original question")
++	same.observe("data-query-planner_plan_query", `{"ok":true,"refs":{"plan_ref":"artifact://plan-1"},"business_question":"Confirmed question"}`, false)
++	same.observe("sandbox-analysis_execute_python_analysis", `{"ok":true,"refs":{"report_manifest_ref":"artifact://new/report-manifest","execution_ref":"artifact://new/sandbox-execution"}}`, false)
++	same.observe("artifact-bridge_prepare_ml_report", `{"ok":true,"refs":{"report_manifest_ref":"artifact://new/report-manifest","report_context_ref":"artifact://new/report-context"},"plan_ref":"artifact://plan-1","analysis_coverage":{"status":"not_assessed","business_question":{"value":"Confirmed question"}}}`, false)
++	same.observeCall("artifact-bridge_compose_ml_dashboard", `{"report_context_ref":"artifact://new/report-context"}`, `{"ok":true,"delivery_status":"standard","evidence":{"analysis_coverage":{"status":"evidence_available","business_question":{"value":"Confirmed question"},"gaps":[]}}}`, false)
++	if same.deliveryStatus() != "evidence_available" || same.question() != "Confirmed question" {
++		t.Fatalf("same-report evidence was not retained: %#v", same)
++	}
++}
++
++func TestAgentLoopForeignReportToolCannotPromoteDelivery(t *testing.T) {
++	var llmCalls atomic.Int32
++	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch llmCalls.Add(1) {
++		case 1:
++			respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: Message{Role: "assistant", Content: `{"tools":["untrusted_prepare_ml_report"],"skills":[],"datasource_families":[]}`}, FinishReason: "stop"}}})
++		case 2:
++			respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "foreign-1", Type: "function", Function: FunctionCall{Name: "untrusted_prepare_ml_report", Arguments: `{}`}}}}, FinishReason: "tool_calls"}}})
++		case 3:
++			respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: Message{Role: "assistant", Content: "Foreign report is not host-confirmed."}, FinishReason: "stop"}}})
++		default:
++			http.Error(w, "unexpected LLM call", http.StatusInternalServerError)
++		}
++	}))
++	defer llmServer.Close()
++
++	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		switch r.URL.Path {
++		case "/mcp/list-tools":
++			json.NewEncoder(w).Encode(map[string]interface{}{"tools": []map[string]interface{}{{"name": "prepare_ml_report", "inputSchema": map[string]interface{}{"type": "object"}}}})
++		case "/mcp/call-tool":
++			json.NewEncoder(w).Encode(mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: `{"ok":true,"analysis_coverage":{"status":"evidence_available","business_question":{"value":"Different question"},"gaps":[]}}`}}})
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer mcpServer.Close()
++
++	proxy := mcp.NewProxy(context.Background(), log.DefaultLogger)
++	defer proxy.Close()
++	if err := proxy.EnsureServer(mcp.ServerConfig{ID: "untrusted", URL: mcpServer.URL, Type: "standard", Enabled: true}); err != nil {
++		t.Fatal(err)
++	}
++	loop := NewAgentLoop(NewLLMClient(log.DefaultLogger, llmServer.Client()), proxy, log.DefaultLogger)
++	events := make(chan SSEEvent, 32)
++	go loop.Run(context.Background(), LoopRequest{
++		Messages: []Message{{Role: "user", Content: "Original question"}}, OriginalBusinessQuestion: "Original question", SystemPrompt: "test", GrafanaURL: llmServer.URL,
++		UserRole: "Admin", OrgID: "1", MCPServers: []mcp.ServerConfig{{ID: "untrusted", Enabled: true}}, MaxIterations: 4,
++	}, events)
++	var report FinalReportEvent
++	for event := range events {
++		if event.Type == "final_report" {
++			report = event.Data.(FinalReportEvent)
++		}
++	}
++	if report.DeliveryStatus != "" || report.BusinessQuestion != "Original question" {
++		t.Fatalf("foreign report promoted delivery: %#v", report)
++	}
++}
++
++func TestAgentLoopFinalizationRetainsDeliveryState(t *testing.T) {
++	var llmCalls atomic.Int32
++	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch llmCalls.Add(1) {
++		case 1:
++			respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: Message{Role: "assistant", Content: `{"tools":["sandbox-analysis_execute_python_analysis"],"skills":[],"datasource_families":[]}`}, FinishReason: "stop"}}})
++		case 2:
++			respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "compute-1", Type: "function", Function: FunctionCall{Name: "sandbox-analysis_execute_python_analysis", Arguments: `{}`}}}}, FinishReason: "tool_calls"}}})
++		case 3:
++			respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: Message{Role: "assistant", Content: "Computation succeeded; the answer is complete."}, FinishReason: "stop"}}})
++		default:
++			http.Error(w, "unexpected LLM call", http.StatusInternalServerError)
++		}
++	}))
++	defer llmServer.Close()
++
++	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		switch r.URL.Path {
++		case "/mcp/list-tools":
++			json.NewEncoder(w).Encode(map[string]interface{}{"tools": []map[string]interface{}{{"name": "execute_python_analysis", "description": "bounded compute", "inputSchema": map[string]interface{}{"type": "object"}}}})
++		case "/mcp/call-tool":
++			json.NewEncoder(w).Encode(mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: `{"ok":true,"step":"execute_python_analysis","evidence":{"analysis_coverage":{"status":"not_assessed","business_question":"Which process change should we prioritize?","gaps":[{"code":"REQUIREMENTS_NOT_RECORDED","message":"No assessable delivery requirement was recorded."}]}}}`}}})
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer mcpServer.Close()
++
++	proxy := mcp.NewProxy(context.Background(), log.DefaultLogger)
++	defer proxy.Close()
++	if err := proxy.EnsureServer(mcp.ServerConfig{ID: "sandbox-analysis", URL: mcpServer.URL, Type: "standard", Enabled: true}); err != nil {
++		t.Fatal(err)
++	}
++	loop := NewAgentLoop(NewLLMClient(log.DefaultLogger, llmServer.Client()), proxy, log.DefaultLogger)
++	events := make(chan SSEEvent, 32)
++	go loop.Run(context.Background(), LoopRequest{
++		Messages:                 []Message{{Role: "user", Content: "Which process change should we prioritize?"}},
++		OriginalBusinessQuestion: "Which process change should we prioritize?",
++		SystemPrompt:             "test",
++		GrafanaURL:               llmServer.URL,
++		UserRole:                 "Admin",
++		OrgID:                    "1",
++		MCPServers:               []mcp.ServerConfig{{ID: "sandbox-analysis", Enabled: true}},
++		MaxIterations:            4,
++		ApprovalPolicy:           "approved",
++	}, events)
++
++	var report FinalReportEvent
++	var content ContentEvent
++	for event := range events {
++		if event.Type == "final_report" {
++			report = event.Data.(FinalReportEvent)
++		}
++		if event.Type == "content" {
++			content = event.Data.(ContentEvent)
++		}
++	}
++	if report.DeliveryStatus != "not_assessed" || report.BusinessQuestion != "Which process change should we prioritize?" {
++		t.Fatalf("final report delivery state = %#v", report)
++	}
++	if len(report.Gaps) != 1 || !strings.Contains(report.Gaps[0], "REQUIREMENTS_NOT_RECORDED") {
++		t.Fatalf("final report gaps = %#v", report.Gaps)
++	}
++	if !strings.Contains(content.Content, "Analytical completion is not established") {
++		t.Fatalf("host warning missing from persisted content: %q", content.Content)
++	}
++}
+--- a/pkg/plugin/plugin.go
++++ b/pkg/plugin/plugin.go
+@@ -992,29 +992,30 @@
+ 	eventCh := make(chan agent.SSEEvent, 16)
+ 
+ 	loopReq := agent.LoopRequest{
+-		Messages:             messages,
+-		SystemPrompt:         systemPrompt,
+-		MaxTotalTokens:       p.settings.MaxTotalTokens,
+-		RecentMessageCount:   p.settings.RecentMessageCount,
+-		MaxIterations:        resolveMaxIterations(req.Type, req.Message),
+-		Model:                effectiveRunModel,
+-		AllowModelFallback:   modelSource == "auto" && effectiveRunModel == "large",
+-		ConversationType:     req.Type,
+-		GrafanaURL:           grafanaURL,
+-		AuthToken:            saToken,
+-		UserRole:             userRole,
+-		UserID:               strconv.FormatInt(userID, 10),
+-		SessionID:            sessionID,
+-		UploadDatasetID:      uploadDatasetID,
+-		OrgID:                orgID,
+-		OrgName:              req.OrgName,
+-		ScopeOrgID:           req.ScopeOrgID,
+-		ExcludeToolNames:     graphitiWriteToolNames,
+-		MCPServers:           p.settingsForFilter(),
+-		ApprovalPolicy:       p.settings.ApprovalPolicy,
+-		MaxParallelToolCalls: p.settings.MaxParallelToolCalls,
+-		RegisterApproval:     p.approvalRegistrar(runID),
+-		CheckApprovalGrant:   p.approvalGrantChecker(sessionID),
++		Messages:                 messages,
++		SystemPrompt:             systemPrompt,
++		MaxTotalTokens:           p.settings.MaxTotalTokens,
++		RecentMessageCount:       p.settings.RecentMessageCount,
++		MaxIterations:            resolveMaxIterations(req.Type, req.Message),
++		Model:                    effectiveRunModel,
++		AllowModelFallback:       modelSource == "auto" && effectiveRunModel == "large",
++		ConversationType:         req.Type,
++		OriginalBusinessQuestion: req.Message,
++		GrafanaURL:               grafanaURL,
++		AuthToken:                saToken,
++		UserRole:                 userRole,
++		UserID:                   strconv.FormatInt(userID, 10),
++		SessionID:                sessionID,
++		UploadDatasetID:          uploadDatasetID,
++		OrgID:                    orgID,
++		OrgName:                  req.OrgName,
++		ScopeOrgID:               req.ScopeOrgID,
++		ExcludeToolNames:         graphitiWriteToolNames,
++		MCPServers:               p.settingsForFilter(),
++		ApprovalPolicy:           p.settings.ApprovalPolicy,
++		MaxParallelToolCalls:     p.settings.MaxParallelToolCalls,
++		RegisterApproval:         p.approvalRegistrar(runID),
++		CheckApprovalGrant:       p.approvalGrantChecker(sessionID),
+ 	}
+ 
+ 	detachedCtx := context.WithoutCancel(ctx)
+--- a/pkg/plugin/runstore_test.go
++++ b/pkg/plugin/runstore_test.go
+@@ -91,6 +91,38 @@
+ 	}
+ }
+ 
++func TestRunStore_PersistsDeliveryStateInFinalReport(t *testing.T) {
++	store := NewRunStore(log.DefaultLogger)
++	store.CreateRun("run-delivery", 100, 1)
++	store.AppendEvent("run-delivery", agent.SSEEvent{Type: "final_report", Data: agent.FinalReportEvent{
++		Summary:                  "Host delivery status: not_assessed.",
++		OriginalBusinessQuestion: "Current follow-up request",
++		PlanBusinessQuestion:     "Previously confirmed question",
++		BusinessQuestion:         "Previously confirmed question",
++		DeliveryStatus:           "not_assessed",
++		WriterStatus:             "succeeded",
++		Gaps:                     []string{"REQUIREMENTS_NOT_RECORDED: No assessable delivery requirement was recorded."},
++	}})
++
++	run, err := store.GetRun("run-delivery")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if run.Trace == nil || run.Trace.FinalReport == nil {
++		t.Fatal("final delivery report was not persisted")
++	}
++	report := run.Trace.FinalReport
++	if report.DeliveryStatus != "not_assessed" || report.WriterStatus != "succeeded" {
++		t.Fatalf("persisted delivery state = %#v", report)
++	}
++	if report.OriginalBusinessQuestion != "Current follow-up request" || report.PlanBusinessQuestion != "Previously confirmed question" {
++		t.Fatalf("question lineage = %#v", report)
++	}
++	if len(report.Gaps) != 1 {
++		t.Fatalf("persisted gaps = %#v", report.Gaps)
++	}
++}
++
+ func TestRunStore_AppendEvent_TrimsOldest(t *testing.T) {
+ 	store := NewRunStore(log.DefaultLogger)
+ 	store.CreateRun("run-1", 100, 1)
+--- a/src/services/agentClient.ts
++++ b/src/services/agentClient.ts
+@@ -92,6 +92,11 @@
+   evidenceIds?: string[];
+   gaps?: string[];
+   nextSteps?: string[];
++  originalBusinessQuestion?: string;
++  planBusinessQuestion?: string;
++  businessQuestion?: string;
++  deliveryStatus?: 'profile_only' | 'partial' | 'not_assessed' | 'evidence_available' | string;
++  writerStatus?: 'succeeded' | string;
+ }
+ 
+ export type SSEEvent =
+--- a/src/components/Chat/types.ts
++++ b/src/components/Chat/types.ts
+@@ -56,6 +56,11 @@
+   evidenceIds?: string[];
+   gaps?: string[];
+   nextSteps?: string[];
++  originalBusinessQuestion?: string;
++  planBusinessQuestion?: string;
++  businessQuestion?: string;
++  deliveryStatus?: 'profile_only' | 'partial' | 'not_assessed' | 'evidence_available' | string;
++  writerStatus?: 'succeeded' | string;
+ }
+ 
+ /** Reference to a Grafana page (dashboard or explore) */
+--- /dev/null
++++ b/pkg/agent/delivery_state.go
+@@ -0,0 +1,372 @@
++package agent
++
++import (
++	"encoding/json"
++	"fmt"
++	"strings"
++)
++
++// deliveryState is host-owned state derived only from known MCP contracts. It
++// deliberately does not infer coverage from assistant prose or arbitrary JSON.
++type deliveryState struct {
++	originalQuestion string
++	planQuestion     string
++	planRef          string
++	delivery         string
++	gaps             []string
++	writerStatus     string
++	profileOnly      bool
++	explicitPartial  bool
++
++	// resolvedTools is populated from the proxy's actual tools/list response.
++	// It is an additional guard: a foreign server cannot claim a contract merely
++	// by choosing a similar short name.
++	resolvedTools      map[string]struct{}
++	reportManifestRef  string
++	reportContextRef   string
++	reportExecutionRef string
++	reportPlanRef      string
++}
++
++func newDeliveryState(originalQuestion string) *deliveryState {
++	return &deliveryState{originalQuestion: strings.TrimSpace(originalQuestion), resolvedTools: make(map[string]struct{})}
++}
++
++func (s *deliveryState) setResolvedToolNames(names []string) {
++	if s == nil {
++		return
++	}
++	for _, name := range names {
++		if strings.TrimSpace(name) != "" {
++			s.resolvedTools[name] = struct{}{}
++		}
++	}
++}
++
++// observe is retained for package-level callers and tests that already have a
++// normalized tool result. The loop uses observeCall so report refs can be
++// checked against the actual arguments sent to the producer.
++func (s *deliveryState) observe(toolName, content string, isError bool) {
++	s.observeCall(toolName, "", content, isError)
++}
++
++func (s *deliveryState) observeCall(toolName, arguments, content string, isError bool) {
++	if s == nil || isError || !s.acceptsTool(toolName) {
++		return
++	}
++	payload := make(map[string]interface{})
++	if err := json.Unmarshal([]byte(content), &payload); err != nil || payload["ok"] != true {
++		return
++	}
++
++	if toolName == "mcp-grafana_update_dashboard" {
++		s.writerStatus = "succeeded"
++		return
++	}
++
++	if toolName == "data-query-planner_plan_query" {
++		if s.planQuestion == "" {
++			s.planQuestion = businessQuestion(payload["business_question"])
++			if s.planQuestion == "" {
++				s.planQuestion = businessQuestion(payload["plan"])
++			}
++		}
++		if planRef := firstRef(payload, "plan_ref"); planRef != "" && planRef != s.planRef {
++			s.planRef = planRef
++			s.reportManifestRef, s.reportContextRef, s.reportExecutionRef, s.reportPlanRef = "", "", "", ""
++		}
++		return
++	}
++
++	knownCoverageTool := toolName == "sandbox-analysis_execute_python_analysis" ||
++		toolName == "sandbox-analysis_profile_dataset" ||
++		toolName == "artifact-bridge_prepare_ml_report" ||
++		toolName == "artifact-bridge_compose_ml_dashboard"
++	if !knownCoverageTool {
++		return
++	}
++
++	// A successful Sandbox producer establishes the only report lineage that a
++	// later report tool may use. This rejects stale report refs from a prior run.
++	if toolName == "sandbox-analysis_execute_python_analysis" {
++		s.recordExecutionRefs(payload)
++	}
++
++	coverage := coverageObject(payload)
++	if coverage == nil {
++		if toolName == "sandbox-analysis_profile_dataset" {
++			s.profileOnly = true
++		}
++		return
++	}
++
++	status, _ := coverage["status"].(string)
++	bound := s.coverageBound(toolName, arguments, payload, status)
++	// A bare not_assessed result is useful as an unresolved host warning, but
++	// it must not import a question or promote an unrelated report. All other
++	// report statuses require current-run report/ref lineage.
++	explicitPartial, _ := payload["delivery_status"].(string)
++	if !bound && status != "not_assessed" && !(explicitPartial == "partial" && s.planRef == "" && s.reportContextRef == "") {
++		return
++	}
++
++	if bound && s.planQuestion == "" {
++		s.planQuestion = businessQuestion(coverage["business_question"])
++		if s.planQuestion == "" {
++			if evidence, ok := payload["evidence"].(map[string]interface{}); ok {
++				s.planQuestion = businessQuestion(evidence["business_question"])
++			}
++		}
++		if s.planQuestion == "" {
++			s.planQuestion = businessQuestion(payload["business_question"])
++		}
++	}
++	for _, gap := range coverageGaps(coverage["gaps"]) {
++		s.addGap(gap)
++	}
++
++	if explicit, ok := payload["delivery_status"].(string); ok && explicit == "partial" {
++		s.explicitPartial = true
++		s.delivery = "partial"
++		return
++	}
++	switch status {
++	case "not_assessed":
++		if !s.explicitPartial {
++			s.delivery = "not_assessed"
++		}
++	case "incomplete":
++		if !s.explicitPartial && bound {
++			s.delivery = "partial"
++		}
++	case "evidence_available":
++		if !s.explicitPartial && bound {
++			s.delivery = "evidence_available"
++		}
++	}
++}
++
++func (s *deliveryState) acceptsTool(name string) bool {
++	if !trustedDeliveryToolName(name) {
++		return false
++	}
++	if len(s.resolvedTools) == 0 {
++		return true
++	}
++	_, ok := s.resolvedTools[name]
++	return ok
++}
++
++func trustedDeliveryToolName(name string) bool {
++	switch name {
++	case "data-query-planner_plan_query", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_profile_dataset", "artifact-bridge_prepare_ml_report", "artifact-bridge_compose_ml_dashboard", "mcp-grafana_update_dashboard":
++		return true
++	default:
++		return false
++	}
++}
++
++func (s *deliveryState) recordExecutionRefs(payload map[string]interface{}) {
++	if refs := firstRef(payload, "report_manifest_ref", "report_context_ref"); refs != "" {
++		if strings.HasSuffix(refs, "/report-manifest") || strings.Contains(refs, "report-manifest") {
++			s.reportManifestRef = refs
++		} else {
++			s.reportExecutionRef = refs
++		}
++	}
++	if execution := firstRef(payload, "execution_ref"); execution != "" {
++		s.reportExecutionRef = execution
++	}
++}
++
++func (s *deliveryState) coverageBound(toolName, arguments string, payload map[string]interface{}, status string) bool {
++	args := map[string]interface{}{}
++	if arguments != "" {
++		_ = json.Unmarshal([]byte(arguments), &args)
++	}
++	planLineage := firstRef(payload, "plan_ref", "contract_ref")
++	if planLineage == "" {
++		planLineage = firstRefFrom(args, "plan_ref", "contract_ref")
++	}
++	if planLineage != "" && s.planRef != "" && planLineage != s.planRef {
++		return false
++	}
++	if status == "evidence_available" && s.planRef != "" && planLineage == "" && s.reportPlanRef != s.planRef {
++		return false
++	}
++
++	switch toolName {
++	case "artifact-bridge_prepare_ml_report":
++		manifest := firstRef(payload, "report_manifest_ref")
++		context := firstRef(payload, "report_context_ref")
++		if manifest == "" || context == "" || s.reportManifestRef == "" || manifest != s.reportManifestRef {
++			return false
++		}
++		if planLineage := firstRef(payload, "plan_ref", "contract_ref"); planLineage != "" {
++			if s.planRef != "" && planLineage != s.planRef {
++				return false
++			}
++			s.reportPlanRef = planLineage
++		}
++		s.reportContextRef = context
++		return true
++	case "artifact-bridge_compose_ml_dashboard":
++		context := firstRefFrom(args, "report_context_ref")
++		return context != "" && context == s.reportContextRef
++	default:
++		// Compute results may carry coverage directly. Evidence promotion still
++		// requires a report manifest emitted by this run.
++		return s.reportManifestRef != "" && status != "not_assessed"
++	}
++}
++
++func (s *deliveryState) addGap(gap string) {
++	gap = strings.TrimSpace(gap)
++	if gap == "" {
++		return
++	}
++	for _, existing := range s.gaps {
++		if existing == gap {
++			return
++		}
++	}
++	s.gaps = append(s.gaps, gap)
++}
++
++func (s *deliveryState) deliveryStatus() string {
++	if s == nil {
++		return ""
++	}
++	if s.delivery != "" {
++		return s.delivery
++	}
++	if s.profileOnly {
++		return "profile_only"
++	}
++	return ""
++}
++
++func (s *deliveryState) question() string {
++	if s == nil {
++		return ""
++	}
++	if s.planQuestion != "" {
++		return s.planQuestion
++	}
++	return s.originalQuestion
++}
++
++func (s *deliveryState) warning() string {
++	status := s.deliveryStatus()
++	if status == "" {
++		return ""
++	}
++	question := s.question()
++	var warning string
++	switch status {
++	case "profile_only":
++		warning = "Host delivery status: profile_only. This is a descriptive data profile, not an answer to an unrecorded analytical requirement."
++	case "evidence_available":
++		warning = "Host delivery status: evidence_available. Retained evidence is available, but this status does not assert scientific or operational completion."
++	default:
++		warning = fmt.Sprintf("Host delivery status: %s. Analytical completion is not established", status)
++		if question != "" {
++			warning += fmt.Sprintf(" for the requested question %q", question)
++		}
++		warning += "."
++	}
++	if len(s.gaps) > 0 {
++		warning += " Known gap: " + strings.Join(s.gaps, "; ")
++	}
++	return warning
++}
++
++func coverageObject(payload map[string]interface{}) map[string]interface{} {
++	if coverage, ok := payload["analysis_coverage"].(map[string]interface{}); ok {
++		return coverage
++	}
++	if evidence, ok := payload["evidence"].(map[string]interface{}); ok {
++		if coverage, ok := evidence["analysis_coverage"].(map[string]interface{}); ok {
++			return coverage
++		}
++	}
++	if report, ok := payload["report_context"].(map[string]interface{}); ok {
++		if coverage, ok := report["analysis_coverage"].(map[string]interface{}); ok {
++			return coverage
++		}
++	}
++	return nil
++}
++
++func firstRef(payload map[string]interface{}, keys ...string) string {
++	if ref := firstString(payload, keys...); ref != "" {
++		return ref
++	}
++	if refs, ok := payload["refs"].(map[string]interface{}); ok {
++		return firstString(refs, keys...)
++	}
++	if evidence, ok := payload["evidence"].(map[string]interface{}); ok {
++		if ref := firstString(evidence, keys...); ref != "" {
++			return ref
++		}
++		if refs, ok := evidence["refs"].(map[string]interface{}); ok {
++			return firstString(refs, keys...)
++		}
++	}
++	return ""
++}
++
++func firstRefFrom(payload map[string]interface{}, keys ...string) string {
++	return firstString(payload, keys...)
++}
++
++func firstString(payload map[string]interface{}, keys ...string) string {
++	for _, key := range keys {
++		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
++			return strings.TrimSpace(value)
++		}
++	}
++	return ""
++}
++
++func businessQuestion(value interface{}) string {
++	switch question := value.(type) {
++	case string:
++		return strings.TrimSpace(question)
++	case map[string]interface{}:
++		if value, ok := question["value"].(string); ok {
++			return strings.TrimSpace(value)
++		}
++		if value, ok := question["question"].(string); ok {
++			return strings.TrimSpace(value)
++		}
++	}
++	return ""
++}
++
++func coverageGaps(value interface{}) []string {
++	items, ok := value.([]interface{})
++	if !ok {
++		return nil
++	}
++	gaps := make([]string, 0, len(items))
++	for _, item := range items {
++		gap, ok := item.(map[string]interface{})
++		if !ok {
++			continue
++		}
++		message, _ := gap["message"].(string)
++		code, _ := gap["code"].(string)
++		message = strings.TrimSpace(message)
++		code = strings.TrimSpace(code)
++		if message == "" {
++			message = code
++		} else if code != "" {
++			message = code + ": " + message
++		}
++		if message != "" {
++			gaps = append(gaps, message)
++		}
++	}
++	return gaps
++}

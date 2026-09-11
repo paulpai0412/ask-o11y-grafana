@@ -50,6 +50,7 @@ def main() -> int:
     assert 21.4 <= decision["relative_error_reduction_percent"] <= 21.6
     assert decision["model_evidence_status"] == "模型驗證：通過"
     assert decision["operational_status"] == "營運使用：尚待確認誤判與漏判成本"
+    assert decision["metric_delta"] == {"metric": "accuracy", "selected_minus_baseline": 0.0355, "interpretation": "descriptive_metric_difference_not_causal_effect_size"}
 
     guidance = manifest["metric_guidance"]
     assert "accuracy" in guidance["primary_metric_reason"]
@@ -82,8 +83,8 @@ def main() -> int:
     ):
         try:
             presentation.validate_manifest(bad)
-        except ValueError:
-            pass
+        except ValueError as exc:
+            assert str(exc), "invalid manifest error must be descriptive"
         else:
             raise AssertionError("unsafe or unbounded manifest was accepted")
 

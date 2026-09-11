@@ -6,6 +6,8 @@
 
 本地 Epic：`TODO-e519e98e`。本次新建待辦，不重開既有已關閉 TODO。
 
+2026-09-11 後續決策：[不卡產出的 Plotly 設計](ask-o11y-novice-report-simplification.md#2026-09-11-修訂以順利產出為預設不再自訂-plotly-方言) 優先取代本頁涉及自訂圖表功能白名單、強制拆分 views、圖表失敗連帶封鎖分析證據的規則。其他身份／資料／授權／effect 政策不變；這是設計更新，尚非 runtime 完成證据。
+
 ## 目標與非目標
 
 使用者能以自然語言選擇授權資料，完成描述、比較、視覺化及受支援的 ML 分析；依意圖確認後執行，結果可追溯並在 Grafana 檢視。
@@ -110,10 +112,10 @@ LLM 繼續讀 validator 原文並只修相應 synthesis/參數。Transport read 
 所有分析 artifact 圖片一律 `asko11y-plotly-panel`，包含 profile、regression、classification 及探索圖片。支援明確 `image` 與 `plotly` 模式，由已驗證的 artifact MIME/capability 決定，不看 dataset/model 名稱。
 
 - Image mode：受信任 opaque asset binding；原樣顯示圖片，不偽造互動 trace。
-- Plotly mode：Bridge sanitized figure；不允許 eval/script/custom callbacks。
+- Plotly mode（2026-09-11 修訂）：以原生 Plotly 相容的完整 figure 呈現，不維護 trace/layout 功能白名單；沿用資料呈現方式，不提供 eval/script/custom callbacks 執行入口。
 - Text panel：僅敘述，禁止 img、CSS image 等圖片繞過路徑。
 - 單／多 view 都保留 narratives、evidence、alt 與限制；image mode 不因 single-view 去重而遺失全部敘述。
-- Invalid figure 不默默降級掩蓋問題；顯示錯誤。需要改 image mode 時仍須明確使用合法原圖片 capability，不改資料或假裝互動成功。
+- Invalid figure 不默默降級掩蓋問題；在該圖位置顯示錯誤，其他已驗來源的文字／表格／圖仍可讀，不連帶拒絕所有分析結果，也不將部分交付稱為完整。需要改 image mode 時仍須明確使用合法原圖片 capability，不改資料或假裝互動成功。使用者要求失敗停下時仍停止後續操作。
 - 新 figure/operation 要重置舊失敗狀態，支援可驗證的更新恢復。
 
 同步更新 compositor、dashboard validator、Bridge、writer gate、host prompt 與 plugin；不能只改前端。舊 dashboard 遷移由核准 writer 使用原 artifacts，不重新計算。歷史 PNG fallback 的「自動降級」規則由本節明確模式取代。

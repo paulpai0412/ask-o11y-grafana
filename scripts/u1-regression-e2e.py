@@ -77,7 +77,7 @@ def upload() -> str:
     return str(result["dataset_id"])
 
 
-def execute_analysis() -> tuple[dict[str, Any], int]:
+def execute_analysis() -> tuple[dict[str, Any], str]:
     dataset_id = upload()
     inspected = rpc("query", "inspect_dataset", {"dataset_id": dataset_id})
     contract = {
@@ -108,11 +108,10 @@ def execute_analysis() -> tuple[dict[str, Any], int]:
     manifest = next((item for item in inline if item.get("display_name") == "ml-regression.json"), None)
     if manifest is None:
         raise RuntimeError(f"regression manifest missing: {executed.get('output_summary')}")
-    try:
-        manifest_index = int(manifest["output_index"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError("regression manifest index is invalid") from exc
-    return executed, manifest_index
+    report_manifest_ref = executed.get("refs", {}).get("report_manifest_ref")
+    if not isinstance(report_manifest_ref, str):
+        raise RuntimeError("regression execution did not return a canonical report_manifest_ref")
+    return executed, report_manifest_ref
 
 
 def grafana_json(path: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -131,9 +130,9 @@ def main() -> int:
     parser.add_argument("--synthesis", type=Path)
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    executed, manifest_index = execute_analysis()
+    executed, report_manifest_ref = execute_analysis()
     execution_ref = executed["refs"]["execution_ref"]
-    prepared = rpc("bridge", "prepare_ml_report", {"execution_ref": execution_ref, "manifest_output_index": manifest_index})
+    prepared = rpc("bridge", "prepare_ml_report", {"report_manifest_ref": report_manifest_ref})
     artifact_ids = [item["artifact_id"] for item in prepared["report_context"]["artifacts"]]
     inspection_refs = []
     inspections = []

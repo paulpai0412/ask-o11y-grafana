@@ -1,0 +1,218 @@
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -39,6 +39,7 @@
+ // Requirements for reasoning, not a host-selected analysis workflow. Appended
+ // even when a custom system prompt is configured; tools/approvals remain authoritative.
+ const turnReasoningRequirements = `Current-turn reasoning requirements:
++Do not require analysis or ML expertise from the user. Discover technical facts and choose defensible methods yourself; ask only about unresolved business meaning, material trade-offs or authorization. A requested report needs an understandable answer to the decision question, evidence, uncertainty and relevant next actions, not raw tool JSON or a success receipt. Explain necessary jargon and adapt depth to the reader without changing facts. Numbers or tables may suffice for a simple question; choose charts and report structure when useful, not as a fixed template. These are content responsibilities, not a new execution workflow.
+ For analysis work, interpret the latest user reply in the context of the proposal it answers. Distinguish the overall objective from the work and constraints agreed for this turn. Do not treat a short confirmation as a new business question or as blanket approval of the final objective.
+ Choose the next action from the actual evidence and authorized tool capabilities: continue, revise, explain, or ask a necessary question. There is no mandatory profile/model/dashboard sequence. A historical Dashboard request or a successful computation does not require creating a Dashboard in this turn. A quality audit may end with its findings and a request for the next needed decision. Do not ask users to restate an already clear plan or answer.
+ Before ending, explain what was accomplished, the supporting evidence, what remains unresolved, and any decision needed next. Ask for clarification when the answer or authorization is genuinely ambiguous. Preserve conditions in the user's answer. Do not silently exclude/impute data, change the agreed scope, or recompute retained results.
+@@ -343,7 +344,7 @@
+ 			var isError bool
+ 			switch {
+ 			case tc.Function.Name == selectCapabilitiesTool && !publishReviewedGrafanaPreview:
+-				selected, skills, result, selectionErr := req.autonomy.selectCapabilities(tc.Function.Arguments, req)
++				selected, skills, result, selectionErr := req.autonomy.selectCapabilities(tc.Function.Arguments)
+ 				if selectionErr != nil {
+ 					toolContent, isError, errorKind = selectionErr.Error(), true, "tool"
+ 				} else {
+@@ -420,39 +421,6 @@
+ 	})
+ }
+ 
+-func conversationSupportsDatasourceFamily(messages []Message, family string) bool {
+-	aliases := map[string][]string{
+-		"loki":       {"loki", "log", "logs", "logql"},
+-		"prometheus": {"prometheus", "promql"},
+-		"tempo":      {"tempo", "trace", "traces", "traceql"},
+-		"pyroscope":  {"pyroscope", "profile", "profiles", "profiling"},
+-	}
+-	for _, message := range messages {
+-		if message.Role != "user" && !(message.Role == "system" && strings.HasPrefix(message.Content, "[Prior successful opaque tool state.")) {
+-			continue
+-		}
+-		normalized := strings.Map(func(value rune) rune {
+-			if value >= 'a' && value <= 'z' || value >= '0' && value <= '9' {
+-				return value
+-			}
+-			if value >= 'A' && value <= 'Z' {
+-				return value + ('a' - 'A')
+-			}
+-			return ' '
+-		}, message.Content)
+-		words := make(map[string]struct{})
+-		for _, word := range strings.Fields(normalized) {
+-			words[word] = struct{}{}
+-		}
+-		for _, alias := range aliases[family] {
+-			if _, ok := words[alias]; ok {
+-				return true
+-			}
+-		}
+-	}
+-	return false
+-}
+-
+ func conversationHasExactUploadDataset(messages []Message) bool {
+ 	for _, message := range messages {
+ 		if message.Role == "user" && exactUploadDatasetPattern.MatchString(message.Content) {
+@@ -508,7 +476,7 @@
+ 	if err != nil {
+ 		return tools, nil, false, false
+ 	}
+-	selectionPrompt := "You are the capability selector for the same Ask O11y planner. Select only tools and Agent Skills plausibly needed for this turn and its direct safe follow-up. Skills are advisory knowledge; live tool schemas remain authoritative. Preserve optional compositions and do not impose an analysis workflow. Datasource-family tools (for example Loki or Prometheus query tools) may be selected only when the conversation explicitly requests that family or contains a real discovered datasource UID of that type; never select them for a registered-dataset analysis merely to probe capabilities. Return only JSON: {\"tools\":[exact tool names, at most 24],\"skills\":[exact skill names, at most 2],\"datasource_families\":[explicitly evidenced values from registered,loki,prometheus,tempo,pyroscope],\"prepare_grafana_preview_after_execution\":boolean,\"publish_reviewed_grafana_preview\":boolean}. Use datasource family registered for named registered-dataset analysis; include Loki, Prometheus, Tempo, or Pyroscope only when explicitly requested or proven by a discovered datasource UID. The legacy prepare_grafana_preview_after_execution flag controls write-time Preview safeguards only: set it when any chosen Dashboard write should remain a reviewable Preview. It never obligates writing a Dashboard or completing the overall analysis this turn. Respect the current agreed scope; quality review, explanation and waiting for a decision are valid outcomes. The analysis assistant decides whether and when to use selected tools. Set publish true only when the user explicitly confirms publication of the already visible Grafana Preview; the booleans are mutually exclusive. Preview creation must use a complete preview-tagged dashboard; publication must patch the same UID without rerunning query or analysis.\nConversation: " + string(conversationJSON) + "\nTool catalog: " + string(catalogJSON) + "\nSkill catalog: " + string(skillCatalogJSON)
++	selectionPrompt := "Select tools and advisory Agent Skills from the authorized catalog for the current agreement and plausible follow-up, using conversation and tool evidence. Users need not name datasource technologies. Discover actual datasource metadata before querying; selecting a tool never grants execution permission. Do not impose an analysis workflow. Return only JSON: {\"tools\":[exact tool names, at most 24],\"skills\":[exact skill names, at most 2],\"prepare_grafana_preview_after_execution\":boolean,\"publish_reviewed_grafana_preview\":boolean}. The legacy prepare flag enables write-time Preview safeguards only, never obligates a Dashboard or completion this turn. Explanation, quality review and waiting for a decision are valid outcomes; the analysis assistant decides when to use tools. Set publish true only for explicit confirmation of the already visible Preview; the flags are mutually exclusive. Preview writes require complete preview-tagged JSON; publication patches the same UID without requery or recomputation.\nConversation: " + string(conversationJSON) + "\nTool catalog: " + string(catalogJSON) + "\nSkill catalog: " + string(skillCatalogJSON)
+ 	selectionReq := ChatCompletionRequest{Model: req.Model, Messages: []Message{{Role: "system", Content: selectionPrompt}}, MaxTokens: 1024}
+ 	resp, err := a.chatCompletionWithFallback(ctx, selectionReq, req)
+ 	if err != nil || len(resp.Choices) == 0 {
+@@ -524,33 +492,15 @@
+ 	var decision struct {
+ 		Tools                               []string `json:"tools"`
+ 		Skills                              []string `json:"skills"`
+-		DatasourceFamilies                  []string `json:"datasource_families"`
+ 		PrepareGrafanaPreviewAfterExecution bool     `json:"prepare_grafana_preview_after_execution"`
+ 		PublishReviewedGrafanaPreview       bool     `json:"publish_reviewed_grafana_preview"`
+ 	}
+-	if err := json.Unmarshal([]byte(content), &decision); err != nil || len(decision.Tools) > maxSelectedTools || len(decision.Skills) > maxSelectedSkills || len(decision.DatasourceFamilies) > 5 {
++	if err := json.Unmarshal([]byte(content), &decision); err != nil || len(decision.Tools) > maxSelectedTools || len(decision.Skills) > maxSelectedSkills {
+ 		a.logger.Warn("Dynamic capability selection returned invalid JSON; retaining authorized tool set", "response", content)
+ 		return tools, nil, false, false
+ 	}
+ 	selected := make(map[string]struct{}, len(decision.Tools))
+-	families := make(map[string]struct{}, len(decision.DatasourceFamilies))
+-	for _, family := range decision.DatasourceFamilies {
+-		families[strings.ToLower(family)] = struct{}{}
+-	}
+ 	for _, name := range decision.Tools {
+-		lowerName := strings.ToLower(name)
+-		requiredFamily := ""
+-		for _, family := range []string{"loki", "prometheus", "tempo", "pyroscope"} {
+-			if strings.Contains(lowerName, "_"+family+"_") || strings.HasSuffix(lowerName, "_"+family) {
+-				requiredFamily = family
+-				break
+-			}
+-		}
+-		if requiredFamily != "" {
+-			if _, ok := families[requiredFamily]; !ok || !conversationSupportsDatasourceFamily(req.Messages, requiredFamily) {
+-				continue
+-			}
+-		}
+ 		selected[name] = struct{}{}
+ 	}
+ 	if hasUploadDatasetContext(req) {
+diff --git a/pkg/agent/loop_test.go b/pkg/agent/loop_test.go
+--- a/pkg/agent/loop_test.go
++++ b/pkg/agent/loop_test.go
+@@ -1079,14 +1079,31 @@
+ 	}
+ }
+ 
+-func TestConversationSupportsDatasourceFamily(t *testing.T) {
+-	messages := []Message{{Role: "user", Content: "analyze the registered u1-operating-daily dataset"}}
+-	if conversationSupportsDatasourceFamily(messages, "loki") {
+-		t.Fatal("registered dataset intent unexpectedly enabled Loki")
+-	}
+-	messages = []Message{{Role: "user", Content: "investigate these Loki logs with LogQL"}}
+-	if !conversationSupportsDatasourceFamily(messages, "loki") {
+-		t.Fatal("explicit Loki intent was not recognized")
++func TestCapabilitySelectionUsesAuthorizedCatalog(t *testing.T) {
++	for _, name := range []string{"mcp-grafana_query_loki_logs", "mcp-grafana_query_prometheus", "mcp-grafana_query_tempo_traces", "mcp-grafana_query_pyroscope"} {
++		t.Run(name, func(t *testing.T) {
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				selection, _ := json.Marshal(map[string]interface{}{"tools": []string{name, "discover", "not-authorized"}, "skills": []string{}})
++				respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: Message{Role: "assistant", Content: string(selection)}, FinishReason: "stop"}}})
++			}))
++			defer server.Close()
++			loop := NewAgentLoop(NewLLMClient(log.DefaultLogger, server.Client()), nil, log.DefaultLogger)
++			req := LoopRequest{Messages: []Message{{Role: "user", Content: "我不懂分析，請調查服務變慢的原因並用白話說明"}}, GrafanaURL: server.URL}
++			catalog := []mcp.Tool{{Name: name}, {Name: "discover"}, {Name: "unneeded"}}
++			selected, _, _, _ := loop.selectRelevantTools(context.Background(), req, catalog)
++			if len(selected) != 2 || !hasTool(selected, name) || hasTool(selected, "not-authorized") {
++				t.Fatalf("selection must follow authorized catalog, not user keywords: %+v", selected)
++			}
++			state := analysisAutonomy{catalog: catalog}
++			selection, _ := json.Marshal(map[string]interface{}{"tools": []string{name}, "skills": []string{}})
++			reselected, _, _, err := state.selectCapabilities(string(selection))
++			if err != nil || len(reselected) != 1 || reselected[0].Name != name {
++				t.Fatalf("reselection must not require datasource jargon: %+v %v", reselected, err)
++			}
++			if _, _, _, err := state.selectCapabilities(`{"tools":["not-authorized"],"skills":[]}`); err == nil {
++				t.Fatal("unknown or unauthorized capability accepted")
++			}
++		})
+ 	}
+ }
+ 
+diff --git a/pkg/agent/analysis_autonomy.go b/pkg/agent/analysis_autonomy.go
+--- a/pkg/agent/analysis_autonomy.go
++++ b/pkg/agent/analysis_autonomy.go
+@@ -88,7 +88,7 @@
+ 	return decoder.Decode(value)
+ }
+ 
+-func (s *analysisAutonomy) selectCapabilities(raw string, req LoopRequest) ([]mcp.Tool, []Message, string, error) {
++func (s *analysisAutonomy) selectCapabilities(raw string) ([]mcp.Tool, []Message, string, error) {
+ 	var selection struct {
+ 		Tools  []string `json:"tools"`
+ 		Skills []string `json:"skills"`
+@@ -121,12 +121,6 @@
+ 			return nil, nil, "", fmt.Errorf("unknown, duplicate or unauthorized tool: %s", name)
+ 		}
+ 		seen[name] = true
+-		for _, family := range []string{"loki", "prometheus", "tempo", "pyroscope"} {
+-			lower := strings.ToLower(name)
+-			if (strings.Contains(lower, "_"+family+"_") || strings.HasSuffix(lower, "_"+family)) && !conversationSupportsDatasourceFamily(req.Messages, family) {
+-				return nil, nil, "", fmt.Errorf("datasource family lacks existing conversation authorization: %s", family)
+-			}
+-		}
+ 		for _, tool := range s.catalog {
+ 			if tool.Name == name {
+ 				selected = append(selected, tool)
+diff --git a/pkg/agent/analysis_autonomy_test.go b/pkg/agent/analysis_autonomy_test.go
+--- a/pkg/agent/analysis_autonomy_test.go
++++ b/pkg/agent/analysis_autonomy_test.go
+@@ -19,23 +19,22 @@
+ 
+ func TestAutonomySelection(t *testing.T) {
+ 	s := &analysisAutonomy{catalog: []mcp.Tool{{Name: "sandbox-analysis_profile_dataset"}, {Name: "mcp-grafana_query_prometheus"}}}
+-	_, _, catalog, err := s.selectCapabilities(`{}`, LoopRequest{})
++	_, _, catalog, err := s.selectCapabilities(`{}`)
+ 	if err != nil || !strings.Contains(catalog, "ml-method-selection") {
+ 		t.Fatalf("catalog: %s %v", catalog, err)
+ 	}
+-	tools, skills, _, err := s.selectCapabilities(`{"tools":["sandbox-analysis_profile_dataset"],"skills":["ml-method-selection"]}`, LoopRequest{})
++	tools, skills, _, err := s.selectCapabilities(`{"tools":["sandbox-analysis_profile_dataset"],"skills":["ml-method-selection"]}`)
+ 	if err != nil || len(tools) != 1 || len(skills) != 1 {
+ 		t.Fatalf("selection: %v", err)
+ 	}
+ 	for _, args := range []string{
+ 		`{"tools":["disabled"],"skills":[]}`,
+-		`{"tools":["mcp-grafana_query_prometheus"],"skills":[]}`,
+ 		`{"tools":[],"skills":["invented"]}`,
+ 		`{"tools":[],"skills":["dashboarding","dashboarding"]}`,
+ 		`{"tools":[],"skills":["dashboarding","ml-method-selection","data-understanding"]}`,
+ 		`{"tools":[],"skills":[],"publish":true}`, `null`, `{"tools":[]}`,
+ 	} {
+-		if _, _, _, err := s.selectCapabilities(args, LoopRequest{}); err == nil {
++		if _, _, _, err := s.selectCapabilities(args); err == nil {
+ 			t.Fatalf("accepted invalid selection %s", args)
+ 		}
+ 	}
+diff --git a/pkg/agent/llm_turn_control_test.go b/pkg/agent/llm_turn_control_test.go
+--- a/pkg/agent/llm_turn_control_test.go
++++ b/pkg/agent/llm_turn_control_test.go
+@@ -165,8 +165,10 @@
+ 			}
+ 			if len(bodies) > 1 {
+ 				b, _ := json.Marshal(bodies[1].Messages)
+-				if !strings.Contains(string(b), "Current-turn reasoning requirements") || !strings.Contains(string(b), "CUSTOM SYSTEM PROMPT") {
+-					t.Error("actual LLM request lost reasoning requirements/custom prompt")
++				for _, required := range []string{"Current-turn reasoning requirements", "CUSTOM SYSTEM PROMPT", "Do not require analysis or ML expertise", "A requested report needs an understandable answer", "Numbers or tables may suffice"} {
++					if !strings.Contains(string(b), required) {
++						t.Errorf("actual LLM request lost product/turn responsibility: %s", required)
++					}
+ 				}
+ 			}
+ 		})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -85,6 +86,45 @@ def tool_get_relation_paths(args: dict[str, Any]) -> dict[str, Any]:
     return response("get_relation_paths", snapshot=identity, expansion=expanded)
 
 
+def concept_names(item: dict[str, Any]) -> set[str]:
+    """Only names actually recorded in the snapshot; no keyword inference."""
+    aliases = item.get("aliases", [])
+    if not isinstance(aliases, list) or len(aliases) > 64 or any(not isinstance(alias, str) for alias in aliases):
+        raise ValueError("ontology aliases must be a bounded string array")
+    return {value.strip().casefold() for value in [*(item.get(key) for key in ("physical_id", "physical_name", "canonical_id", "display_name")), *aliases] if isinstance(value, str) and value.strip()}
+
+
+def semantic_alignment(dataset: dict[str, Any], selected: list[dict[str, Any]], *, observed: bool = False) -> dict[str, Any]:
+    """Source-backed preparation for a human brief, never a selected task or grant."""
+    def recorded(value: Any) -> bool:
+        return value is not None and value != "" and value != [] and value != {}
+
+    if len({field["physical_name"] for field in selected}) != len(selected):
+        raise ValueError("ambiguous selected field identities")
+    not_recorded = {}
+    for key in ("definition", "unit", "availability", "lineage", "operating_limits"):
+        not_recorded[key] = [field["physical_name"] for field in selected if not recorded(field.get(key)) and not (key == "definition" and recorded(field.get("description")))]
+    return {
+        "format": "ask-o11y-semantic-alignment-v1",
+        "intent_status": "proposal_not_confirmation",
+        "role_status": "recorded_metadata_not_task_selection",
+        "actions_granted": [],
+        "semantic_sha256": hashlib.sha256(json.dumps(dataset, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
+        "coverage": {"returned_fields": len(selected), "available_fields": len(dataset["fields"]), "complete": len(selected) == len(dataset["fields"])},
+        "dataset_not_recorded": [key for key in ("grain", "entity_key", "time_identity") if not recorded(dataset.get(key))],
+        "not_recorded": not_recorded,
+        "unapproved_role_fields": [field["physical_name"] for field in selected if observed or dataset.get("status") != "approved" or field.get("status") != "approved" or not field.get("analysis_role")],
+        "gap_policy": "Metadata gaps are not automatic blockers or a questionnaire. Resolve only gaps material to the proposed question; never infer safety limits, causal effects or authorization from absence.",
+    }
+
+
+def alignment_with_snapshot(dataset: dict[str, Any], selected: list[dict[str, Any]], identity: dict[str, Any], *, observed: bool = False) -> dict[str, Any]:
+    basis = semantic_alignment(dataset, selected, observed=observed)
+    basis["source_snapshot"] = {key: identity[key] for key in ("snapshot_id", "namespace", "version", "sha256", "status", "approval_scope") if key in identity}
+    basis["knowledge_limits"] = {"causal": "unknown", "operational_safety": "unknown", "authorization": "not_granted"}
+    return basis
+
+
 def tool_resolve_concepts(args: dict[str, Any]) -> dict[str, Any]:
     terms = args.get("terms")
     if not isinstance(terms, list) or not terms or len(terms) > MAX_TERMS or any(not isinstance(term, str) or not term.strip() or len(term) > 128 for term in terms):
@@ -92,16 +132,15 @@ def tool_resolve_concepts(args: dict[str, Any]) -> dict[str, Any]:
     snapshot, identity = load_verified(args.get("snapshot_ref"), namespace=args.get("namespace"))
     candidates = []
     for term in terms:
-        needle = term.casefold()
+        needle = term.strip().casefold()
         matches = []
         for dataset in snapshot["registry"]["datasets"]:
-            if needle in {str(dataset["physical_id"]).casefold(), str(dataset["canonical_id"]).casefold()}:
-                matches.append({"canonical_id": dataset["canonical_id"], "physical_id": dataset["physical_id"], "kind": "dataset", "status": dataset["status"]})
+            if needle in concept_names(dataset):
+                matches.append({"canonical_id": dataset["canonical_id"], "physical_id": dataset["physical_id"], "dataset_id": dataset["physical_id"], "kind": "dataset", "status": dataset["status"]})
             for field in dataset["fields"]:
-                haystack = {str(field["physical_name"]).casefold(), str(field["canonical_id"]).casefold()}
-                if needle in haystack:
-                    matches.append({"canonical_id": field["canonical_id"], "physical_name": field["physical_name"], "kind": "field", "status": field["status"], "role": field.get("analysis_role"), "reason": field["reason"]})
-        candidates.append({"term": term, "matches": matches[:16], "ambiguous": len(matches) > 1})
+                if needle in concept_names(field):
+                    matches.append({"canonical_id": field["canonical_id"], "physical_name": field["physical_name"], "dataset_id": dataset["physical_id"], "kind": "field", "status": field["status"], "role": field.get("analysis_role"), "reason": field.get("reason")})
+        candidates.append({"term": term, "matches": matches[:16], "match_count": len(matches), "matches_truncated": len(matches) > 16, "ambiguous": len(matches) > 1})
     return response("resolve_concepts", snapshot=identity, results=candidates)
 
 
@@ -111,8 +150,8 @@ def tool_get_semantic_context(args: dict[str, Any]) -> dict[str, Any]:
     fields = args.get("fields", [])
     if not isinstance(dataset_id, str) or not dataset_id or not isinstance(intent, str) or not intent or len(intent) > 2048:
         raise ValueError("dataset_id and bounded intent are required")
-    if not isinstance(fields, list) or len(fields) > MAX_FIELDS or any(not isinstance(field, str) or not field for field in fields):
-        raise ValueError(f"fields must be a bounded array of at most {MAX_FIELDS} names")
+    if not isinstance(fields, list) or len(fields) > MAX_FIELDS or any(not isinstance(field, str) or not field for field in fields) or len(set(fields)) != len(fields):
+        raise ValueError(f"fields must be a bounded unique array of at most {MAX_FIELDS} names")
     if dataset_id.startswith("upload_"):
         context = args.get("_server_context")
         if not isinstance(context, dict):
@@ -120,7 +159,11 @@ def tool_get_semantic_context(args: dict[str, Any]) -> dict[str, Any]:
         metadata = uploaded_datasets.inspect_upload(context, dataset_id, context.get("session_id"))
         hints = upload_semantics.load_hints(uploaded_datasets.UPLOAD_ROOT / dataset_id)
         by_name = {field["physical_name"]: field for field in hints["fields"]}
+        if len(by_name) != len(hints["fields"]):
+            raise ValueError("ambiguous ontology field identities")
         requested = fields or list(by_name)
+        if len(requested) > MAX_FIELDS:
+            raise ValueError("semantic context exceeds field bound; select an explicit subset")
         unknown = [field for field in requested if field not in by_name]
         if unknown:
             raise ValueError("UNKNOWN_FIELD: " + ", ".join(unknown))
@@ -139,6 +182,7 @@ def tool_get_semantic_context(args: dict[str, Any]) -> dict[str, Any]:
                 "quality_policy": hints["quality_policy"],
                 "split_policy": {"allowed": ["chronological_holdout", "grouped_holdout", "stratified_holdout"], "preprocessing_fit_scope": "training_only"},
                 "fields": [by_name[field] for field in requested],
+                "alignment_basis": alignment_with_snapshot(hints, [by_name[field] for field in requested], identity, observed=True),
             },
         )
     snapshot, identity = load_verified(args.get("snapshot_ref"), dataset_id=dataset_id)
@@ -146,7 +190,11 @@ def tool_get_semantic_context(args: dict[str, Any]) -> dict[str, Any]:
     if dataset is None:
         raise ValueError("UNKNOWN_DATASET")
     by_name = contract.fields_by_name(dataset)
+    if len({field["physical_name"] for field in dataset["fields"]}) != len(dataset["fields"]) or any(by_name[str(field[key])] is not field for field in dataset["fields"] for key in ("physical_name", "canonical_id")):
+        raise ValueError("ambiguous ontology field identities")
     requested = fields or [field["physical_name"] for field in dataset["fields"]]
+    if len(requested) > MAX_FIELDS:
+        raise ValueError("semantic context exceeds field bound; select an explicit subset")
     unknown = [field for field in requested if field not in by_name]
     if unknown:
         raise ValueError("UNKNOWN_FIELD: " + ", ".join(unknown))
@@ -170,7 +218,9 @@ def tool_get_semantic_context(args: dict[str, Any]) -> dict[str, Any]:
             "split_policy": dataset.get("split_policy"),
             "relations": dataset.get("relations", [])[:MAX_RELATIONS],
             "relations_truncated": len(dataset.get("relations", [])) > MAX_RELATIONS,
+            "evidence": dataset.get("evidence", [])[:8],
             "fields": selected,
+            "alignment_basis": alignment_with_snapshot(dataset, selected, identity),
         },
     )
 
@@ -230,8 +280,8 @@ def tool_validate_analysis_contract(args: dict[str, Any]) -> dict[str, Any]:
 TOOLS = [
     {"name": "list_snapshots", "description": "List at most 64 approved immutable snapshot manifests, optionally filtered by namespace or dataset. Never returns registry contents or rows.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"namespace": {"type": "string", "minLength": 1, "maxLength": 128}, "dataset_id": {"type": "string", "minLength": 1, "maxLength": 128}}}},
     {"name": "get_relation_paths", "description": "Expand bounded dataset seeds through approved executable ontology relations, returning exact keys/cardinality/path evidence. Proposed relations are excluded by default and never become executable.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_ids": {"type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": True, "items": {"type": "string", "minLength": 1, "maxLength": 128}}, "max_hops": {"type": "integer", "minimum": 0, "maximum": 3, "default": 2}, "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 16}, "include_proposed": {"type": "boolean", "default": False}, "snapshot_ref": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["dataset_ids"]}},
-    {"name": "resolve_concepts", "description": "Resolve at most 16 exact dataset/field terms against one approved immutable semantic snapshot. Returns ambiguity; never queries data.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"terms": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 128}}, "namespace": {"type": "string", "minLength": 1, "maxLength": 128}, "snapshot_ref": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["terms"]}},
-    {"name": "get_semantic_context", "description": "Return bounded grain, identity, roles, availability, quality, feature allowlist, and split policy for one approved dataset snapshot; never returns rows or a graph dump.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_id": {"type": "string", "minLength": 1, "maxLength": 128}, "intent": {"type": "string", "minLength": 1, "maxLength": 2048}, "fields": {"type": "array", "maxItems": 200, "items": {"type": "string", "minLength": 1, "maxLength": 128}}, "snapshot_ref": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["dataset_id", "intent"]}},
+    {"name": "resolve_concepts", "description": "Resolve at most 16 exact dataset/field names, declared display names or aliases against one pinned semantic snapshot. Returns dataset-qualified candidates, ambiguity and truncation; never selects the user's target or queries data.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"terms": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 128}}, "namespace": {"type": "string", "minLength": 1, "maxLength": 128}, "snapshot_ref": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["terms"]}},
+    {"name": "get_semantic_context", "description": "Return bounded grain, definitions, units, recorded roles, lineage, availability, declared operating limits and analysis policies. alignment_basis separates missing/unapproved knowledge and evidence coverage for a plain-language Analysis Preview; it grants no execution or ontology approval. Uploads remain observed candidates. Never returns rows or a graph dump.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_id": {"type": "string", "minLength": 1, "maxLength": 128}, "intent": {"type": "string", "minLength": 1, "maxLength": 2048}, "fields": {"type": "array", "maxItems": 200, "items": {"type": "string", "minLength": 1, "maxLength": 128}}, "snapshot_ref": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["dataset_id", "intent"]}},
     {"name": "classify_fields", "description": "Classify at most 200 exact fields by semantic kind, analysis role, approval, availability, unit, lineage, and evidence.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_id": {"type": "string", "minLength": 1, "maxLength": 128}, "fields": {"type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": True, "items": {"type": "string", "minLength": 1, "maxLength": 128}}, "snapshot_ref": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["dataset_id", "fields"]}},
     {"name": "validate_analysis_contract", "description": "Side-effect-free advisory semantic validation. Planner independently enforces the same snapshot before making a query plan executable.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"contract": {"type": "object", "maxProperties": 16}, "snapshot_ref": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["contract"]}},
 ]
@@ -331,8 +381,9 @@ def self_check() -> None:
         raise RuntimeError("200-field classification boundary failed")
     try:
         tool_classify_fields({"dataset_id": "u1-operating-daily", "fields": [*wide_fields, "field_200"]})
-    except ValueError:
-        pass
+    except ValueError as exc:
+        if not str(exc):
+            raise RuntimeError("201-field classification error was not descriptive") from exc
     else:
         raise RuntimeError("201-field classification was allowed")
     wferp = tool_get_semantic_context({"dataset_id": "ACPTA", "intent": "inspect voucher relationships"})

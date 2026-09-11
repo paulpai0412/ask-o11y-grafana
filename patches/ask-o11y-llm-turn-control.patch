@@ -1,0 +1,671 @@
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -34,13 +34,16 @@
+ // this the run ends with a clean, retryable error instead of spinning.
+ const maxTruncationRetries = 1
+ 
+-// maxGrafanaPreviewNoProgressNudges bounds consecutive no-tool responses after
+-// analysis when the required Preview is still missing. A real tool call resets
+-// this streak so valid recovery work can continue.
+-const maxGrafanaPreviewNoProgressNudges = 2
+ const maxSelectedTools = 24
+-const publicationQuestion = "是否確認將此 Grafana Preview 正式發佈至 Dashboard？"
+-const grafanaPreviewNudge = "[SYSTEM: The confirmed intent requires a visually inspectable Grafana Preview, not a chat-only Result Preview. Use the selected dashboarding skill and mcp-grafana_update_dashboard with one complete dashboard JSON. For an analysis image, use only an opaque asset binding in asko11y-plotly-panel with explicit image or plotly mode; text panels are narrative-only; use $plan_ref targets only when Sandbox was not called. After compose_ml_dashboard returns refs.dashboard_ref, send {dashboard: {$dashboard_ref: refs.dashboard_ref}} rather than copying the full dashboard; the host resolves it. The trusted host resolves all refs. The host will enforce preview status. Return the exact Grafana URL and stop for publication confirmation.]"
++
++// Requirements for reasoning, not a host-selected analysis workflow. Appended
++// even when a custom system prompt is configured; tools/approvals remain authoritative.
++const turnReasoningRequirements = `Current-turn reasoning requirements:
++For analysis work, interpret the latest user reply in the context of the proposal it answers. Distinguish the overall objective from the work and constraints agreed for this turn. Do not treat a short confirmation as a new business question or as blanket approval of the final objective.
++Choose the next action from the actual evidence and authorized tool capabilities: continue, revise, explain, or ask a necessary question. There is no mandatory profile/model/dashboard sequence. A historical Dashboard request or a successful computation does not require creating a Dashboard in this turn. A quality audit may end with its findings and a request for the next needed decision. Do not ask users to restate an already clear plan or answer.
++Before ending, explain what was accomplished, the supporting evidence, what remains unresolved, and any decision needed next. Ask for clarification when the answer or authorization is genuinely ambiguous. Preserve conditions in the user's answer. Do not silently exclude/impute data, change the agreed scope, or recompute retained results.
++Claims must match observed evidence. Do not claim a Dashboard was saved or invent a URL without an authenticated writer success or readback. A saved Dashboard does not establish analytical completion, scientific validity, causality, or publication approval. A failed/indeterminate tool result remains a gap; report it honestly and retain available refs. Never blindly retry an indeterminate write.
++Use the existing exact-call, data-policy, artifact and publication gates. A Preview is not publication; publication needs its separate explicit approval. These requirements do not grant additional permissions.`
+ 
+ // truncatedToolCallNudge is injected after a truncated tool call is discarded so
+ // the model reissues a smaller, complete call rather than repeating the cutoff.
+@@ -98,8 +101,8 @@
+ 	RegisterApproval     ApprovalRegistrar
+ 	CheckApprovalGrant   ApprovalGrantChecker
+ 
+-	// ForceGrafanaPreview and ForceGrafanaPublication are host-enforced lifecycle
+-	// states selected from the user's current turn.
++	// These are write-time lifecycle safeguards, not obligations to perform a
++	// write or finish analysis in this turn. Publication retains separate approval.
+ 	ForceGrafanaPreview     bool
+ 	ForceGrafanaPublication bool
+ 
+@@ -147,15 +150,15 @@
+ 		mcpTools = filtered
+ 	}
+ 	authorizedTools := append([]mcp.Tool(nil), mcpTools...)
+-	var prepareGrafanaPreviewAfterExecution, publishReviewedGrafanaPreview bool
++	var previewWrites, publishReviewedGrafanaPreview bool
+ 	var skillMessages []Message
+-	mcpTools, skillMessages, prepareGrafanaPreviewAfterExecution, publishReviewedGrafanaPreview = a.selectRelevantTools(ctx, req, mcpTools)
+-	req.ForceGrafanaPreview = prepareGrafanaPreviewAfterExecution
++	mcpTools, skillMessages, previewWrites, publishReviewedGrafanaPreview = a.selectRelevantTools(ctx, req, mcpTools)
++	req.ForceGrafanaPreview = previewWrites
+ 	req.ForceGrafanaPublication = publishReviewedGrafanaPreview
+ 	req.autonomy = &analysisAutonomy{catalog: authorizedTools, frames: make(map[string]string)}
+ 	openAITools := autonomyTools(mcpTools, publishReviewedGrafanaPreview)
+ 
+-	messages := BuildContextWindow(req.SystemPrompt, req.Messages, req.Summary, req.RecentMessageCount)
++	messages := BuildContextWindow(req.SystemPrompt+"\n\n"+turnReasoningRequirements, req.Messages, req.Summary, req.RecentMessageCount)
+ 
+ 	// Per-run state for transport-failure aggregation. We emit at most one
+ 	// mcp_unavailable event per run, once at least 2 distinct tools have hit
+@@ -165,10 +168,6 @@
+ 	mcpUnavailableEmitted := false
+ 	truncationRetries := 0
+ 	pendingTruncationNudge := false
+-	pendingGrafanaPreviewNudge := false
+-	grafanaPreviewNoProgressNudges := 0
+-	successfulExecutionObserved := false
+-	grafanaPreviewObserved := false
+ 	delivery := newDeliveryState(req.OriginalBusinessQuestion)
+ 	resolvedDeliveryTools := make([]string, 0, len(authorizedTools))
+ 	for _, tool := range authorizedTools {
+@@ -206,7 +205,7 @@
+ 			Verdict: verdict, Confidence: "medium", Summary: summary,
+ 			Gaps:                     append([]string(nil), delivery.gaps...),
+ 			OriginalBusinessQuestion: delivery.originalQuestion, PlanBusinessQuestion: delivery.planQuestion,
+-			BusinessQuestion: delivery.question(), DeliveryStatus: status, WriterStatus: delivery.writerStatus,
++			BusinessQuestion: delivery.question(), DeliveryStatus: status, WriterStatus: delivery.writerEvidenceStatus(),
+ 		}})
+ 		a.send(emitCtx, eventCh, SSEEvent{Type: "content", Data: ContentEvent{Content: finalContent}})
+ 	}
+@@ -241,10 +240,6 @@
+ 		if pendingTruncationNudge {
+ 			oneShot = append(oneShot, Message{Role: "system", Content: truncatedToolCallNudge})
+ 			pendingTruncationNudge = false
+-		}
+-		if pendingGrafanaPreviewNudge {
+-			oneShot = append(oneShot, Message{Role: "system", Content: grafanaPreviewNudge})
+-			pendingGrafanaPreviewNudge = false
+ 		}
+ 		if len(oneShot) > 0 {
+ 			callMessages = TrimMessagesToTokenLimit(append(append([]Message{}, callMessages...), oneShot...), openAITools, promptBudget)
+@@ -315,18 +310,6 @@
+ 		}
+ 
+ 		if len(msg.ToolCalls) == 0 {
+-			if prepareGrafanaPreviewAfterExecution && successfulExecutionObserved && !grafanaPreviewObserved {
+-				if grafanaPreviewNoProgressNudges >= maxGrafanaPreviewNoProgressNudges || iteration >= maxIter-1 {
+-					emitFailure(SSEEvent{Type: "error", Data: ErrorEvent{Message: "Execution produced output, but the requested Grafana Preview was not created. Retain the existing refs; do not rerun analysis.", Code: "grafana_preview_missing", Retryable: true}})
+-					return
+-				}
+-				grafanaPreviewNoProgressNudges++
+-				pendingGrafanaPreviewNudge = true
+-				continue
+-			}
+-			if prepareGrafanaPreviewAfterExecution && grafanaPreviewObserved && msg.Content != "" && !strings.Contains(msg.Content, publicationQuestion) {
+-				msg.Content = strings.TrimSpace(msg.Content) + "\n\n" + publicationQuestion
+-			}
+ 			emitFinal(msg.Content)
+ 			a.send(ctx, eventCh, SSEEvent{
+ 				Type: "done",
+@@ -335,9 +318,6 @@
+ 			return
+ 		}
+ 
+-		// A valid tool call is progress. Start a fresh no-progress streak after
+-		// executing it, including when the tool itself returns an error.
+-		grafanaPreviewNoProgressNudges = 0
+ 		msg.Content = ""
+ 		messages = append(messages, msg)
+ 
+@@ -362,8 +342,6 @@
+ 			var toolContent, errorKind string
+ 			var isError bool
+ 			switch {
+-			case grafanaPreviewObserved:
+-				toolContent, isError, errorKind = "Preview is complete; tools are closed until a new user turn", true, "approval_required"
+ 			case tc.Function.Name == selectCapabilitiesTool && !publishReviewedGrafanaPreview:
+ 				selected, skills, result, selectionErr := req.autonomy.selectCapabilities(tc.Function.Arguments, req)
+ 				if selectionErr != nil {
+@@ -421,12 +399,6 @@
+ 				})
+ 			}
+ 			if !isError {
+-				successfulExecutionObserved = successfulExecutionObserved || isExecutionResult(toolContent)
+-				grafanaPreviewObserved = grafanaPreviewObserved || (prepareGrafanaPreviewAfterExecution && tc.Function.Name == "mcp-grafana_update_dashboard")
+-				if grafanaPreviewObserved {
+-					openAITools = nil
+-					req.autonomy.scope = nil
+-				}
+ 				a.send(ctx, eventCh, SSEEvent{
+ 					Type: "evidence",
+ 					Data: EvidenceEvent{
+@@ -448,15 +420,6 @@
+ 	})
+ }
+ 
+-func isExecutionResult(content string) bool {
+-	var result map[string]interface{}
+-	if json.Unmarshal([]byte(content), &result) != nil || result["ok"] != true {
+-		return false
+-	}
+-	step, _ := result["step"].(string)
+-	return strings.HasPrefix(step, "execute_") || step == "profile_dataset"
+-}
+-
+ func conversationSupportsDatasourceFamily(messages []Message, family string) bool {
+ 	aliases := map[string][]string{
+ 		"loki":       {"loki", "log", "logs", "logql"},
+@@ -545,7 +508,7 @@
+ 	if err != nil {
+ 		return tools, nil, false, false
+ 	}
+-	selectionPrompt := "You are the capability selector for the same Ask O11y planner. Select only tools and Agent Skills plausibly needed for this turn and its direct safe follow-up. Skills are advisory knowledge; live tool schemas remain authoritative. Preserve optional compositions and do not impose an analysis workflow. Datasource-family tools (for example Loki or Prometheus query tools) may be selected only when the conversation explicitly requests that family or contains a real discovered datasource UID of that type; never select them for a registered-dataset analysis merely to probe capabilities. Return only JSON: {\"tools\":[exact tool names, at most 24],\"skills\":[exact skill names, at most 2],\"datasource_families\":[explicitly evidenced values from registered,loki,prometheus,tempo,pyroscope],\"prepare_grafana_preview_after_execution\":boolean,\"publish_reviewed_grafana_preview\":boolean}. Use datasource family registered for named registered-dataset analysis; include Loki, Prometheus, Tempo, or Pyroscope only when explicitly requested or proven by a discovered datasource UID. Set prepare true only when this turn authorizes data/analysis execution and prior/current intent requests Grafana, Dashboard, or a Grafana preview. Set publish true only when the user explicitly confirms publication of the already visible Grafana Preview; the booleans are mutually exclusive. Preview creation must use a complete preview-tagged dashboard; publication must patch the same UID without rerunning query or analysis.\nConversation: " + string(conversationJSON) + "\nTool catalog: " + string(catalogJSON) + "\nSkill catalog: " + string(skillCatalogJSON)
++	selectionPrompt := "You are the capability selector for the same Ask O11y planner. Select only tools and Agent Skills plausibly needed for this turn and its direct safe follow-up. Skills are advisory knowledge; live tool schemas remain authoritative. Preserve optional compositions and do not impose an analysis workflow. Datasource-family tools (for example Loki or Prometheus query tools) may be selected only when the conversation explicitly requests that family or contains a real discovered datasource UID of that type; never select them for a registered-dataset analysis merely to probe capabilities. Return only JSON: {\"tools\":[exact tool names, at most 24],\"skills\":[exact skill names, at most 2],\"datasource_families\":[explicitly evidenced values from registered,loki,prometheus,tempo,pyroscope],\"prepare_grafana_preview_after_execution\":boolean,\"publish_reviewed_grafana_preview\":boolean}. Use datasource family registered for named registered-dataset analysis; include Loki, Prometheus, Tempo, or Pyroscope only when explicitly requested or proven by a discovered datasource UID. The legacy prepare_grafana_preview_after_execution flag controls write-time Preview safeguards only: set it when any chosen Dashboard write should remain a reviewable Preview. It never obligates writing a Dashboard or completing the overall analysis this turn. Respect the current agreed scope; quality review, explanation and waiting for a decision are valid outcomes. The analysis assistant decides whether and when to use selected tools. Set publish true only when the user explicitly confirms publication of the already visible Grafana Preview; the booleans are mutually exclusive. Preview creation must use a complete preview-tagged dashboard; publication must patch the same UID without rerunning query or analysis.\nConversation: " + string(conversationJSON) + "\nTool catalog: " + string(catalogJSON) + "\nSkill catalog: " + string(skillCatalogJSON)
+ 	selectionReq := ChatCompletionRequest{Model: req.Model, Messages: []Message{{Role: "system", Content: selectionPrompt}}, MaxTokens: 1024}
+ 	resp, err := a.chatCompletionWithFallback(ctx, selectionReq, req)
+ 	if err != nil || len(resp.Choices) == 0 {
+@@ -651,7 +614,7 @@
+ 	preparePreview := decision.PrepareGrafanaPreviewAfterExecution && previewToolAvailable
+ 	publishPreview := decision.PublishReviewedGrafanaPreview && publishToolAvailable
+ 	skillMessages := selectedSkillMessages(decision.Skills)
+-	a.logger.Info("Dynamically selected capabilities", "availableTools", len(tools), "selectedTools", len(filtered), "selectedSkills", decision.Skills, "prepareGrafanaPreviewAfterExecution", preparePreview, "publishReviewedGrafanaPreview", publishPreview)
++	a.logger.Info("Dynamically selected capabilities", "availableTools", len(tools), "selectedTools", len(filtered), "selectedSkills", decision.Skills, "previewWriteSafeguards", preparePreview, "publishReviewedGrafanaPreview", publishPreview)
+ 	return filtered, skillMessages, preparePreview, publishPreview
+ }
+ 
+diff --git a/pkg/agent/loop_test.go b/pkg/agent/loop_test.go
+--- a/pkg/agent/loop_test.go
++++ b/pkg/agent/loop_test.go
+@@ -1090,17 +1090,6 @@
+ 	}
+ }
+ 
+-func TestIsExecutionResult(t *testing.T) {
+-	if !isExecutionResult(`{"ok":true,"step":"execute_python_analysis"}`) {
+-		t.Fatal("successful execute step was not recognized")
+-	}
+-	for _, value := range []string{`{"ok":false,"step":"execute_python_analysis"}`, `{"ok":true,"step":"plan_query"}`, `not-json`} {
+-		if isExecutionResult(value) {
+-			t.Fatalf("non-execution result was recognized: %s", value)
+-		}
+-	}
+-}
+-
+ func TestLatestToolRefRecoversNestedPlanRef(t *testing.T) {
+ 	messages := []Message{
+ 		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", Function: FunctionCall{Name: "data-query-planner_plan_query"}}}},
+@@ -1122,12 +1111,12 @@
+ 	}
+ }
+ 
+-func TestAgentLoop_GrafanaPreviewNoProgressIsBounded(t *testing.T) {
++func TestAgentLoop_LLMDirectedWriterRecovery(t *testing.T) {
+ 	for _, repair := range []bool{false, true} {
+ 		t.Run(fmt.Sprintf("repair=%t", repair), func(t *testing.T) {
+-			maxAllowedLLMCalls := 6
++			maxAllowedLLMCalls := 4
+ 			if repair {
+-				maxAllowedLLMCalls = 10
++				maxAllowedLLMCalls = 6
+ 			}
+ 			t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
+ 			var llmCalls atomic.Int32
+@@ -1195,8 +1184,8 @@
+ 
+ 				idx := int(llmCalls.Add(1)) - 1
+ 				responseIndex := idx
+-				if repair && (idx == 5 || idx == 8) {
+-					responseIndex = 2 // Retry after two nudges, with a new exact approved input.
++				if repair && (idx == 3 || idx == 4) {
++					responseIndex = 2 // The model chooses another exact-approved operation, without a host nudge.
+ 				}
+ 				var response ChatCompletionResponse
+ 				switch responseIndex {
+@@ -1222,9 +1211,14 @@
+ 						FinishReason: "tool_calls",
+ 					}}}
+ 				default:
+-					// Keep returning a no-tool answer to reproduce the old 50-iteration spin.
++					// A no-tool response is a valid stop. Failed writer evidence remains
++					// visible without requiring the host to drive further attempts.
++					content := ""
++					if idx == 3 {
++						content = "Existing output is retained; awaiting the next scoped decision."
++					}
+ 					response = ChatCompletionResponse{ID: "no-progress", Choices: []Choice{{
+-						Message:      Message{Role: "assistant"},
++						Message:      Message{Role: "assistant", Content: content},
+ 						FinishReason: "stop",
+ 					}}}
+ 				}
+@@ -1287,17 +1281,19 @@
+ 				t.Fatal("loop emitted no events")
+ 			}
+ 			last := events[len(events)-1]
+-			if repair {
+-				if last.Type != "done" {
+-					t.Fatalf("repaired Preview ended with %#v, want done", last)
++			if last.Type != "done" {
++				t.Fatalf("model chose to stop but host emitted %#v", last)
++			}
++
++			if !repair {
++				retained := false
++				for _, event := range events {
++					if content, ok := event.Data.(ContentEvent); ok && strings.Contains(content.Content, "Existing output is retained; awaiting the next scoped decision.") {
++						retained = true
++					}
+ 				}
+-			} else {
+-				if last.Type != "error" {
+-					t.Fatalf("last event = %q, want bounded preview error", last.Type)
+-				}
+-				errEvent, ok := last.Data.(ErrorEvent)
+-				if !ok || errEvent.Code != "grafana_preview_missing" || !errEvent.Retryable {
+-					t.Fatalf("last event = %#v, want retryable grafana_preview_missing", last.Data)
++				if !retained {
++					t.Fatal("missing-preview failure discarded the last useful assistant explanation")
+ 				}
+ 			}
+ 
+@@ -1323,21 +1319,10 @@
+ 
+ 			requestMu.Lock()
+ 			defer requestMu.Unlock()
+-			var nudgeCount int
+ 			for _, body := range requestBodies {
+-				if strings.Contains(body, "visually inspectable Grafana Preview") {
+-					if !strings.Contains(body, "[Selected Agent Skill: dashboarding") {
+-						t.Fatal("preview nudge lost the selected skill")
+-					}
+-					nudgeCount++
++				if strings.Contains(body, "The confirmed intent requires a visually inspectable Grafana Preview") {
++					t.Fatal("host imposed a dashboard workflow")
+ 				}
+-			}
+-			wantNudges := 2
+-			if repair {
+-				wantNudges = 4 // Tool errors reset the consecutive no-tool bound.
+-			}
+-			if nudgeCount != wantNudges {
+-				t.Fatalf("preview nudge count = %d, want %d", nudgeCount, wantNudges)
+ 			}
+ 			if len(requestBodies) > 0 && !strings.Contains(requestBodies[len(requestBodies)-1], "artifact://analysis-run") {
+ 				t.Fatal("successful analysis ref disappeared from later LLM context")
+@@ -1377,16 +1362,13 @@
+ 	if got := strings.Join(names, ","); got != "mcp-grafana_update_dashboard,artifact-bridge_compose_ml_dashboard" {
+ 		t.Fatalf("selected tools = %q, want writer and composer only", got)
+ 	}
+-	if !isExecutionResult(`{"ok":true,"step":"profile_dataset"}`) {
+-		t.Fatal("successful profile result was not recognized")
+-	}
+ }
+ 
+ func TestDeliveryStateTracksTrustedCoverageAndWriterWithoutPromotion(t *testing.T) {
+ 	state := newDeliveryState("Current follow-up request")
+ 	state.observe("data-query-planner_plan_query", `{"ok":true,"refs":{"plan_ref":"artifact://plan-1"},"business_question":"Previously confirmed question"}`, false)
+ 	state.observe("sandbox-analysis_execute_python_analysis", `{"ok":true,"step":"execute_python_analysis","analysis_coverage":{"status":"not_assessed","business_question":{"value":"Previously confirmed question"},"gaps":[{"code":"REQUIREMENTS_NOT_RECORDED","message":"No assessable delivery requirement was recorded."}]}}`, false)
+-	state.observe("mcp-grafana_update_dashboard", `{"ok":true,"step":"update_dashboard"}`, false)
++	state.observe("mcp-grafana_update_dashboard", `{"ok":true,"uid":"verified-preview","url":"/d/verified-preview"}`, false)
+ 
+ 	if state.deliveryStatus() != "not_assessed" {
+ 		t.Fatalf("delivery status = %q, want not_assessed", state.deliveryStatus())
+diff --git a/pkg/agent/delivery_state.go b/pkg/agent/delivery_state.go
+--- a/pkg/agent/delivery_state.go
++++ b/pkg/agent/delivery_state.go
+@@ -11,6 +11,7 @@
+ // actual call and any current plan identity. No current-turn compute is needed.
+ type deliveryState struct {
+ 	originalQuestion, planQuestion, planRef, planSHA string
++	dataQuestion                                     string // LLM-authored question retained by the authenticated query
+ 	delivery, writerStatus                           string
+ 	gaps                                             []string
+ 	profileOnly                                      bool
+@@ -41,7 +42,8 @@
+ 	parseErr := json.Unmarshal([]byte(content), &payload)
+ 	if name == "mcp-grafana_update_dashboard" {
+ 		s.writerStatus = "indeterminate"
+-		if !isError && parseErr == nil && (payload["ok"] == true || firstString(payload, "uid") != "") {
++		ok, hasOK := payload["ok"]
++		if !isError && parseErr == nil && (!hasOK || ok == true) && firstString(payload, "uid") != "" {
+ 			s.writerStatus = "succeeded"
+ 		}
+ 		return // Persistence never promotes analytical coverage.
+@@ -57,6 +59,7 @@
+ 		}
+ 		if ref != s.planRef {
+ 			s.resetReport()
++			s.dataQuestion = ""
+ 			s.planRef, s.planSHA = ref, firstRef(payload, "plan_sha256")
+ 			// The real planner returns no question field: retain the host-bound call.
+ 			s.planQuestion = businessQuestion(args["business_question"])
+@@ -67,6 +70,20 @@
+ 			s.addGap("PLAN_NOT_ASSESSED: No report coverage has been verified for this plan.")
+ 		}
+ 		return
++	}
++	if name == "grafana-query_execute_planned_query" {
++		plan := firstString(args, "plan_ref")
++		if success && plan != "" && firstRef(payload, "frame_ref") != "" && (s.planRef == "" || s.planRef == plan) {
++			s.resetReport()
++			if s.planRef == "" {
++				s.planQuestion = ""
++			}
++			provenance, _ := payload["provenance"].(map[string]interface{})
++			s.dataQuestion = businessQuestion(provenance["business_question"])
++			s.delivery = "not_assessed"
++			s.addGap("REPORT_NOT_ASSESSED: The query supplied validated data, not report coverage.")
++		}
++		return // Question context only; no coverage or permission promotion.
+ 	}
+ 	isReport := name == "artifact-bridge_prepare_ml_report" || name == "artifact-bridge_compose_ml_dashboard"
+ 	if !isReport {
+@@ -153,7 +170,7 @@
+ 
+ func trustedDeliveryToolName(name string) bool {
+ 	switch name {
+-	case "data-query-planner_plan_query", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_execute_ml_contract", "sandbox-analysis_profile_dataset", "sandbox-analysis_reexport_trusted_report", "sandbox-analysis_repair_generic_report", "sandbox-analysis_revise_python_analysis", "artifact-bridge_prepare_ml_report", "artifact-bridge_compose_ml_dashboard", "mcp-grafana_update_dashboard":
++	case "data-query-planner_plan_query", "grafana-query_execute_planned_query", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_execute_ml_contract", "sandbox-analysis_profile_dataset", "sandbox-analysis_reexport_trusted_report", "sandbox-analysis_repair_generic_report", "sandbox-analysis_revise_python_analysis", "artifact-bridge_prepare_ml_report", "artifact-bridge_compose_ml_dashboard", "mcp-grafana_update_dashboard":
+ 		return true
+ 	default:
+ 		return false
+@@ -241,19 +258,32 @@
+ 	if s.planQuestion != "" {
+ 		return s.planQuestion
+ 	}
++	if s.dataQuestion != "" {
++		return s.dataQuestion
++	}
+ 	return s.originalQuestion
++}
++
++func (s *deliveryState) writerEvidenceStatus() string {
++	if s.writerStatus == "" {
++		return "not_verified"
++	}
++	return s.writerStatus
+ }
+ 
+ func (s *deliveryState) warning() string {
+ 	status := s.deliveryStatus()
+ 	if status == "" {
++		if s.writerStatus != "" {
++			return fmt.Sprintf("Host dashboard writer status: %s. This does not establish analytical completion or publication approval.", s.writerEvidenceStatus())
++		}
+ 		return ""
+ 	}
+ 	warning := fmt.Sprintf("Host delivery status: %s. Analytical completion is not established", status)
+ 	if question := s.question(); question != "" {
+ 		warning += fmt.Sprintf(" for the requested question %q", question)
+ 	}
+-	warning += "."
++	warning += fmt.Sprintf(". Dashboard writer status for this delivery: %s.", s.writerEvidenceStatus())
+ 	if status == "profile_only" {
+ 		warning += " This is a descriptive data profile, not an assessment of unrecorded analytical requirements."
+ 	}
+diff --git a/pkg/agent/llm_turn_control_test.go b/pkg/agent/llm_turn_control_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/agent/llm_turn_control_test.go
+@@ -0,0 +1,174 @@
++package agent
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"testing"
++
++	"consensys-asko11y-app/pkg/mcp"
++	"github.com/grafana/grafana-plugin-sdk-go/backend/httpclient"
++	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
++)
++
++// Real loop and writer guards; synthetic MCP/LLM only. No user data or live services.
++func TestLLMTurnControl(t *testing.T) {
++	for _, tc := range []struct {
++		name                                  string
++		preview, write, fail, readback, claim bool
++	}{
++		{name: "audit-pauses", preview: true},
++		{name: "audit-without-preview-hint"},
++		{name: "failed-writer-explained", preview: true, write: true, fail: true},
++		{name: "writer-then-readback", preview: true, write: true, readback: true},
++		{name: "unsupported-prose-claim", claim: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++			var mu sync.Mutex
++			var invoked []string
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.URL.Path == "/mcp/list-tools" {
++					tools := []mcp.Tool{}
++					for _, n := range []string{"profile_dataset", "update_dashboard", "get_dashboard_by_uid"} {
++						tools = append(tools, mcp.Tool{Name: n, InputSchema: map[string]interface{}{"type": "object"}})
++					}
++					_ = json.NewEncoder(w).Encode(map[string]interface{}{"tools": tools})
++					return
++				}
++				var rpc mcp.MCPRequest
++				_ = json.NewDecoder(r.Body).Decode(&rpc)
++				var args mcp.CallToolParams
++				_ = json.Unmarshal(rpc.Params, &args)
++				mu.Lock()
++				invoked = append(invoked, args.Name)
++				mu.Unlock()
++				result := mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: `{"ok":true,"step":"profile_dataset","refs":{"execution_ref":"artifact://synthetic/sandbox-execution"},"computation_status":"succeeded","report_status":"accepted"}`}}}
++				if args.Name == "update_dashboard" || args.Name == "get_dashboard_by_uid" {
++					result.Content[0].Text = `{"uid":"turn-preview","url":"/d/turn-preview","version":1}`
++				}
++				if args.Name == "update_dashboard" && tc.fail {
++					result.IsError = true
++					result.Content[0].Text = "writer unavailable"
++				}
++				_ = json.NewEncoder(w).Encode(result)
++			}))
++			defer server.Close()
++			toolMessage := func(name, args string) Message {
++				return Message{Role: "assistant", ToolCalls: []ToolCall{{ID: name, Type: "function", Function: FunctionCall{Name: name, Arguments: args}}}}
++			}
++			messages := []Message{{Role: "assistant", Content: fmt.Sprintf(`{"tools":["sandbox-analysis_profile_dataset","mcp-grafana_update_dashboard","mcp-grafana_get_dashboard_by_uid"],"skills":[],"prepare_grafana_preview_after_execution":%t}`, tc.preview)}, toolMessage("sandbox-analysis_profile_dataset", `{"frame_ref":"artifact://synthetic/grafana-frame"}`)}
++			if tc.write {
++				messages = append(messages, toolMessage("mcp-grafana_update_dashboard", `{"dashboard":{"uid":"turn-preview","title":"Preview","panels":[{"id":1,"type":"text","title":"Audit","options":{"mode":"markdown","content":"Audit only"}}]}}`))
++			}
++			if tc.readback {
++				messages = append(messages, toolMessage("mcp-grafana_get_dashboard_by_uid", `{"uid":"turn-preview"}`))
++			}
++			answer := "品質稽核已完成；請核准下一階段的資料處理規則。"
++			if tc.fail {
++				answer = "寫入未成功；保留已有結果，不重新計算。"
++			}
++			if tc.claim {
++				answer = "已建立 Dashboard /d/invented，分析全部完成。"
++			}
++			messages = append(messages, Message{Role: "assistant", Content: answer})
++			var calls int
++			var bodies []ChatCompletionRequest
++			llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				var body ChatCompletionRequest
++				_ = json.NewDecoder(r.Body).Decode(&body)
++				mu.Lock()
++				bodies = append(bodies, body)
++				idx := calls
++				calls++
++				mu.Unlock()
++				if idx >= len(messages) {
++					idx = len(messages) - 1
++				}
++				respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: messages[idx], FinishReason: "stop"}}})
++			}))
++			defer llm.Close()
++			proxy := mcp.NewProxy(context.Background(), log.DefaultLogger)
++			defer proxy.Close()
++			for _, id := range []string{"sandbox-analysis", "mcp-grafana"} {
++				if err := proxy.EnsureServer(mcp.ServerConfig{ID: id, URL: server.URL, Type: "standard", Enabled: true}); err != nil {
++					t.Fatal(err)
++				}
++			}
++			client, err := httpclient.New()
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer client.CloseIdleConnections()
++			loop := NewAgentLoop(NewLLMClient(log.DefaultLogger, client), proxy, log.DefaultLogger)
++			ch := make(chan SSEEvent, 64)
++			req := LoopRequest{Messages: []Message{{Role: "user", Content: "最終需要Dashboard，先稽核並提計畫"}, {Role: "assistant", Content: "先做品質稽核，不排除不填補，之後再詢問核准"}, {Role: "user", Content: "確認核准"}}, OriginalBusinessQuestion: "Compare sources", SystemPrompt: "CUSTOM SYSTEM PROMPT", MaxIterations: 10, GrafanaURL: llm.URL, AuthToken: "test", UserRole: "Admin", UserID: "42", SessionID: "synthetic", OrgID: "1", MCPServers: []mcp.ServerConfig{{ID: "sandbox-analysis", Enabled: true}, {ID: "mcp-grafana", Enabled: true}}}
++			req.RegisterApproval = func(_ context.Context, a ApprovalRequestEvent) (ApprovalWaitFunc, error) {
++				return func(context.Context) (ApprovalResolvedEvent, error) {
++					return ApprovalResolvedEvent{ApprovalID: a.ApprovalID, Decision: "approved"}, nil
++				}, nil
++			}
++			go loop.Run(context.Background(), req, ch)
++			var done, kept bool
++			var final FinalReportEvent
++			for e := range ch {
++				if e.Type == "error" {
++					t.Errorf("unexpected run failure: %+v", e)
++				}
++				if e.Type == "done" {
++					done = true
++				}
++				if c, ok := e.Data.(ContentEvent); ok && strings.Contains(c.Content, answer) {
++					kept = true
++				}
++				if f, ok := e.Data.(FinalReportEvent); ok {
++					final = f
++				}
++			}
++			if !done || !kept {
++				t.Error("LLM's response/normal stop was lost")
++			}
++			mu.Lock()
++			defer mu.Unlock()
++			if calls != len(messages) {
++				t.Errorf("host forced extra LLM calls: got %d want %d", calls, len(messages))
++			}
++			want := 1
++			if tc.write {
++				want++
++			}
++			if tc.readback {
++				want++
++			}
++			if len(invoked) != want {
++				t.Errorf("tool path changed: %v", invoked)
++			}
++			if tc.readback && (len(invoked) == 0 || invoked[len(invoked)-1] != "get_dashboard_by_uid") {
++				t.Error("host prevented readback")
++			}
++			if tc.write && !tc.fail {
++				if final.WriterStatus != "succeeded" {
++					t.Errorf("real writer missing: %+v", final)
++				}
++			} else if final.WriterStatus == "succeeded" {
++				t.Error("unverified writer promoted")
++			}
++			if tc.claim && final.WriterStatus != "not_verified" {
++				t.Errorf("unsupported prose needs explicit unverified writer status: %+v", final)
++			}
++			if final.DeliveryStatus != "profile_only" {
++				t.Errorf("tool/text success promoted analytical coverage: %+v", final)
++			}
++			if len(bodies) > 1 {
++				b, _ := json.Marshal(bodies[1].Messages)
++				if !strings.Contains(string(b), "Current-turn reasoning requirements") || !strings.Contains(string(b), "CUSTOM SYSTEM PROMPT") {
++					t.Error("actual LLM request lost reasoning requirements/custom prompt")
++				}
++			}
++		})
++	}
++}
+diff --git a/pkg/agent/delivery_evidence_test.go b/pkg/agent/delivery_evidence_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/agent/delivery_evidence_test.go
+@@ -0,0 +1,66 @@
++package agent
++
++import "testing"
++
++func TestWriterEvidenceRequiresIdentity(t *testing.T) {
++	for _, body := range []string{`{"ok":true}`, `{"ok":false,"uid":"x"}`, `{"ok":"true","uid":"x"}`, `not-json`} {
++		s := newDeliveryState("question")
++		s.observe("mcp-grafana_update_dashboard", body, false)
++		if s.writerEvidenceStatus() != "indeterminate" {
++			t.Fatalf("unverified writer promoted: %s", body)
++		}
++		if s.warning() == "" {
++			t.Fatal("writer-only failure needs a visible evidence warning")
++		}
++	}
++	for _, body := range []string{`{"uid":"x","url":"/d/x"}`, `{"ok":true,"uid":"x"}`} {
++		s := newDeliveryState("question")
++		s.observe("mcp-grafana_update_dashboard", body, false)
++		if s.writerEvidenceStatus() != "succeeded" || s.deliveryStatus() != "" {
++			t.Fatal("writer identity lost or analytical completion fabricated")
++		}
++	}
++	s := newDeliveryState("question")
++	s.observe("forged_update_dashboard", `{"uid":"x"}`, false)
++	if s.writerEvidenceStatus() != "not_verified" {
++		t.Fatal("foreign tool promoted writer")
++	}
++}
++
++func TestDeliveryQuestionRetainsAuthenticatedQueryContext(t *testing.T) {
++	s := newDeliveryState("確認核准")
++	result := `{"ok":true,"refs":{"frame_ref":"artifact://p/grafana-frame"},"provenance":{"business_question":"Compare coal sources"}}`
++	args := `{"plan_ref":"artifact://p/query-plan"}`
++	s.observeCall("grafana-query_execute_planned_query", args, result, false)
++	s.observe("sandbox-analysis_profile_dataset", `{"ok":true,"step":"profile_dataset"}`, false)
++	if s.question() != "Compare coal sources" || s.deliveryStatus() != "profile_only" {
++		t.Fatalf("query context lost or promoted: %+v", s)
++	}
++	// Raw turn input remains distinct from the question retained by the query.
++	if s.originalQuestion != "確認核准" {
++		t.Fatal("raw input rewritten")
++	}
++	for _, name := range []string{"fake_execute_planned_query", "grafana-query_execute_planned_query"} {
++		x := newDeliveryState("raw")
++		x.observeCall(name, args, result, true)
++		if x.question() != "raw" {
++			t.Fatal("failed query supplied authoritative question")
++		}
++	}
++	x := newDeliveryState("raw")
++	x.observeCall("grafana-query_execute_planned_query", `{}`, result, false)
++	if x.question() != "raw" {
++		t.Fatal("unbound query supplied question")
++	}
++	x.observeCall("fake_execute_planned_query", args, result, false)
++	if x.question() != "raw" {
++		t.Fatal("foreign query tool supplied question")
++	}
++	// New data invalidates the old delivery's writer/coverage evidence, while
++	// ordinary dashboard readback does not (covered by TestLLMTurnControl).
++	s.observe("mcp-grafana_update_dashboard", `{"uid":"old-preview"}`, false)
++	s.observeCall("grafana-query_execute_planned_query", args, result, false)
++	if s.writerEvidenceStatus() != "not_verified" || s.deliveryStatus() != "not_assessed" {
++		t.Fatalf("new query inherited previous delivery evidence: %+v", s)
++	}
++}
+diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
+--- a/pkg/plugin/prompt_defaults.go
++++ b/pkg/plugin/prompt_defaults.go
+@@ -99,12 +99,12 @@
+ Dashboard acceptance is outcome-based, not a fixed workflow or layout template. Preserve the user's confirmed comparisons, variable roles, scope, requested ordering and removals; reconcile the actual saved dashboard against those commitments using enabled read capabilities. A successful write proves persistence only, not intent agreement or visual readability. Report separately what was written, what was checked against the saved JSON, and whether actual rendering was inspected; without rendering evidence say visual verification is pending, never claim it passed. If a capability is unavailable, disclose that limitation rather than fabricate a receipt or loop. Choose chart forms and layout dynamically: when lines obscure each other, consider meaningful facets, grouping or a more suitable representation; do not silently drop series, sample, normalize, aggregate or change analysis to improve appearance. Reuse valid analysis artifacts when only presentation needs repair. Plotly is the default analysis presentation: when charts or a dashboard are requested, produce sanitized Plotly figure artifacts and use the plugin's plotly mode. Use image mode only when the user explicitly requests a static PNG or the tool argument presentation_mode is explicitly image. Text panels are narrative-only: never embed HTML/CSS/Markdown images. Invalid figures must show an error, not silently fall back. This host carries text-only tool results: use mode=spec and visual_observation=null for report inspection; do not claim visual inspection. Bind a PNG only as an explicit image-mode asset; never put $execution_ref in a panel target or combine an analysis asset with a Grafana data target.
+ The host resolves these placeholders immediately before dispatch; never reconstruct datasource queries or expose raw artifact data.
+ 
+-For requested previews, create one complete dashboard using the intended final title; preview status lives only in the host-enforced first tag. Stop with its exact Grafana URL. After explicit publication confirmation, patch that same UID; the host normalizes the mutation to remove only the preview tag. Never change the requested panel type or analytical meaning without confirmation.
++When the currently agreed work includes creating a Preview and the evidence supports doing so, create one complete dashboard using the intended final title; preview status lives only in the host-enforced first tag. A historical Dashboard objective does not require a write in a quality-audit or clarification turn. Report the exact returned URL and remaining verification; a write need not end the turn before authorized readback. Ask about publication only when appropriate to the current conversation. After separate explicit publication confirmation, patch that same UID; the host normalizes the mutation to remove only the preview tag. Never change the requested panel type or analytical meaning without confirmation.
+ ### Data-first analysis
+ 
+ Before analyzing an unfamiliar upload, ERP/WFERP dataset, or numeric table, use the data-understanding skill and the available inspect/schema tools. Keep dataset IDs, physical fields, date semantics, grain, relations, and opaque refs dynamic from tool evidence. Show an Analysis Preview and wait for confirmation before query or sandbox execution. Use profile_dataset when full-data quality or distribution facts are needed; reuse an existing valid profile. It is evidence, not a mandatory terminal answer or method selector. Choose descriptive, diagnostic, statistical, or predictive analysis only when it serves the user's decision question, and propose any necessary contract revision for confirmation. Do not require the user to name a method, and do not invoke ML merely because columns are numeric. Profile charts are visual-only aggregations, never a derived dataset or training input. Use all approved rows for modeling and explanations; never sample, truncate, or create derived datasets. Report resource limits explicitly. Model and feature-set selection use training CV only, sharing one global search budget; lock the winner before holdout evaluation. MAE direction is not a business target direction; pure prediction does not require optimization. An uploaded ontology remains inferred/observed unless an approved snapshot says otherwise.
+ 
+-When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. For completed profile/analysis results, use prepare_ml_report, inspect_report_artifacts, and compose_ml_dashboard generically: inspect all bounded facts and artifact/view evidence, then synthesize once with evidence-bound per-view narratives before the sole approved Grafana writer.
++When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. When the currently agreed work includes a Dashboard report from completed profile/analysis results, use prepare_ml_report, inspect_report_artifacts, and compose_ml_dashboard generically: inspect all bounded facts and artifact/view evidence, then synthesize once with evidence-bound per-view narratives before the sole approved Grafana writer.
+ 
+ The compose_ml_dashboard synthesis must contain exactly format, report_title, thesis, thesis_evidence, and sections; pass uid and title as separate tool arguments, never as legacy top-level synthesis fields.
+ 

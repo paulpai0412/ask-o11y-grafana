@@ -1,0 +1,1227 @@
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -794,6 +794,21 @@
+ 		args["_server_session_id"] = req.SessionID
+ 	}
+ 	var operationIdentity []byte
++	var reportRef, expectedReportUID string
++	var reportReservation *reportDashboardUIDReservation
++	var recoveredResult *mcp.CallToolResult
++	var preserveReservation bool
++	defer func() {
++		if reportReservation == nil {
++			return
++		}
++		if preserveReservation || !reportReservation.fresh {
++			reportReservation.closeWithoutRelease()
++			return
++		}
++		_ = reportReservation.release()
++		reportReservation.closeWithoutRelease()
++	}()
+ 	if tc.Function.Name == "mcp-grafana_update_dashboard" {
+ 		if req.OrgID == "" || req.UserID == "" || req.SessionID == "" {
+ 			return "Dashboard effects require an authenticated actor and session", true, "tool"
+@@ -803,26 +818,92 @@
+ 		if identityErr != nil {
+ 			return "Invalid dashboard operation identity", true, "tool"
+ 		}
++		if uid := dashboardTargetUID(args); uid != "" {
++			var reservationErr error
++			reportReservation, reservationErr = reserveDashboardUID(req.OrgID, uid)
++			if reservationErr != nil {
++				return fmt.Sprintf("Dashboard UID %q is reserved by another operation; refusing dashboard write", uid), true, "tool"
++			}
++		}
++		if dashboard, ok := args["dashboard"].(map[string]interface{}); ok {
++			reportRef = canonicalDashboardRef(dashboard)
++		}
+ 		resolved, err := a.prepareBuiltInDashboardArgs(args, req)
+ 		if err != nil {
+ 			return err.Error(), true, "tool"
+ 		}
++		if err := normalizeDashboardWriteIdentity(resolved); err != nil {
++			return err.Error(), true, "protocol"
++		}
+ 		if err := validateImagePanels(resolved); err != nil {
+ 			return err.Error(), true, "tool"
+ 		}
++		if req.ForceGrafanaPublication && reportReservation != nil && !reportReservation.fresh {
++			preserveReservation = true
++			return fmt.Sprintf("Dashboard UID %q is reserved by an incomplete report write", dashboardTargetUID(args)), true, "tool"
++		}
++		if !req.ForceGrafanaPublication {
++			expectedReportUID = dashboardTargetUID(resolved)
++			if reportRef != "" && expectedReportUID == "" {
++				return "Canonical report dashboard resolution did not return a UID; refusing dashboard write", true, "protocol"
++			}
++			if reportReservation != nil && expectedReportUID != dashboardTargetUID(args) {
++				return "Dashboard resolution changed its target UID; refusing dashboard write", true, "protocol"
++			}
++			if expectedReportUID != "" {
++				if reportReservation == nil {
++					reportReservation, err = reserveDashboardUID(req.OrgID, expectedReportUID)
++					if err != nil {
++						return fmt.Sprintf("Dashboard UID %q reservation failed; refusing dashboard write: %v", expectedReportUID, err), true, "tool"
++					}
++				}
++				if !reportReservation.fresh {
++					if reportRef == "" {
++						preserveReservation = true
++						return fmt.Sprintf("Dashboard UID %q is reserved by an incomplete report write", expectedReportUID), true, "tool"
++					}
++					preserveReservation = true
++					recoveredResult, err = recoverReportDashboardUID(reportReservation, req, reportRef, expectedReportUID, dashboardOperationID(operationIdentity))
++					if err != nil {
++						return fmt.Sprintf("Report dashboard recovery failed; do not redispatch: %v", err), true, "protocol"
++					}
++				} else {
++					owned, lookupErr := loadReportDashboardProvenance(req.OrgID, expectedReportUID)
++					if lookupErr != nil {
++						return fmt.Sprintf("Report dashboard provenance is unavailable; refusing dashboard write: %v", lookupErr), true, "protocol"
++					}
++					if owned != nil && reportRef == "" {
++						return fmt.Sprintf("Dashboard UID %q is report-backed; use its canonical $dashboard_ref binding", expectedReportUID), true, "tool"
++					}
++				}
++			}
++		}
+ 		args = resolved
+ 	}
+ 	mcp.EnsureScopedGraphitiArgs(tool, args, req.OrgID)
+ 
++	writerInvoked := false
+ 	invoke := func() (*mcp.CallToolResult, error) {
++		// A cached effect must not create pending ownership for an old revision.
++		if reportRef != "" {
++			if err := reportReservation.writePending(reportDashboardProvenance{OrgID: req.OrgID, UID: expectedReportUID, ReportRef: reportRef, ActorID: req.UserID, SessionID: req.SessionID}, dashboardOperationID(operationIdentity)); err != nil {
++				return nil, fmt.Errorf("report dashboard reservation failed; refusing dashboard write: %w", err)
++			}
++		}
++		writerInvoked = true
+ 		return a.mcpProxy.CallToolWithActorContext(tc.Function.Name, args, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
+ 	}
+ 	var result *mcp.CallToolResult
+ 	var err error
+-	if operationIdentity != nil {
++	if recoveredResult != nil {
++		result = recoveredResult
++	} else if operationIdentity != nil {
+ 		result, err = dashboardOnce(operationIdentity, invoke)
+ 	} else {
+ 		result, err = invoke()
++	}
++	if err != nil {
++		preserveReservation = true
+ 	}
+ 	if err != nil {
+ 		a.logger.Error("Tool call failed", "tool", tc.Function.Name, "error", err)
+@@ -834,14 +915,44 @@
+ 	}
+ 
+ 	if result == nil {
++		preserveReservation = true
+ 		return "Tool returned no result; effect outcome is indeterminate", true, "protocol"
+ 	}
+ 	if result.IsError {
++		preserveReservation = true
+ 		text := extractText(result)
+ 		if text == "" {
+ 			text = "Tool returned an error with no details"
+ 		}
+ 		return text, true, "tool"
++	}
++	if reportRef != "" {
++		actualUID := dashboardUIDFromWriterResult(result)
++		if expectedReportUID == "" || actualUID == "" || actualUID != expectedReportUID {
++			preserveReservation = true
++			return fmt.Sprintf("Report dashboard write integrity check failed (resolved UID %q, writer UID %q); the successful write receipt is retained and must be reconciled before retry", expectedReportUID, actualUID), true, "protocol"
++		}
++		if recoveredResult == nil {
++			operationID := dashboardOperationID(operationIdentity)
++			if !writerInvoked {
++				owned, lookupErr := loadReportDashboardProvenance(req.OrgID, actualUID)
++				if lookupErr != nil || owned == nil || owned.OperationID != operationID || owned.ReportRef != reportRef {
++					return "Completed report effect is superseded or has no matching provenance; refusing stale receipt replay", true, "protocol"
++				}
++			} else if err := persistReportDashboardProvenance(reportDashboardProvenance{
++				OrgID: req.OrgID, UID: actualUID, ReportRef: reportRef, ActorID: req.UserID, SessionID: req.SessionID, OperationID: operationID,
++			}); err != nil {
++				preserveReservation = true
++				return fmt.Sprintf("Report dashboard write succeeded but provenance recovery is required: %v; the successful write receipt is retained and must not be retried automatically", err), true, "protocol"
++			}
++		}
++		if reportReservation != nil {
++			if err := reportReservation.release(); err != nil {
++				preserveReservation = true
++				return fmt.Sprintf("Report dashboard write succeeded but reservation recovery is required: %v; the successful write receipt is retained and must not be retried automatically", err), true, "protocol"
++			}
++			reportReservation = nil
++		}
+ 	}
+ 
+ 	text := extractText(result)
+diff --git a/pkg/agent/dashboard_resolver.go b/pkg/agent/dashboard_resolver.go
+--- a/pkg/agent/dashboard_resolver.go
++++ b/pkg/agent/dashboard_resolver.go
+@@ -7,6 +7,7 @@
+ 	"regexp"
+ 	"strings"
+ 
++	"consensys-asko11y-app/pkg/mcp"
+ 	"golang.org/x/net/html"
+ )
+ 
+@@ -97,6 +98,40 @@
+ 	return strings.Contains(string(encoded), `"$plan_ref"`) || strings.Contains(string(encoded), `"$execution_ref"`) || strings.Contains(string(encoded), `"$dashboard_ref"`), nil
+ }
+ 
++func canonicalDashboardRef(dashboard map[string]interface{}) string {
++	if len(dashboard) != 1 {
++		return ""
++	}
++	ref, _ := dashboard["$dashboard_ref"].(string)
++	return strings.TrimSpace(ref)
++}
++
++func dashboardUID(dashboard map[string]interface{}) string {
++	uid, _ := dashboard["uid"].(string)
++	return strings.TrimSpace(uid)
++}
++
++func dashboardTargetUID(args map[string]interface{}) string {
++	if dashboard, ok := args["dashboard"].(map[string]interface{}); ok {
++		return dashboardUID(dashboard)
++	}
++	if uid, ok := args["uid"].(string); ok && strings.TrimSpace(uid) != "" {
++		return strings.TrimSpace(uid)
++	}
++	return ""
++}
++
++func dashboardUIDFromWriterResult(result *mcp.CallToolResult) string {
++	if result == nil || result.IsError {
++		return ""
++	}
++	var response map[string]interface{}
++	if json.Unmarshal([]byte(extractText(result)), &response) != nil {
++		return ""
++	}
++	return dashboardUID(response)
++}
++
+ func (a *AgentLoop) resolveDashboardBindings(dashboard map[string]interface{}, req LoopRequest) (map[string]interface{}, error) {
+ 	hasRefs, err := hasOpaqueDashboardRefs(dashboard)
+ 	if err != nil || !hasRefs {
+@@ -181,6 +216,66 @@
+ 	output["operations"] = resolvedOperations
+ 	return output, nil
+ }
++
++// normalizeDashboardWriteIdentity keeps the writer's identity equal to the UID
++// protected by the host. Numeric IDs and identity-changing patches must not
++// redirect a write to a dashboard whose UID was never locked.
++func normalizeDashboardWriteIdentity(args map[string]interface{}) error {
++	if dashboard, ok := args["dashboard"].(map[string]interface{}); ok {
++		if args["operations"] != nil {
++			return fmt.Errorf("use either a complete dashboard or patch operations, not both")
++		}
++		uid := dashboardUID(dashboard)
++		if raw := dashboard["uid"]; raw != nil {
++			if _, ok := raw.(string); !ok {
++				return fmt.Errorf("dashboard UID must be a string")
++			}
++		}
++		if raw := args["uid"]; raw != nil {
++			topUID, ok := raw.(string)
++			if !ok || (strings.TrimSpace(topUID) != "" && strings.TrimSpace(topUID) != uid) {
++				return fmt.Errorf("conflicting dashboard UIDs; use one target UID")
++			}
++		}
++		if id := dashboard["id"]; id != nil && id != float64(0) && uid == "" {
++			return fmt.Errorf("existing dashboard writes require a UID, not a numeric ID")
++		}
++		copy := make(map[string]interface{}, len(dashboard))
++		for key, value := range dashboard {
++			if key != "id" {
++				copy[key] = value
++			}
++		}
++		if uid != "" {
++			copy["uid"] = uid
++		}
++		args["dashboard"] = copy
++		return nil
++	}
++	uid, _ := args["uid"].(string)
++	if strings.TrimSpace(uid) == "" {
++		return fmt.Errorf("dashboard patch writes require an explicit UID")
++	}
++	args["uid"] = strings.TrimSpace(uid)
++	operations, _ := args["operations"].([]interface{})
++	for _, raw := range operations {
++		operation, _ := raw.(map[string]interface{})
++		path, _ := operation["path"].(string)
++		// Only descending paths: no root wildcard, parent traversal or executable
++		// filters that could redirect a patch into a dashboard identity field.
++		field := dashboardPatchField.FindStringSubmatch(strings.TrimSpace(path))
++		if field == nil {
++			return fmt.Errorf("dashboard patches require a descending path to a named non-identity field; use complete dashboard JSON for complex edits")
++		}
++		name := field[1] + field[2] + field[3]
++		if name == "id" || name == "uid" {
++			return fmt.Errorf("dashboard patches cannot change identity; use the target UID")
++		}
++	}
++	return nil
++}
++
++var dashboardPatchField = regexp.MustCompile(`^\$(?:\.([A-Za-z_][A-Za-z0-9_]*)|\["([^"\\]+)"\]|\['([^'\\]+)'\])(?:\.[A-Za-z_][A-Za-z0-9_]*|\[(?:[0-9]+|\*|"[^"\\]+"|'[^'\\]+')\]|/[A-Za-z0-9_~-]+)*$`)
+ 
+ func (a *AgentLoop) prepareBuiltInDashboardArgs(args map[string]interface{}, req LoopRequest) (map[string]interface{}, error) {
+ 	dashboard, hasDashboard := args["dashboard"].(map[string]interface{})
+diff --git a/pkg/agent/dashboard_resolver_test.go b/pkg/agent/dashboard_resolver_test.go
+--- a/pkg/agent/dashboard_resolver_test.go
++++ b/pkg/agent/dashboard_resolver_test.go
+@@ -1,6 +1,22 @@
+ package agent
+ 
+-import "testing"
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"consensys-asko11y-app/pkg/mcp"
++	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
++)
+ 
+ func TestPrepareBuiltInDashboardArgsEnforcesPreviewTag(t *testing.T) {
+ 	loop := &AgentLoop{}
+@@ -48,3 +64,444 @@
+ 		t.Fatal("opaque non-panel patch unexpectedly bypassed resolver")
+ 	}
+ }
++
++func newDashboardBoundaryProxy(t *testing.T, resolved map[string]interface{}, writerUID string, writerCalls *atomic.Int32) *mcp.Proxy {
++	return newDashboardBoundaryProxyWithHook(t, resolved, writerUID, writerCalls, nil)
++}
++
++func newDashboardBoundaryProxyWithHook(t *testing.T, resolved map[string]interface{}, writerUID string, writerCalls *atomic.Int32, writerHook func()) *mcp.Proxy {
++	t.Helper()
++	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path == "/mcp/list-tools" {
++			_ = json.NewEncoder(w).Encode(map[string]interface{}{"tools": []mcp.Tool{{Name: "resolve_dashboard_refs", InputSchema: map[string]interface{}{"type": "object"}}}})
++			return
++		}
++		if r.URL.Path == "/mcp/call-tool" {
++			_ = json.NewEncoder(w).Encode(mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: func() string {
++				body, _ := json.Marshal(map[string]interface{}{"ok": true, "dashboard": resolved})
++				return string(body)
++			}()}}})
++			return
++		}
++		http.NotFound(w, r)
++	}))
++	writer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path == "/mcp/list-tools" {
++			_ = json.NewEncoder(w).Encode(map[string]interface{}{"tools": []mcp.Tool{{Name: "update_dashboard", InputSchema: map[string]interface{}{"type": "object"}}}})
++			return
++		}
++		if r.URL.Path == "/mcp/call-tool" {
++			writerCalls.Add(1)
++			if writerHook != nil {
++				writerHook()
++			}
++			body, _ := json.Marshal(map[string]string{"uid": writerUID})
++			_ = json.NewEncoder(w).Encode(mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: string(body)}}})
++			return
++		}
++		http.NotFound(w, r)
++	}))
++	t.Cleanup(bridge.Close)
++	t.Cleanup(writer.Close)
++	proxy := mcp.NewProxy(context.Background(), log.DefaultLogger)
++	t.Cleanup(proxy.Close)
++	for _, config := range []mcp.ServerConfig{
++		{ID: "artifact-bridge", URL: bridge.URL, Type: "standard", Enabled: true},
++		{ID: "mcp-grafana", URL: writer.URL, Type: "standard", Enabled: true},
++	} {
++		if err := proxy.EnsureServer(config); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if _, err := proxy.ListTools(); err != nil {
++		t.Fatal(err)
++	}
++	return proxy
++}
++
++func dashboardBoundaryRequest(session string) LoopRequest {
++	return LoopRequest{
++		ApprovalPolicy: "approved", UserRole: "Admin", OrgID: "org-1", UserID: "user-1", SessionID: session,
++		MCPServers: []mcp.ServerConfig{{ID: "artifact-bridge", Enabled: true}, {ID: "mcp-grafana", Enabled: true}},
++	}
++}
++
++func runDashboardBoundaryCall(t *testing.T, loop *AgentLoop, req LoopRequest, args string) (string, bool, string) {
++	t.Helper()
++	return loop.executeToolWithApproval(context.Background(), make(chan SSEEvent, 8), ToolCall{
++		ID: "dashboard-call", Function: FunctionCall{Name: "mcp-grafana_update_dashboard", Arguments: args},
++	}, req)
++}
++
++func TestDashboardWriterReportBindingRecordsUIDAndRejectsEvidenceLossBeforeDispatch(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	var writerCalls atomic.Int32
++	proxy := newDashboardBoundaryProxy(t, map[string]interface{}{
++		"uid": "report-uid", "title": "Report", "panels": []interface{}{map[string]interface{}{"type": "asko11y-plotly-panel"}},
++	}, "report-uid", &writerCalls)
++	loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++	req := dashboardBoundaryRequest("session-a")
++	content, isError, kind := runDashboardBoundaryCall(t, loop, req, `{"dashboard":{"$dashboard_ref":"artifact://report-1"}}`)
++	if isError || kind != "" || !strings.Contains(content, "report-uid") {
++		t.Fatalf("canonical report write = %q, error=%t kind=%q", content, isError, kind)
++	}
++	if writerCalls.Load() != 1 {
++		t.Fatalf("writer calls = %d, want 1", writerCalls.Load())
++	}
++	if record, err := loadReportDashboardProvenance("org-1", "report-uid"); err != nil || record == nil || record.ReportRef != "artifact://report-1" {
++		t.Fatalf("provenance = %#v, err=%v", record, err)
++	}
++	content, isError, kind = runDashboardBoundaryCall(t, loop, req, `{"dashboard":{"$dashboard_ref":"artifact://report-2"}}`)
++	if isError || kind != "" || !strings.Contains(content, "report-uid") || writerCalls.Load() != 2 {
++		t.Fatalf("fresh report revision = %q, error:%t kind:%q calls:%d", content, isError, kind, writerCalls.Load())
++	}
++	if record, err := loadReportDashboardProvenance("org-1", "report-uid"); err != nil || record == nil || record.ReportRef != "artifact://report-2" {
++		t.Fatalf("revised provenance = %#v, err=%v", record, err)
++	}
++
++	// Replaying an older completed effect must not roll provenance back.
++	_, replayError, _ := runDashboardBoundaryCall(t, loop, req, `{"dashboard":{"$dashboard_ref":"artifact://report-1"}}`)
++	if !replayError || writerCalls.Load() != 2 {
++		t.Fatal("superseded report replay was accepted")
++	}
++	if record, err := loadReportDashboardProvenance("org-1", "report-uid"); err != nil || record == nil || record.ReportRef != "artifact://report-2" {
++		t.Fatalf("replay rolled provenance back: %#v, %v", record, err)
++	}
++	if content, failed, _ := runDashboardBoundaryCall(t, loop, req, `{"dashboard":{"$dashboard_ref":"artifact://report-2"}}`); failed || writerCalls.Load() != 2 {
++		t.Fatalf("current receipt replay failed after rejecting stale receipt: %s", content)
++	}
++
++	for _, args := range []string{
++		`{"dashboard":{"uid":"report-uid","title":"Renamed","panels":[]}}`,
++		`{"uid":"report-uid","operations":[{"op":"replace","path":"$.panels/0","value":{"type":"text","options":{"content":"replacement"}}}]}`,
++		`{"dashboard":{"uid":"report-uid","panels":[{"type":"row","panels":[{"type":"text","options":{"content":"replacement"}}]}]}}`,
++	} {
++		_, isError, _ := runDashboardBoundaryCall(t, loop, req, args)
++		if !isError {
++			t.Fatalf("report evidence-loss payload unexpectedly accepted: %s", args)
++		}
++	}
++	if writerCalls.Load() != 2 {
++		t.Fatalf("evidence-loss payloads reached writer: %d calls", writerCalls.Load())
++	}
++}
++
++func TestDashboardWriteIdentityCannotRedirectUIDGate(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	var calls atomic.Int32
++	loop := NewAgentLoop(nil, newDashboardBoundaryProxy(t, map[string]interface{}{}, "one", &calls), log.DefaultLogger)
++	for _, raw := range []string{
++		`{"dashboard":{"id":123,"panels":[]}}`,
++		`{"dashboard":{"uid":123,"panels":[]}}`,
++		`{"dashboard":{"uid":"one"},"uid":123}`,
++		`{"dashboard":{"uid":"one"},"operations":[{"path":"$.uid","value":"two"}]}`,
++		`{"dashboard":{"uid":"one"},"uid":"two"}`,
++		`{"id":123,"operations":[]}`,
++		`{"uid":"one","operations":[{"path":"$.uid","value":"two"}]}`,
++		`{"uid":"one","operations":[{"path":"$['id']","value":123}]}`,
++		`{"uid":"one","operations":[{"path":"$","value":{"uid":"two"}}]}`,
++		`{"uid":"one","operations":[{"path":"$.*","value":"two"}]}`,
++		`{"uid":"one","operations":[{"path":"$.panels[0]^['uid']","value":"two"}]}`,
++		`{"uid":"one","operations":[{"path":"$.panels[?(@.x == $.uid)]","value":"two"}]}`,
++	} {
++		var args map[string]interface{}
++		if err := json.Unmarshal([]byte(raw), &args); err != nil {
++			t.Fatal(err)
++		}
++		if err := normalizeDashboardWriteIdentity(args); err == nil {
++			t.Fatalf("identity redirect accepted: %s", raw)
++		}
++		if _, failed, _ := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session"), raw); !failed || calls.Load() != 0 {
++			t.Fatalf("identity redirect reached writer: %s", raw)
++		}
++	}
++	for _, path := range []string{"$.title", "$.panels/0", "$['panels'][0]", `$.tags[0]`, `$["panels"][0]`, `$.panels[*].gridPos.x`} {
++		args := map[string]interface{}{"uid": "one", "operations": []interface{}{map[string]interface{}{"path": path}}}
++		if err := normalizeDashboardWriteIdentity(args); err != nil {
++			t.Fatalf("native field rejected: %s: %v", path, err)
++		}
++	}
++	original := map[string]interface{}{"uid": "one", "id": float64(123), "panels": []interface{}{}}
++	args := map[string]interface{}{"dashboard": original}
++	if err := normalizeDashboardWriteIdentity(args); err != nil {
++		t.Fatal(err)
++	}
++	if _, exists := args["dashboard"].(map[string]interface{})["id"]; exists {
++		t.Fatal("numeric ID forwarded alongside UID")
++	}
++	if original["id"] != float64(123) {
++		t.Fatal("normalization mutated original dashboard")
++	}
++}
++
++func TestDashboardWriterRejectsResolverUIDSwitch(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	var calls atomic.Int32
++	proxy := newDashboardBoundaryProxy(t, map[string]interface{}{"uid": "other", "panels": []interface{}{}}, "other", &calls)
++	loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++	content, failed, _ := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-a"), `{"dashboard":{"uid":"original","panels":[{"targets":[{"$plan_ref":"artifact://plan"}]}]}}`)
++	if !failed || !strings.Contains(content, "changed its target UID") || calls.Load() != 0 {
++		t.Fatalf("resolver UID switch reached writer: %s", content)
++	}
++}
++
++func TestDashboardWriterRequiresResolvedUIDBeforeDispatch(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	var writerCalls atomic.Int32
++	proxy := newDashboardBoundaryProxy(t, map[string]interface{}{"title": "missing UID", "panels": []interface{}{}}, "writer-uid", &writerCalls)
++	loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++	content, isError, kind := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-a"), `{"dashboard":{"$dashboard_ref":"artifact://report-missing-uid"}}`)
++	if !isError || kind != "protocol" || !strings.Contains(content, "did not return a UID") || writerCalls.Load() != 0 {
++		t.Fatalf("missing resolved UID = %q, error:%t kind:%q calls:%d", content, isError, kind, writerCalls.Load())
++	}
++}
++
++func TestDashboardWriterReportUIDProtectionIsOrgScopedButNativeUIDRemainsUsable(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	var writerCalls atomic.Int32
++	proxy := newDashboardBoundaryProxy(t, map[string]interface{}{"uid": "native-uid", "panels": []interface{}{}}, "native-uid", &writerCalls)
++	loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++	if err := persistReportDashboardProvenance(reportDashboardProvenance{OrgID: "org-1", UID: "report-uid", ReportRef: "artifact://report-1", ActorID: "user-1", SessionID: "session-a"}); err != nil {
++		t.Fatal(err)
++	}
++	_, isError, _ := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-b"), `{"dashboard":{"uid":"report-uid","title":"same UID, renamed","panels":[]}}`)
++	if !isError || writerCalls.Load() != 0 {
++		t.Fatalf("cross-session protected UID = error:%t calls:%d", isError, writerCalls.Load())
++	}
++	content, isError, kind := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-b"), `{"dashboard":{"uid":"native-uid","title":"Native","panels":[]}}`)
++	if isError || kind != "" || !strings.Contains(content, "native-uid") || writerCalls.Load() != 1 {
++		t.Fatalf("unrelated native UID = %q, error:%t kind:%q calls:%d", content, isError, kind, writerCalls.Load())
++	}
++	content, isError, kind = runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-b"), `{"dashboard":{"title":"Direct query","panels":[{"targets":[{"$plan_ref":"artifact://plan-1","fields":["value"],"refId":"A"}]}]}}`)
++	if isError || kind != "" || !strings.Contains(content, "native-uid") || writerCalls.Load() != 2 {
++		t.Fatalf("authorized direct-query dashboard = %q, error:%t kind:%q calls:%d", content, isError, kind, writerCalls.Load())
++	}
++}
++
++func TestDashboardWriterConcurrentFirstRefsShareUIDReservation(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	var writerCalls atomic.Int32
++	entered := make(chan struct{})
++	release := make(chan struct{})
++	var enteredOnce sync.Once
++	proxy := newDashboardBoundaryProxyWithHook(t, map[string]interface{}{"uid": "shared-uid", "panels": []interface{}{}}, "shared-uid", &writerCalls, func() {
++		enteredOnce.Do(func() { close(entered) })
++		<-release
++	})
++	loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++	firstDone := make(chan struct{})
++	var firstContent string
++	var firstError bool
++	var firstKind string
++	go func() {
++		firstContent, firstError, firstKind = runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-a"), `{"dashboard":{"$dashboard_ref":"artifact://report-first"}}`)
++		close(firstDone)
++	}()
++	select {
++	case <-entered:
++	case <-time.After(2 * time.Second):
++		t.Fatal("first writer did not reach external call")
++	}
++	_, secondError, secondKind := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-b"), `{"dashboard":{"$dashboard_ref":"artifact://report-second"}}`)
++	if !secondError || writerCalls.Load() != 1 {
++		t.Fatalf("concurrent second ref = error:%t kind:%q calls:%d", secondError, secondKind, writerCalls.Load())
++	}
++	close(release)
++	<-firstDone
++	if firstError || firstKind != "" || !strings.Contains(firstContent, "shared-uid") {
++		t.Fatalf("first ref = %q, error:%t kind:%q", firstContent, firstError, firstKind)
++	}
++	orgTwo := dashboardBoundaryRequest("session-c")
++	orgTwo.OrgID = "org-2"
++	content, isError, kind := runDashboardBoundaryCall(t, loop, orgTwo, `{"dashboard":{"$dashboard_ref":"artifact://report-org-two"}}`)
++	if isError || kind != "" || !strings.Contains(content, "shared-uid") || writerCalls.Load() != 2 {
++		t.Fatalf("different org ref = %q, error:%t kind:%q calls:%d", content, isError, kind, writerCalls.Load())
++	}
++}
++
++func TestDashboardWriterExplicitMutationsRespectCanonicalReservation(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	var writerCalls atomic.Int32
++	entered := make(chan struct{})
++	release := make(chan struct{})
++	var enteredOnce sync.Once
++	proxy := newDashboardBoundaryProxyWithHook(t, map[string]interface{}{"uid": "interleave-uid", "panels": []interface{}{}}, "interleave-uid", &writerCalls, func() {
++		enteredOnce.Do(func() { close(entered) })
++		<-release
++	})
++	loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++	canonicalDone := make(chan struct{})
++	var canonicalContent string
++	var canonicalError bool
++	go func() {
++		canonicalContent, canonicalError, _ = runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-a"), `{"dashboard":{"$dashboard_ref":"artifact://interleave"}}`)
++		close(canonicalDone)
++	}()
++	select {
++	case <-entered:
++	case <-time.After(2 * time.Second):
++		t.Fatal("canonical writer did not reach external call")
++	}
++	for _, args := range []string{
++		`{"dashboard":{"uid":"interleave-uid","title":"literal replacement","panels":[]}}`,
++		`{"uid":"interleave-uid","operations":[{"op":"replace","path":"$.panels/0","value":{"type":"text"}}]}`,
++	} {
++		_, isError, _ := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-b"), args)
++		if !isError || writerCalls.Load() != 1 {
++			t.Fatalf("interleaved explicit mutation = error:%t calls:%d", isError, writerCalls.Load())
++		}
++	}
++	publication := dashboardBoundaryRequest("session-b")
++	publication.ForceGrafanaPublication = true
++	_, isError, _ := runDashboardBoundaryCall(t, loop, publication, `{"uid":"interleave-uid","operations":[]}`)
++	if !isError || writerCalls.Load() != 1 {
++		t.Fatalf("interleaved publication = error:%t calls:%d", isError, writerCalls.Load())
++	}
++	close(release)
++	<-canonicalDone
++	if canonicalError || !strings.Contains(canonicalContent, "interleave-uid") {
++		t.Fatalf("canonical interleave = %q, error:%t", canonicalContent, canonicalError)
++	}
++}
++
++func TestDashboardWriterNativeFirstExcludesCanonical(t *testing.T) {
++	for _, native := range []string{
++		`{"dashboard":{"uid":"native-first","panels":[]}}`,
++		`{"uid":"native-first","operations":[{"op":"replace","path":"$.title","value":"native"}]}`,
++	} {
++		t.Run(native, func(t *testing.T) {
++			t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++			var calls atomic.Int32
++			entered, release := make(chan struct{}), make(chan struct{})
++			var once sync.Once
++			proxy := newDashboardBoundaryProxyWithHook(t, map[string]interface{}{"uid": "native-first", "panels": []interface{}{}}, "native-first", &calls, func() {
++				once.Do(func() { close(entered) })
++				<-release
++			})
++			loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++			done := make(chan bool, 1)
++			go func() {
++				_, failed, _ := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("native"), native)
++				done <- failed
++			}()
++			// Always unblock the fake writer even if an assertion fails.
++			var releaseOnce sync.Once
++			defer releaseOnce.Do(func() { close(release) })
++			select {
++			case <-entered:
++			case <-time.After(2 * time.Second):
++				t.Fatal("native writer did not enter")
++			}
++			canonical := `{"dashboard":{"$dashboard_ref":"artifact://native-first"}}`
++			if _, failed, _ := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("report"), canonical); !failed || calls.Load() != 1 {
++				t.Fatal("canonical raced native writer")
++			}
++			releaseOnce.Do(func() { close(release) })
++			if <-done {
++				t.Fatal("native write failed")
++			}
++			if content, failed, _ := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("report"), canonical); failed {
++				t.Fatal(content)
++			}
++			if _, failed, _ := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("native"), native); !failed || calls.Load() != 2 {
++				t.Fatal("native overwrote completed report")
++			}
++		})
++	}
++}
++
++func TestDashboardWriterRecoveryDoesNotRaceActiveOwner(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	var writerCalls atomic.Int32
++	proxy := newDashboardBoundaryProxy(t, map[string]interface{}{"uid": "active-uid", "panels": []interface{}{}}, "active-uid", &writerCalls)
++	active, err := reserveDashboardUID("org-1", "active-uid")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer active.closeWithoutRelease()
++	if err := active.writePending(reportDashboardProvenance{OrgID: "org-1", UID: "active-uid", ReportRef: "artifact://active", ActorID: "user-1", SessionID: "session-a"}, strings.Repeat("a", sha256.Size*2)); err != nil {
++		t.Fatal(err)
++	}
++	loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++	content, isError, kind := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-a"), `{"dashboard":{"$dashboard_ref":"artifact://active"}}`)
++	if !isError || !strings.Contains(content, "refusing dashboard write") || writerCalls.Load() != 0 {
++		t.Fatalf("active-owner recovery = %q, error:%t kind:%q calls:%d", content, isError, kind, writerCalls.Load())
++	}
++}
++
++func TestDashboardWriterReportBindingDetectsWriterUIDMismatchAndRetainsReceipt(t *testing.T) {
++	root := t.TempDir()
++	t.Setenv("ASKO11Y_EFFECT_STORE", root)
++	var writerCalls atomic.Int32
++	proxy := newDashboardBoundaryProxy(t, map[string]interface{}{"uid": "resolved-uid", "panels": []interface{}{}}, "different-uid", &writerCalls)
++	loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++	content, isError, kind := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-a"), `{"dashboard":{"$dashboard_ref":"artifact://report-1"}}`)
++	if !isError || kind != "protocol" || !strings.Contains(content, "integrity check failed") || writerCalls.Load() != 1 {
++		t.Fatalf("UID mismatch = %q, error:%t kind:%q calls:%d", content, isError, kind, writerCalls.Load())
++	}
++}
++
++func TestDashboardWriterPublicationRemainsAllowedForProtectedUID(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	var writerCalls atomic.Int32
++	proxy := newDashboardBoundaryProxy(t, map[string]interface{}{}, "report-uid", &writerCalls)
++	loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++	if err := persistReportDashboardProvenance(reportDashboardProvenance{OrgID: "org-1", UID: "report-uid", ReportRef: "artifact://report-1", ActorID: "user-1", SessionID: "session-a"}); err != nil {
++		t.Fatal(err)
++	}
++	req := dashboardBoundaryRequest("session-a")
++	req.ForceGrafanaPublication = true
++	content, isError, kind := runDashboardBoundaryCall(t, loop, req, `{"uid":"report-uid","operations":[]}`)
++	if isError || kind != "" || !strings.Contains(content, "report-uid") || writerCalls.Load() != 1 {
++		t.Fatalf("publication = %q, error:%t kind:%q calls:%d", content, isError, kind, writerCalls.Load())
++	}
++}
++
++func TestPersistReportDashboardProvenanceFailureDoesNotHideWriterSuccess(t *testing.T) {
++	root := t.TempDir()
++	t.Setenv("ASKO11Y_EFFECT_STORE", root)
++	provenanceRoot := root + "/report-dashboard-provenance"
++	if err := os.MkdirAll(provenanceRoot, 0700); err != nil {
++		t.Fatal(err)
++	}
++	var writerCalls atomic.Int32
++	operation := reportDashboardProvenancePath(root, "org-1", "report-uid")
++	if err := os.MkdirAll(operation, 0700); err != nil {
++		t.Fatal(err)
++	}
++	proxy := newDashboardBoundaryProxyWithHook(t, map[string]interface{}{"uid": "report-uid", "panels": []interface{}{}}, "report-uid", &writerCalls, func() {
++		_ = os.Mkdir(filepath.Join(operation, "provenance.json"), 0700)
++	})
++	loop := NewAgentLoop(nil, proxy, log.DefaultLogger)
++	content, isError, kind := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-a"), `{"dashboard":{"$dashboard_ref":"artifact://report-1"}}`)
++	if !isError || kind != "protocol" || !strings.Contains(content, "provenance recovery is required") || writerCalls.Load() != 1 {
++		t.Fatalf("persistence failure = %q, error:%t kind:%q calls:%d", content, isError, kind, writerCalls.Load())
++	}
++	for _, args := range []string{
++		`{"dashboard":{"uid":"report-uid","title":"replacement","panels":[]}}`,
++		`{"uid":"report-uid","operations":[{"op":"replace","path":"$.panels/0","value":{"type":"text"}}]}`,
++	} {
++		_, isError, _ := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-b"), args)
++		if !isError {
++			t.Fatalf("incomplete report provenance allowed evidence-loss write: %s", args)
++		}
++	}
++	if writerCalls.Load() != 1 {
++		t.Fatalf("incomplete provenance payload reached writer: %d calls", writerCalls.Load())
++	}
++	if err := os.RemoveAll(filepath.Join(operation, "provenance.json")); err != nil {
++		t.Fatal(err)
++	}
++	// Recovery must not borrow a receipt from a different exact input identity.
++	_, changedError, _ := runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-a"), `{"dashboard":{"$dashboard_ref":"artifact://report-1"},"folderUid":"other"}`)
++	if !changedError || writerCalls.Load() != 1 {
++		t.Fatal("changed-input recovery accepted")
++	}
++	content, isError, kind = runDashboardBoundaryCall(t, loop, dashboardBoundaryRequest("session-a"), `{"dashboard":{"$dashboard_ref":"artifact://report-1"}}`)
++	if isError || kind != "" || !strings.Contains(content, "report-uid") || writerCalls.Load() != 1 {
++		t.Fatalf("receipt-only report recovery = %q, error:%t kind:%q calls:%d", content, isError, kind, writerCalls.Load())
++	}
++	if record, err := loadReportDashboardProvenance("org-1", "report-uid"); err != nil || record == nil || record.ReportRef != "artifact://report-1" {
++		t.Fatalf("recovered provenance = %#v, err=%v", record, err)
++	}
++}
+diff --git a/pkg/agent/effect_receipts.go b/pkg/agent/effect_receipts.go
+--- a/pkg/agent/effect_receipts.go
++++ b/pkg/agent/effect_receipts.go
+@@ -9,6 +9,8 @@
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"strings"
++	"syscall"
+ )
+ 
+ func syncReceiptDirectory(path string) error {
+@@ -68,8 +70,7 @@
+ 	return completion.Result, nil
+ }
+ 
+-// dashboardOnce reserves durably before writing. Unknown outcomes require reconciliation.
+-func dashboardOnce(identity []byte, invoke func() (*mcp.CallToolResult, error)) (*mcp.CallToolResult, error) {
++func dashboardEffectStoreRoot() (string, error) {
+ 	root := os.Getenv("ASKO11Y_EFFECT_STORE")
+ 	if root == "" {
+ 		// Grafana forwards plugin-specific INI settings without exposing the host environment.
+@@ -78,18 +79,31 @@
+ 	if root == "" {
+ 		data := os.Getenv("GF_PATHS_DATA")
+ 		if data == "" {
+-			return nil, fmt.Errorf("dashboard writer requires a persistent GF_PLUGIN_ASKO11Y_EFFECT_STORE, ASKO11Y_EFFECT_STORE or GF_PATHS_DATA")
++			return "", fmt.Errorf("dashboard writer requires a persistent GF_PLUGIN_ASKO11Y_EFFECT_STORE, ASKO11Y_EFFECT_STORE or GF_PATHS_DATA")
+ 		}
+ 		root = filepath.Join(data, "ask-o11y-operations")
+ 	}
++	return root, nil
++}
++
++// dashboardOnce reserves durably before writing. Unknown outcomes require reconciliation.
++func dashboardOperationID(identity []byte) string {
++	digest := sha256.Sum256(identity)
++	return hex.EncodeToString(digest[:])
++}
++
++func dashboardOnce(identity []byte, invoke func() (*mcp.CallToolResult, error)) (*mcp.CallToolResult, error) {
++	root, err := dashboardEffectStoreRoot()
++	if err != nil {
++		return nil, err
++	}
+ 	if err := os.MkdirAll(root, 0700); err != nil {
+ 		return nil, err
+ 	}
+ 	if err := os.Chmod(root, 0700); err != nil {
+ 		return nil, err
+ 	}
+-	digest := sha256.Sum256(identity)
+-	operation := filepath.Join(root, hex.EncodeToString(digest[:]))
++	operation := filepath.Join(root, dashboardOperationID(identity))
+ 	response := filepath.Join(operation, "response.json")
+ 	if err := os.Mkdir(operation, 0700); err != nil {
+ 		if !errors.Is(err, os.ErrExist) {
+@@ -131,3 +145,282 @@
+ 	}
+ 	return result, nil
+ }
++
++// reportDashboardProvenance is server-owned evidence that a composed report was
++// written to this Grafana UID. The org/UID key is the protection boundary;
++// actor/session are retained for audit and recovery context.
++type reportDashboardProvenance struct {
++	OrgID       string `json:"org_id"`
++	UID         string `json:"uid"`
++	ReportRef   string `json:"report_ref"`
++	ActorID     string `json:"actor_id"`
++	SessionID   string `json:"session_id"`
++	OperationID string `json:"operation_id,omitempty"`
++}
++
++type reportDashboardUIDReservation struct {
++	path  string
++	lock  *os.File
++	fresh bool
++}
++
++func reportDashboardUIDReservationPath(root, orgID, uid string) string {
++	key := sha256.Sum256([]byte(orgID + "\x00" + uid))
++	return filepath.Join(root, "report-dashboard-provenance", "locks", hex.EncodeToString(key[:]))
++}
++
++func prepareReportDashboardProvenanceRoot(root string) error {
++	if err := os.MkdirAll(root, 0700); err != nil {
++		return err
++	}
++	if err := os.Chmod(root, 0700); err != nil {
++		return err
++	}
++	provenanceRoot := filepath.Join(root, "report-dashboard-provenance")
++	if err := os.MkdirAll(provenanceRoot, 0700); err != nil {
++		return err
++	}
++	if err := os.Chmod(provenanceRoot, 0700); err != nil {
++		return err
++	}
++	// MkdirAll may have created several ancestors of a configured store path.
++	parent, err := filepath.Abs(root)
++	if err != nil {
++		return err
++	}
++	for {
++		if err := syncReceiptDirectory(parent); err != nil {
++			return err
++		}
++		next := filepath.Dir(parent)
++		if next == parent {
++			break
++		}
++		parent = next
++	}
++	locksRoot := filepath.Join(provenanceRoot, "locks")
++	if err := os.MkdirAll(locksRoot, 0700); err != nil {
++		return err
++	}
++	if err := os.Chmod(locksRoot, 0700); err != nil {
++		return err
++	}
++	return syncReceiptDirectory(provenanceRoot)
++}
++
++func reserveDashboardUID(orgID, uid string) (*reportDashboardUIDReservation, error) {
++	if strings.TrimSpace(orgID) == "" || strings.TrimSpace(uid) == "" {
++		return nil, fmt.Errorf("dashboard UID reservation is incomplete")
++	}
++	root, err := dashboardEffectStoreRoot()
++	if err != nil {
++		return nil, err
++	}
++	if err := prepareReportDashboardProvenanceRoot(root); err != nil {
++		return nil, err
++	}
++	path := reportDashboardUIDReservationPath(root, orgID, uid)
++	if err := os.Mkdir(path, 0700); err != nil {
++		if !errors.Is(err, os.ErrExist) {
++			return nil, err
++		}
++	}
++	// Sync even an existing entry: its creator may have failed before fsync.
++	if err := syncReceiptDirectory(filepath.Dir(path)); err != nil {
++		return nil, err
++	}
++	lock, err := os.OpenFile(filepath.Join(path, "lock"), os.O_CREATE|os.O_RDWR, 0600)
++	if err != nil {
++		return nil, err
++	}
++	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
++		lock.Close()
++		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
++			return nil, fmt.Errorf("dashboard UID %q is reserved by an active operation", uid)
++		}
++		return nil, err
++	}
++	_, pendingErr := os.Stat(filepath.Join(path, "pending.json"))
++	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
++		lock.Close()
++		return nil, pendingErr
++	}
++	return &reportDashboardUIDReservation{path: path, lock: lock, fresh: errors.Is(pendingErr, os.ErrNotExist)}, nil
++}
++
++func (reservation *reportDashboardUIDReservation) writePending(record reportDashboardProvenance, operationID string) error {
++	if reservation == nil || reservation.lock == nil || !reservation.fresh {
++		return fmt.Errorf("dashboard UID reservation is not writable")
++	}
++	if strings.TrimSpace(record.OrgID) == "" || strings.TrimSpace(record.UID) == "" || strings.TrimSpace(record.ReportRef) == "" || strings.TrimSpace(operationID) == "" {
++		return fmt.Errorf("report dashboard reservation is incomplete")
++	}
++	record.OperationID = operationID
++	payload, err := json.Marshal(record)
++	if err != nil {
++		return err
++	}
++	if err := persistDashboardReceipt(reservation.path, "pending.json", payload); err != nil {
++		return fmt.Errorf("report dashboard reservation persistence failed: %w", err)
++	}
++	return nil
++}
++
++func (reservation *reportDashboardUIDReservation) pending() (*reportDashboardProvenance, error) {
++	if reservation == nil {
++		return nil, fmt.Errorf("dashboard UID reservation is missing")
++	}
++	payload, err := os.ReadFile(filepath.Join(reservation.path, "pending.json"))
++	if err != nil {
++		return nil, err
++	}
++	var record reportDashboardProvenance
++	if err := json.Unmarshal(payload, &record); err != nil {
++		return nil, fmt.Errorf("report dashboard pending identity is invalid: %w", err)
++	}
++	if strings.TrimSpace(record.OrgID) == "" || strings.TrimSpace(record.UID) == "" || strings.TrimSpace(record.ReportRef) == "" || strings.TrimSpace(record.OperationID) == "" {
++		return nil, fmt.Errorf("report dashboard pending identity is incomplete")
++	}
++	return &record, nil
++}
++
++func (reservation *reportDashboardUIDReservation) release() error {
++	if reservation == nil || reservation.lock == nil {
++		return nil
++	}
++	// Never unlink the lock inode: another process may already have it open.
++	// Clear pending state durably while still holding the same OS lock.
++	if err := os.Remove(filepath.Join(reservation.path, "pending.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
++		return err
++	}
++	if err := syncReceiptDirectory(reservation.path); err != nil {
++		return err
++	}
++	err := reservation.lock.Close()
++	reservation.lock = nil
++	return err
++}
++
++func (reservation *reportDashboardUIDReservation) closeWithoutRelease() {
++	if reservation != nil && reservation.lock != nil {
++		_ = reservation.lock.Close()
++		reservation.lock = nil
++	}
++}
++
++func reportDashboardProvenancePath(root, orgID, uid string) string {
++	key := sha256.Sum256([]byte(orgID + "\x00" + uid))
++	return filepath.Join(root, "report-dashboard-provenance", hex.EncodeToString(key[:]))
++}
++
++func loadDashboardEffectReceipt(operationID string) (*mcp.CallToolResult, error) {
++	root, err := dashboardEffectStoreRoot()
++	if err != nil {
++		return nil, err
++	}
++	operation := filepath.Join(root, operationID)
++	payload, err := os.ReadFile(filepath.Join(operation, "completion.json"))
++	if err != nil {
++		return nil, fmt.Errorf("dashboard effect receipt is incomplete; do not redispatch: %w", err)
++	}
++	var completion dashboardCompletion
++	if err := json.Unmarshal(payload, &completion); err != nil {
++		return nil, fmt.Errorf("dashboard completion receipt invalid: %w", err)
++	}
++	if completion.OperationID != operationID || completion.Result == nil || completion.Result.IsError {
++		return nil, fmt.Errorf("dashboard completion receipt identity/outcome is invalid")
++	}
++	return completion.Result, nil
++}
++
++// recoverReportDashboardUID consumes only a durable pending identity and a
++// completed effect receipt. The reservation's OS lock excludes its live owner.
++func recoverReportDashboardUID(reservation *reportDashboardUIDReservation, req LoopRequest, reportRef, uid, operationID string) (*mcp.CallToolResult, error) {
++	pending, err := reservation.pending()
++	if err != nil {
++		return nil, fmt.Errorf("report dashboard recovery pending identity unavailable: %w", err)
++	}
++	if pending.OrgID != req.OrgID || pending.UID != uid || pending.ReportRef != reportRef || pending.ActorID != req.UserID || pending.SessionID != req.SessionID || pending.OperationID != operationID {
++		return nil, fmt.Errorf("report dashboard recovery identity does not match actor, session, UID and report ref")
++	}
++	if len(pending.OperationID) != sha256.Size*2 {
++		return nil, fmt.Errorf("report dashboard recovery operation identity is invalid")
++	}
++	if _, err := hex.DecodeString(pending.OperationID); err != nil {
++		return nil, fmt.Errorf("report dashboard recovery operation identity is invalid: %w", err)
++	}
++	result, err := loadDashboardEffectReceipt(pending.OperationID)
++	if err != nil {
++		return nil, fmt.Errorf("report dashboard recovery receipt unavailable; do not redispatch: %w", err)
++	}
++	if actualUID := dashboardUIDFromWriterResult(result); actualUID != uid {
++		return nil, fmt.Errorf("report dashboard recovery receipt UID mismatch (expected %q, got %q); do not redispatch", uid, actualUID)
++	}
++	if err := persistReportDashboardProvenance(*pending); err != nil {
++		return nil, fmt.Errorf("report dashboard recovery provenance persistence failed; do not redispatch: %w", err)
++	}
++	// The caller holds the lock until it has finished processing this receipt.
++	return result, nil
++}
++
++func loadReportDashboardProvenance(orgID, uid string) (*reportDashboardProvenance, error) {
++	root, err := dashboardEffectStoreRoot()
++	if err != nil {
++		return nil, err
++	}
++	payload, err := os.ReadFile(filepath.Join(reportDashboardProvenancePath(root, orgID, uid), "provenance.json"))
++	if errors.Is(err, os.ErrNotExist) {
++		return nil, nil
++	}
++	if err != nil {
++		return nil, err
++	}
++	var record reportDashboardProvenance
++	if err := json.Unmarshal(payload, &record); err != nil {
++		return nil, fmt.Errorf("report dashboard provenance is invalid: %w", err)
++	}
++	if record.OrgID != orgID || record.UID != uid || strings.TrimSpace(record.ReportRef) == "" {
++		return nil, fmt.Errorf("report dashboard provenance identity is invalid")
++	}
++	return &record, nil
++}
++
++// persistReportDashboardProvenance atomically creates the UID record after a
++// confirmed writer success. Existing ownership is never replaced silently.
++func persistReportDashboardProvenance(record reportDashboardProvenance) error {
++	return persistReportDashboardProvenanceWithSync(record, syncReceiptDirectory)
++}
++
++func persistReportDashboardProvenanceWithSync(record reportDashboardProvenance, syncParent func(string) error) error {
++	if strings.TrimSpace(record.OrgID) == "" || strings.TrimSpace(record.UID) == "" || strings.TrimSpace(record.ReportRef) == "" {
++		return fmt.Errorf("report dashboard provenance is incomplete")
++	}
++	root, err := dashboardEffectStoreRoot()
++	if err != nil {
++		return err
++	}
++	if err := prepareReportDashboardProvenanceRoot(root); err != nil {
++		return err
++	}
++	operation := reportDashboardProvenancePath(root, record.OrgID, record.UID)
++	if err := os.Mkdir(operation, 0700); err != nil {
++		if !errors.Is(err, os.ErrExist) {
++			return err
++		}
++		if _, readErr := loadReportDashboardProvenance(record.OrgID, record.UID); readErr != nil {
++			return readErr
++		}
++	}
++	// Also covers retry after creation succeeded but its first fsync failed.
++	if err := syncParent(filepath.Dir(operation)); err != nil {
++		return err
++	}
++	payload, err := json.Marshal(record)
++	if err != nil {
++		return err
++	}
++	if err := persistDashboardReceipt(operation, "provenance.json", payload); err != nil {
++		return fmt.Errorf("report dashboard provenance persistence failed: %w", err)
++	}
++	return nil
++}
+diff --git a/pkg/agent/effect_receipts_test.go b/pkg/agent/effect_receipts_test.go
+--- a/pkg/agent/effect_receipts_test.go
++++ b/pkg/agent/effect_receipts_test.go
+@@ -1,16 +1,128 @@
+ package agent
+ 
+ import (
++	"bufio"
+ 	"consensys-asko11y-app/pkg/mcp"
++	"context"
+ 	"crypto/sha256"
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+ 	"os"
++	"os/exec"
+ 	"path/filepath"
+ 	"strings"
++	"syscall"
+ 	"testing"
++	"time"
+ )
++
++func TestReportUIDLockInodeSurvivesRelease(t *testing.T) {
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	first, err := reserveDashboardUID("org", "uid")
++	if err != nil {
++		t.Fatal(err)
++	}
++	// A contender may already have opened the inode when the owner releases.
++	waiter, err := os.OpenFile(filepath.Join(first.path, "lock"), os.O_RDWR, 0600)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer waiter.Close()
++	if err := first.release(); err != nil {
++		t.Fatal(err)
++	}
++	second, err := reserveDashboardUID("org", "uid")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer second.closeWithoutRelease()
++	if err := syscall.Flock(int(waiter.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
++		_ = syscall.Flock(int(waiter.Fd()), syscall.LOCK_UN)
++		t.Fatal("old inode and new owner both hold the UID lock")
++	}
++}
++
++func TestReportUIDLockCrossProcessCrash(t *testing.T) {
++	if os.Getenv("ASKO11Y_LOCK_TEST_CHILD") == "1" {
++		reservation, err := reserveDashboardUID("org", "uid")
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := reservation.writePending(reportDashboardProvenance{OrgID: "org", UID: "uid", ReportRef: "artifact://ref"}, strings.Repeat("a", 64)); err != nil {
++			t.Fatal(err)
++		}
++		fmt.Println("locked")
++		time.Sleep(time.Minute)
++		return
++	}
++	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReportUIDLockCrossProcessCrash$")
++	cmd.Env = append(os.Environ(), "ASKO11Y_LOCK_TEST_CHILD=1")
++	stdout, err := cmd.StdoutPipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
++	lines := bufio.NewScanner(stdout)
++	if !lines.Scan() || lines.Text() != "locked" {
++		t.Fatal("child did not acquire lock")
++	}
++	if other, err := reserveDashboardUID("org", "uid"); err == nil {
++		other.closeWithoutRelease()
++		t.Fatal("second process bypassed active owner")
++	}
++	if err := cmd.Process.Kill(); err != nil {
++		t.Fatal(err)
++	}
++	_ = cmd.Wait()
++	recovery, err := reserveDashboardUID("org", "uid")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer recovery.closeWithoutRelease()
++	if recovery.fresh {
++		t.Fatal("crashed owner's pending identity disappeared")
++	}
++	if _, err := recovery.pending(); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestReportProvenanceParentSyncBeforeCommitAndOnRetry(t *testing.T) {
++	root := t.TempDir()
++	t.Setenv("ASKO11Y_EFFECT_STORE", root)
++	record := reportDashboardProvenance{OrgID: "org", UID: "uid", ReportRef: "artifact://ref"}
++	operation := reportDashboardProvenancePath(root, record.OrgID, record.UID)
++	injected := errors.New("parent fsync fault")
++	for attempt := 0; attempt < 2; attempt++ {
++		calls := 0
++		err := persistReportDashboardProvenanceWithSync(record, func(parent string) error {
++			calls++
++			if parent != filepath.Dir(operation) {
++				t.Fatalf("wrong parent: %s", parent)
++			}
++			if _, err := os.Stat(operation); err != nil {
++				t.Fatal("directory not created before fsync")
++			}
++			if _, err := os.Stat(filepath.Join(operation, "provenance.json")); !errors.Is(err, os.ErrNotExist) {
++				t.Fatal("provenance committed before parent fsync")
++			}
++			return injected
++		})
++		if !errors.Is(err, injected) || calls != 1 {
++			t.Fatalf("parent sync bypassed on attempt %d: %v", attempt, err)
++		}
++	}
++	if err := persistReportDashboardProvenance(record); err != nil {
++		t.Fatal(err)
++	}
++}
+ 
+ func TestDashboardReceiptStoreConfiguration(t *testing.T) {
+ 	for _, source := range []string{"plugin", "plugin-over-data", "explicit", "data", "missing"} {

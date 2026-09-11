@@ -1,12 +1,16 @@
 # Generic LLM Report Synthesis + Grafana-native Plotly
 
+2026-09-11 設計更新：[不卡產出的 Plotly 修訂](ask-o11y-novice-report-simplification.md#2026-09-11-修訂以順利產出為預設不再自訂-plotly-方言) 優先於本頁相衝突的歷史規則。移除自製 Plotly 功能白名單、預設原樣呈現完整 figure；計算／來源與各圖可呈現狀態分離，單圖錯誤明示但不封鎖已有分析結果。尚未實作／部署，下方歷史驗收不代表新設計已完成。
+
 状态：既有实现与历史 E2E 已有记录；2026-09-06 capability-driven report manifest、Plotly/image presentation 與 TDD vertical slices 已完成，localhost/browser 手測待使用者驗收。
 
 当前规范见 [平台架构修订](natural-language-analysis-platform.md) NLAP-01、07、10。本輪待辦为 `TODO-9ae85041` 及其子项。下方历史结果不代表当前全部路径已符合新规范。
 
+2026-09-10 S2a source 修訂：以下最小敘事介面相容舊完整 v1 payload；未部署／未做真 LLM 或 browser 品質驗收。產品目標與剩餘工作見 [新手報告瘦身設計](ask-o11y-novice-report-simplification.md)。
+
 ## Generic profile amendment
 
-`prepare_ml_report`、`inspect_report_artifacts`、`compose_ml_dashboard` 名稱沿自 ML 歷史，但 contract 不限 ML manifest；`ask-o11y-data-profile-v1` 可直接進同一條 evidence-bound report pipeline。Profile report 的 facts 必須保留完整輸入 row/field coverage，圖表聚合只能作視覺展示。LLM 先讀完整 bounded facts、artifact catalog 與每個 view spec，再以 vision/spec 批次檢查全部 artifacts；最後一次輸出跨圖 synthesis，逐一為要呈現的 view 提供獨立 data/visual observation、interpretation、limitation、next step 與 evidence。若 validator 退回，僅依原始錯誤與 refs 修正，不重跑已成功的 query/profile。
+`prepare_ml_report`、`inspect_report_artifacts`、`compose_ml_dashboard` 名稱沿自 ML 歷史，但 contract 不限 ML manifest；`ask-o11y-data-profile-v1` 可直接進同一條 evidence-bound report pipeline。Profile report 的 facts 必須保留完整輸入 row/field coverage，圖表聚合只能作視覺展示。LLM 先讀完整 bounded facts、artifact catalog 與每個 view spec，再以 vision/spec 批次檢查全部 artifacts；最後輸出整份 synthesis，每個 panel 保留白話觀察、解讀、限制與 evidence；只有需要個別解釋的 view 才補敘事，不逐圖重複填寫同一模板。若 validator 退回，僅依原始錯誤與 refs 修正，不重跑已成功的 query/profile。
 
 Profile 不會自動升級成 ML：WFERP/ERP 或 upload 若沒有明確預測意圖，報告只做描述性、診斷性或比較性敘事；ontology candidate 仍標示 `inferred`/`observed`，不得冒充 approved。
 
@@ -23,14 +27,14 @@ Sandbox deterministic analysis
   → report-source-v1 + PNG and/or sanitized Plotly JSON
 Host-owned report normalizer
   → report-manifest-v1 + opaque report_manifest_ref
-Artifact Bridge.prepare_ml_report
-  → report_manifest_ref → opaque report_context_ref + artifact catalog + bounded fact catalog + figure/view specs
-Artifact Bridge.inspect_report_artifacts
-  → PNG MCP image blocks + sanitized Plotly JSON + inspection_ref（vision 不可用时仍有完整 spec）
+Artifact Bridge.inspect_report_artifacts(report_manifest_ref)
+  → 内部 fresh context + bounded facts/catalog + 实际 artifact batch + inspection_ref
+Artifact Bridge.inspect_report_artifacts(inspection_ref)（仍有 pending artifacts 才续读）
+  → 实际下一批 spec 或 PNG MCP image blocks + 最新 inspection_ref
 Ask O11y LLM（分 bounded 批次看完完整报告与全部图）
   → ReportSynthesis JSON
 Artifact Bridge.compose_ml_dashboard
-  → require report_context_ref + inspection receipts → validate facts/artifacts/views → persist generic dashboard and return opaque dashboard_ref
+  → 最新 inspection_ref + LLM synthesis → 核对 context/全部 receipts/facts/views → opaque dashboard_ref
 Artifact Bridge.resolve_dashboard_refs
   → resolve dashboard_ref + asset/query bindings → Grafana writer
 ```
@@ -41,26 +45,29 @@ Artifact Bridge.resolve_dashboard_refs
 
 - 每个 artifact 以稳定 `artifact_id` 声明 fact refs 与可选 figure/PNG output name；Host 自己计算 output coordinates、MIME、digest，不把它们暴露给模型。
 - 有效 sanitized Plotly figure 优先产生 `render.mode="plotly"`；只有没有 figure 时才可选择合法 PNG 的 `render.mode="image"`。
-- figure 存在但 sanitizer 失败时拒绝 manifest，即使 PNG 合法；不得静默降级。
+- 新設計：單圖格式／渲染失敗保留該圖及錯誤，不連帶拒絕其他同源分析結果；不得静默降级或宣稱全部完成。此規則取代舊「sanitizer 失敗即拒絕整份 manifest」；具體實作／相容要求見 2026-09-11 修訂。
 - purpose/conclusion/facts 与 artifacts 有大小、字符、数量上限；禁止 raw rows、路径、URL、token、HTML 与 code carriers。
-- Manifest ref 继承 execution 的 org/user/session 授权与 retention；普通 summary、legacy index 或未声明输出不能获得 report 成功身份。
+- Manifest ref 继承 execution 的 org/user/session 授权与 retention；普通 summary、未声明输出或手动 legacy index 不能获得 report 成功身份。旧 trusted profile/ML execution 如需相容，必须先经过 host-owned `reexport_trusted_report`，产生 fresh execution/provenance/report-manifest refs；generic Python 不得 re-export。
 
 ## LLM inspection transport
 
-`prepare_ml_report` 不只列出 artifact 名称；它先消费 Host-owned `report_manifest_ref`，不再让模型选择 `manifest_output_index`。Host 会持久化 bounded report context，并为每张 Plotly 图提供 deterministic `figure_spec`：trace types/count、subplot `view_id`、title、X/Y label、unit/tickformat、scale/range、point count 与 min/max。它返回 opaque `report_context_ref`，不暴露 raw rows、output index 或 signed URL。Legacy `execution_ref + manifest_output_index` 仅供既有产物的相容 adapter 使用。
+S2b 的共同入口是 `inspect_report_artifacts(report_manifest_ref)`；它內部完成 metadata preparation 並傳回實際證據，`prepare_ml_report` 留給舊顯式介面，不再是必經呼叫。Preparation 消费 Host-owned `report_manifest_ref`，不让模型选择 `manifest_output_index`。Host 会持久化 bounded report context，并为每张 Plotly 图提供 deterministic `figure_spec`：trace types/count、subplot `view_id`、title、X/Y label、unit/tickformat、scale/range、point count 与 min/max。它返回 opaque `report_context_ref`，不暴露 raw rows、output index 或 signed URL。旧 `execution_ref + manifest_output_index` 不再是 Bridge 输入；相容既有 trusted 产物时由 Sandbox host 执行 bounded re-export，再把 fresh `report_manifest_ref` 交给 Bridge。
 
-`inspect_report_artifacts(report_context_ref, artifact_ids, mode)`：
+`inspect_report_artifacts` 以 `report_manifest_ref` 開始、以最新 `inspection_ref` 續讀；舊 `report_context_ref, artifact_ids, mode` 仍相容。每次只能提供一種來源 ref：
 
 - `mode=vision`：返回 PNG 为 MCP `image` content blocks，同时返回完整 sanitized Plotly JSON 与 figure/view specs。
-- `mode=spec`：供不支持 vision 的模型使用，返回完整 Plotly JSON、aggregate values 与 view specs，不假装已视觉看图。
-- 每次 inspection 写入 opaque `inspection_ref`；可 bounded 分批，但 compose 前必须覆盖 synthesis 选择的所有 artifact/view。
-- `compose_ml_dashboard` 不再接受原始 execution/manifest 参数，只接受 `report_context_ref`、`inspection_refs` 与 synthesis；缺 inspection coverage fail closed。
+- `mode=spec`（預設）：供不支持 vision 的模型使用，返回完整 Plotly JSON、aggregate values 与 view specs，不假装已视觉看图。
+- 每次 inspection 写入 opaque `inspection_ref`；可 bounded 分批，但 compose 前必须覆盖整份 report artifacts，且選取的 views 必須有 inspection。省略逐 view 敘事不減少 inspection coverage。
+- 預設每批選下一批最多八個 pending artifacts，可用 `artifact_ids` 指定較小批次；`remaining_artifact_count=0` 表示 receipt coverage 齊全，不是模型已理解或分析完成。上限按 artifact 數量計，不保證 transport token／bytes 大小。
+- `compose_ml_dashboard(inspection_ref, synthesis, uid, title)` 從最新 receipt 取得 context 和先前有界 receipts，重新驗證全部 coverage；不會替 LLM 補做 inspection。舊 `report_context_ref + inspection_refs` 仍可用，不能與新參數混用。
+- 每次 prepare 寫 fresh context；新 receipts 含 context digest 及最多七個 prior refs，不改舊 receipts／原始 execution/provenance。Context 改變須停止調查，不是敘事修復。無 digest 的歷史 receipt 使用舊顯式介面，不能冒充新 cursor。
+- 若跨 turn 只剩 opaque refs 而無證據內容，重新 inspect retained manifest；不是重跑 query/analysis，也不能用「已寫 receipt」代替閱讀。
 
 ## Model-first 双轨解读
 
-LLM 必须先读取 deterministic facts、sanitized Plotly JSON 与 figure/view specs，再读取 PNG 验证分布形状、颜色、聚类、重叠与渲染问题。数值结论只能来自 model/facts；视觉观察只能描述像素中可见的形状，不得自行产生数字。两者冲突时以 data model 为事实，并将冲突标记为图表／渲染问题。
+LLM 必须读取 deterministic facts、sanitized Plotly JSON 与 figure/view specs；只有傳輸／模型支援 vision 且實際收到圖片時，才能依 PNG 檢查分布形狀、顏色、重疊與渲染問題。数值结论只能来自 model/facts；视觉观察只能描述像素中可见的形状，不得自行产生数字。两者冲突时以 data model 为事实，并将冲突标记为图表／渲染问题。
 
-每个 selected `view_id` 都必须有独立 `view_narrative`：`data_observation`、`visual_observation`、`interpretation`、`limitation`、`next_step` 与 evidence。Vision receipt 覆盖的 view 必须提供视觉观察；只有 spec receipt 时 `visual_observation` 必须为 `null`，不得声称看过图片。
+`view_narratives` 可省略或只涵蓋需要個別解釋的 selected views，不得重複或引用未選取的 view。提供時必須有 `view_id`、`headline`、`data_observation`、`interpretation`、`limitation` 與 `evidence`；`next_step` 可省略，`visual_observation` 缺省為 `null`。Vision receipt 不強迫產生視覺形容詞；只有 spec receipt 時仍禁止非 null 的視覺觀察，不得聲稱看過圖片。
 
 ## ReportSynthesis contract
 
@@ -68,38 +75,22 @@ LLM 必须先读取 deterministic facts、sanitized Plotly JSON 与 figure/view 
 {
   "format": "ask-o11y-report-synthesis-v1",
   "report_title": "string",
-  "thesis": "string（不可含自行编造的数字）",
+  "thesis": "string（敘事不得含數字，數值由 evidence 渲染）",
+  "thesis_evidence": [{"fact_ref": "facts.signal", "format": "number_2"}],
   "sections": [
     {
       "section_id": "LLM 产生的稳定 id",
       "title": "string",
       "purpose": "本 section 在本次报告中要回答的问题",
-      "collapsed": false,
       "panels": [
         {
           "artifact_id": "manifest artifact stem",
           "view_ids": ["deterministic subplot view id"],
-          "view_narratives": [
-            {
-              "view_id": "deterministic subplot view id",
-              "headline": "此 view 的结论句",
-              "data_observation": "来自 Plotly model/facts 的观察",
-              "visual_observation": "来自 PNG 的形状观察；spec-only 时为 null",
-              "interpretation": "为什么重要",
-              "limitation": "不能推论什么",
-              "next_step": "下一步",
-              "evidence": [{"fact_ref": "bounded fact id", "format": "percent_1"}]
-            }
-          ],
           "headline": "跨 views 的 panel 总结",
           "observation": "观察到什么",
           "interpretation": "为什么重要",
-          "cross_chart_context": "与整份报告其他证据的关系",
           "limitation": "不能推论什么",
-          "next_step": "下一步验证什么",
-          "evidence": [{"fact_ref": "bounded fact id", "format": "percent_1"}],
-          "priority": "primary | supporting | technical",
-          "preferred_width": "full | half"
+          "evidence": [{"fact_ref": "facts.signal", "format": "number_2"}]
         }
       ]
     }
@@ -107,11 +98,13 @@ LLM 必须先读取 deterministic facts、sanitized Plotly JSON 与 figure/view 
 }
 ```
 
+上例為最小 shape，artifact/view/fact IDs 必須取自本次授權 context。可选 `cross_chart_context`、`next_step`、`view_narratives` 由 LLM 按需要補充。Section 缺省 `collapsed=false`、`narrative_blocks=[]`；panel 缺省 `view_narratives=[]`、`priority=supporting`、`preferred_width=full`。Host 只填機械預設，不生成敘事或修改原輸入／歷史收據；顯式空文字仍拒絕。舊完整 v1 payload 保持內容與呈現相容；新 candidate 需成套更新 validators/compositor/plugin，不能假設舊服務已接受最小 shape。
+
 不规定 section 数量、role、标题、顺序或正文／附录结构。LLM 根据用户目的、artifact capabilities 与整份报告事实动态决定；validator 只限制 bounded shape、安全字符、artifact/fact evidence 与总量。
 
 ## Fact / claim guard
 
-- `prepare_ml_report` 从 manifest 递归产生 bounded scalar fact catalog，不暴露 raw rows。
+- Preparation（共同 inspect 入口或舊 `prepare_ml_report`）只从 server-owned `report-manifest-v1` 递归产生 bounded scalar fact catalog，不暴露 raw rows；没有 fresh manifest 的旧 execution 不得进入 synthesis。
 - 每个 panel 必须引用存在的 artifact 与至少一个 `evidence {fact_ref, format}`。
 - LLM narrative 字段不得包含数字；数值 evidence chips 由 compositor 根据 `fact_refs` deterministic 渲染。
 - deployment / operational status 只能读取 manifest，LLM 不可覆盖。
@@ -122,8 +115,9 @@ LLM 必须先读取 deterministic facts、sanitized Plotly JSON 与 figure/view 
 - 只读取 LLM 产生的 section 顺序、collapsed、priority、preferred width 与 artifact references；不识别固定 story roles、dataset、字段或图名。
 - LLM 决定 section 数量、图表选择、正文／折叠与顺序；compositor 不自动重排内容，只在尺寸不足或安全越界时 fail closed／提升为 full width。
 - 所有图片 evidence panel 一律建立 `asko11y-plotly-panel`：sanitized figure 使用显式 plotly mode，PNG-only 使用显式 image mode；模式来自 artifact capability，不依 dataset/model 名称。
-- Text panel 仅用于叙述，不得用 `<img>` 或 CSS 图片绕过 plugin。非法 figure 不静默降级；PNG image mode 不冒充互动图。此修订尚待同步修改 compositor、validator、writer gate、prompt 与 plugin（NLAP-07）。
-- narrative 以同 panel 的结构化区块呈现：观察／解读／跨图关系／限制／下一步／数值证据。
+- Text panel 仅用于叙述，不得用 `<img>` 或 CSS 图片绕过 plugin。非法 figure 不静默降级；PNG image mode 不冒充互动图。此為 NLAP-07 的 source 契約，live 部署與 browser 結果須另看對應驗證紀錄。
+- narrative 保留同 panel 的觀察／解讀／限制／數值證據；可選跨圖關係／下一步缺省時不顯示空標題。沒有逐 view 敘事時，單圖也必須保留主要白話說明。
+- 2026-09-11 新設計預設以完整 figure 呈現，取代下方 responsive grid／拆分 view 的強制重排；檢視摘要不能識別某 trace 不構成拒絕原生圖的理由。
 - Grafana row 使用 `askO11ySectionId` metadata；write gate 只验证 section id、panel narrative、artifact/fact evidence 与 bounds，不验证固定角色、标题、顺序或中文词句。Compose 后以 opaque `dashboard_ref` 传递完整 dashboard，避免把大 JSON 再生成一次。
 
 ## Plotly responsive grid

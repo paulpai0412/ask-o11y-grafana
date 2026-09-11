@@ -6,6 +6,7 @@ import copy
 import importlib.util
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -99,6 +100,39 @@ def main() -> int:
     assert section_shapes == [2, 1, 4], section_shapes
 
     base_manifest, base = fixtures[0]
+    assert contract.validate_report_synthesis(base_manifest, base) == base, "legacy content must remain unchanged"
+    minimal = copy.deepcopy(base)
+    for section in minimal["sections"]:
+        for key in ("collapsed", "narrative_blocks"):
+            section.pop(key)
+        for panel in section["panels"]:
+            for key in ("view_narratives", "cross_chart_context", "next_step", "priority", "preferred_width"):
+                panel.pop(key)
+    before = copy.deepcopy(minimal)
+    invalid = copy.deepcopy(minimal); invalid["sections"][0]["unexpected"] = {"nested": []}
+    with patch.object(contract.copy, "deepcopy", side_effect=AssertionError("copied invalid nested input before validation")):
+        expect_reject(contract, base_manifest, invalid, "shape")
+    normalized = contract.validate_report_synthesis(base_manifest, minimal)
+    assert minimal == before, "normalization mutated model input"
+    plain = normalized["sections"][0]["panels"][0]
+    assert plain["view_narratives"] == [] and plain["preferred_width"] == "full" and plain["priority"] == "supporting"
+    assert "cross_chart_context" not in plain and "next_step" not in plain, "host must not invent narrative text"
+    collapsed = normalized["sections"][0]["collapsed"]
+    assert isinstance(collapsed, bool) and not collapsed
+    assert normalized["sections"][0]["narrative_blocks"] == []
+    for field in ("headline", "observation", "interpretation", "limitation", "evidence"):
+        invalid = copy.deepcopy(minimal); invalid["sections"][0]["panels"][0].pop(field)
+        expect_reject(contract, base_manifest, invalid, "shape")
+    for field in ("cross_chart_context", "next_step"):
+        invalid = copy.deepcopy(minimal); invalid["sections"][0]["panels"][0][field] = ""
+        expect_reject(contract, base_manifest, invalid, field)
+    focused = copy.deepcopy(base)
+    focused_panel = focused["sections"][0]["panels"][0]
+    focused_panel["view_ids"].append("view-2")
+    focused_panel["view_narratives"][0].pop("next_step")
+    focused_panel["view_narratives"][0].pop("visual_observation")
+    focused_output = contract.validate_report_synthesis(base_manifest, focused)
+    assert focused_output["sections"][0]["panels"][0]["view_narratives"][0]["visual_observation"] is None
     with_block = copy.deepcopy(base)
     with_block["sections"][0]["narrative_blocks"] = [{"block_id": "closing", "title": "综合判断", "body": "现有证据支持受控验证，行动前仍需核准关键假设。", "evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}], "priority": "primary"}]
     contract.validate_report_synthesis(base_manifest, with_block)
@@ -109,7 +143,9 @@ def main() -> int:
     unknown_fact = copy.deepcopy(base); unknown_fact["sections"][0]["panels"][0]["evidence"][0]["fact_ref"] = "missing.fact"
     expect_reject(contract, base_manifest, unknown_fact, "fact")
     missing_view = copy.deepcopy(base); missing_view["sections"][0]["panels"][0]["view_narratives"] = []
-    expect_reject(contract, base_manifest, missing_view, "view_narratives")
+    contract.validate_report_synthesis(base_manifest, missing_view)  # panel explanation replaces repetitive view captions
+    unknown_view = copy.deepcopy(base); unknown_view["sections"][0]["panels"][0]["view_narratives"][0]["view_id"] = "unknown"
+    expect_reject(contract, base_manifest, unknown_view, "view_narratives")
     duplicated_view = copy.deepcopy(base); duplicated_view["sections"][0]["panels"][0]["view_narratives"].append(copy.deepcopy(duplicated_view["sections"][0]["panels"][0]["view_narratives"][0]))
     expect_reject(contract, base_manifest, duplicated_view, "view_narratives")
     hallucinated_number = copy.deepcopy(base); hallucinated_number["sections"][0]["panels"][0]["observation"] = "提升了 42%。"

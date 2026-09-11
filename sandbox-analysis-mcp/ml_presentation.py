@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -148,6 +149,8 @@ def build_manifest(
     minority_rate = data.get("minority_rate")
     cost_matrix = objective.get("cost_matrix")
     metric_guidance = _compose_metric_guidance(objective, cost_matrix, minority_rate)
+    primary_metric = str(objective.get("primary_metric") or "accuracy")
+    metric_delta = _as_metric(selected_metrics, primary_metric) - _as_metric(baseline_metrics, primary_metric)
     manifest = {
         "format": "ask-o11y-ml-presentation-v1",
         "purpose": purpose,
@@ -169,6 +172,7 @@ def build_manifest(
             "accuracy_gain_percentage_points": round((selected_accuracy - baseline_accuracy) * 100, 2),
             "relative_error_reduction_percent": round(relative_reduction, 2),
             "recommended_action": "確認漏判與誤判成本後選擇營運門檻" if not operational_ready else "依核准門檻進行受控部署",
+            "metric_delta": {"metric": primary_metric, "selected_minus_baseline": round(metric_delta, 8), "interpretation": "descriptive_metric_difference_not_causal_effect_size"},
         },
         "guards": guards,
         "metric_guidance": metric_guidance,
@@ -190,37 +194,88 @@ def build_manifest(
 
 def build_report_source(manifest: dict[str, Any], *, plotly_names: set[str] | None = None) -> dict[str, Any]:
     """Adapt a bounded presentation into the generic Host report-source contract."""
-    candidates: list[tuple[str, str, Any]] = []
-    for section_name in ("data", "process", "results", "decision", "guards"):
-        section = manifest.get(section_name)
-        if not isinstance(section, dict):
-            continue
-        for key, value in section.items():
-            if isinstance(value, bool):
-                candidates.append((str(key), "boolean", value))
-            elif isinstance(value, (int, float)):
-                try:
-                    finite = math.isfinite(float(value))
-                except (TypeError, ValueError, OverflowError):
-                    finite = False
-                if finite:
-                    candidates.append((str(key), "number", value))
-            if len(candidates) >= 32:
-                break
-        if len(candidates) >= 32:
-            break
     facts: dict[str, dict[str, Any]] = {}
-    for key, kind, value in candidates:
-        fact_id = key.replace(" ", "_").replace(".", "_")
-        if not fact_id.isidentifier():
-            fact_id = f"fact_{len(facts) + 1}"
-        fact_id = fact_id[:80]
+
+    def collect(value: Any, path: tuple[str, ...]) -> None:
+        if len(path) > 8:
+            raise ValueError("report fact nesting exceeds bound")
+        if any(key in FORBIDDEN_KEYS or key.endswith(("_path", "_url")) for key in path):
+            raise ValueError("report fact contains a forbidden field")
+        if isinstance(value, dict):
+            for key, child in value.items():
+                collect(child, (*path, str(key)))
+            return
+        if isinstance(value, (list, tuple)):
+            for index, child in enumerate(value):
+                collect(child, (*path, str(index)))
+            return
+        if value is None or isinstance(value, str):
+            return  # Numeric/boolean computation evidence, not authored prose.
+        if isinstance(value, bool):
+            kind = "boolean"
+        elif isinstance(value, (int, float)):
+            try:
+                finite = math.isfinite(float(value))
+            except (ValueError, OverflowError):
+                finite = False
+            if not finite:
+                raise ValueError("report fact is non-finite")
+            kind = "number"
+        else:
+            raise ValueError("report fact value is unsupported")
+        label = ".".join(path)
+        fact_id = re.sub(r"[^A-Za-z0-9_-]", "_", "_".join(path))[:80]
+        if not fact_id or len(label) > 600:
+            raise ValueError("report fact name exceeds bound")
         if fact_id in facts:
-            fact_id = f"{fact_id}_{len(facts) + 1}"
-        facts[fact_id] = {"kind": kind, "label": key[:120], "value": value}
+            raise ValueError("report fact name collision: " + fact_id)
+        # Matches ml_report_contract.MAX_REPORT_FACTS; this module also runs
+        # inside the isolated image, which does not import the host contract.
+        if len(facts) >= 64:
+            raise ValueError("report facts exceed bound; reduce the declared evidence explicitly")
+        facts[fact_id] = {"kind": kind, "label": label, "value": value}
+
+    uncertainty = (manifest.get("process") or {}).get("uncertainty") if isinstance(manifest.get("process"), dict) else None
+    if uncertainty is not None:
+        confidence_value: Any = uncertainty.get("confidence") if isinstance(uncertainty, dict) else None
+        try:
+            confidence = float(confidence_value) if isinstance(confidence_value, (int, float)) and not isinstance(confidence_value, bool) else None
+        except (TypeError, ValueError, OverflowError):
+            confidence = None
+        if (
+            not isinstance(uncertainty, dict)
+            or uncertainty.get("method") != "nonparametric_bootstrap_fixed_holdout_predictions"
+            or confidence is None
+            or not 0 < confidence <= 1
+            or isinstance(uncertainty.get("samples"), bool)
+            or not isinstance(uncertainty.get("samples"), int)
+            or not 100 <= uncertainty["samples"] <= 10_000
+            or not isinstance(uncertainty.get("limitations"), dict)
+            or any(not isinstance(uncertainty["limitations"].get(key), str) for key in ("model_selection", "calibration", "holdout", "multiple_comparisons"))
+        ):
+            raise ValueError("report uncertainty metadata is invalid")
+    for section_name in ("data", "process", "results", "decision", "guards", "selected_metrics", "baseline_metrics"):
+        if section_name not in manifest:
+            continue
+        section = manifest[section_name]
+        if not isinstance(section, dict):
+            raise ValueError("report evidence section must be an object: " + section_name)
+        for key, value in section.items():
+            # Retain existing flat fact IDs. Do not promote nested input data or
+            # trial logs; only result/decision/guard summaries are traversed.
+            if section_name == "process" and key == "uncertainty" and isinstance(value, dict):
+                collect(value, (section_name, str(key)))
+                continue
+            if section_name in {"data", "process"} and not isinstance(value, (bool, int, float)):
+                continue
+            scoped = isinstance(value, (dict, list, tuple)) or section_name in {"selected_metrics", "baseline_metrics"}
+            collect(value, (section_name, str(key)) if scoped else (str(key),))
     if not facts:
         facts["artifact_count"] = {"kind": "number", "label": "Artifact count", "value": len(manifest.get("artifacts") or [])}
     first_fact = next(iter(facts))
+    conclusion = str(manifest.get("conclusion") or "evidence is ready for review")
+    if uncertainty is not None:
+        conclusion += " 95% intervals use a fixed-holdout nonparametric bootstrap; they condition on the locked model predictions and, where applicable, fitted calibration and threshold, and are not causal or future-performance guarantees. Metric differences are descriptive; standardized effect sizes, independence, causal identification, and multiplicity-adjusted inference are not established."
     selected_plotly = plotly_names or set()
     artifacts = []
     for item in manifest.get("artifacts") or []:
@@ -234,7 +289,7 @@ def build_report_source(manifest: dict[str, Any], *, plotly_names: set[str] | No
     return {
         "format": "ask-o11y-report-source-v1",
         "purpose": str(manifest.get("purpose") or "bounded analysis evidence"),
-        "conclusion": str(manifest.get("conclusion") or "evidence is ready for review"),
+        "conclusion": conclusion,
         "facts": facts,
         "artifacts": artifacts,
     }
@@ -1239,7 +1294,7 @@ def build_plotly_figures(
     target_values: list[int] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build bounded interactive figures for every ML asset, adapting the
-    Plotly chart type to each data shape (bar / heatmap / scatter / indicator).
+    Plotly chart type to each data shape (bar / box / histogram / heatmap / scatter / indicator and other bounded traces).
     Output is sanitized through ml_plotly_contract."""
     import sys
 

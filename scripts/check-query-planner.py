@@ -14,17 +14,18 @@ def check(planner):
     context = {"org_id": "1", "user_id": "planner-self-check", "session_id": "planner-self-check-session"}
     run_id = planner.ARTIFACTS.create_run(context)
     metadata_ref = planner.ARTIFACTS.write_json(context, run_id, "dataset-metadata", {"dataset_id": "self-check-dataset", "datasource_uid": "self-check", "datasource_type": "yesoreyeram-infinity-datasource", "fields": [{"name": "timestamp", "type": "date"}, {"name": "metric", "type": "number"}, {"name": "feature", "type": "number"}], "date_range": {"all_from": "2026-01-01", "all_to": "2026-12-31"}, "query_template": {"refId": "A", "datasource": {"uid": "self-check", "type": "yesoreyeram-infinity-datasource"}, "type": "csv", "source": "url", "url": "http://example.invalid/data.csv", "parser": "backend", "columns": [{"selector": "timestamp", "text": "timestamp", "type": "timestamp"}, {"selector": "metric", "text": "metric", "type": "number"}, {"selector": "feature", "text": "feature", "type": "number"}]}})
-    plan = planner.tool_plan_query({"dataset_metadata_ref": metadata_ref, "selected_fields": ["timestamp", "metric", "feature"], "minimum_rows": 20, "_server_context": context})
+    plan = planner.tool_plan_query({"dataset_metadata_ref": metadata_ref, "selected_fields": ["timestamp", "metric", "feature"], "minimum_rows": 20, "business_question": "Compare the observed metric with its feature context", "_server_context": context})
     if not plan.get("ok") or plan.get("datasource_uid") != "self-check" or not plan.get("plan_ref", "").startswith("artifact://"):
         raise RuntimeError(str(plan))
     plan_artifact = planner.ARTIFACTS.read_json(context, plan["plan_ref"])
-    if plan_artifact["analysis_input_contract"] != {"required_fields": ["timestamp", "metric", "feature"], "optional_fields": [], "validity_rules": [], "minimum_rows": 20, "maximum_rows": 100000, "maximum_fields": 200, "maximum_response_bytes": 52428800} or plan_artifact.get("time_range") != {"from": "2026-01-01T00:00:00Z", "to": "2026-12-31T23:59:59Z"}:
+    if plan_artifact["analysis_input_contract"] != {"required_fields": ["timestamp", "metric", "feature"], "optional_fields": [], "validity_rules": [], "minimum_rows": 20, "maximum_rows": 100000, "maximum_fields": 200, "maximum_response_bytes": 52428800} or plan_artifact.get("time_range") != {"from": "2026-01-01T00:00:00Z", "to": "2026-12-31T23:59:59Z"} or plan_artifact.get("business_question") != "Compare the observed metric with its feature context" or plan_artifact.get("provenance", {}).get("business_question") != plan_artifact["business_question"]:
         raise RuntimeError(str(plan_artifact))
     if "next_step" in plan or "request" in plan_artifact:
         raise RuntimeError("query plan must not contain a fixed workflow or natural-language routing")
     invalid_field = planner.tool_plan_query({"dataset_metadata_ref": metadata_ref, "selected_fields": ["missing"], "_server_context": context})
     natural_language = planner.tool_plan_query({"request": "fixed intent must not be routed", "_server_context": context})
-    if invalid_field.get("ok") or natural_language.get("ok"):
+    unsafe_question = planner.tool_plan_query({"dataset_metadata_ref": metadata_ref, "selected_fields": ["timestamp"], "business_question": "<script>" + "x" * 10, "_server_context": context})
+    if invalid_field.get("ok") or natural_language.get("ok") or unsafe_question.get("ok"):
         raise RuntimeError("invalid planner inputs must fail")
     validation = planner.tool_validate_query({"plan_ref": plan["plan_ref"], "_server_context": context})
     if not validation["ok"]:
@@ -68,12 +69,12 @@ def check(planner):
         "search_budget": 2,
     }
     safe_projection = ["date", "heat_rate", *safe_contract["features"]]
-    safe_plan = planner.tool_plan_query({"dataset_metadata_ref": u1_metadata_ref, "selected_fields": safe_projection, "minimum_rows": 100, "analysis_contract": safe_contract, "_server_context": context})
+    safe_plan = planner.tool_plan_query({"dataset_metadata_ref": u1_metadata_ref, "selected_fields": safe_projection, "minimum_rows": 100, "analysis_contract": safe_contract, "business_question": "Which observed factors are associated with daily heat-rate differences?", "_server_context": context})
     if not safe_plan.get("ok"):
         raise RuntimeError(str(safe_plan))
     safe_artifact = planner.ARTIFACTS.read_json(context, safe_plan["plan_ref"])
-    if safe_artifact.get("ontology", {}).get("sha256") != identity["sha256"] or not safe_artifact.get("plan_sha256") or safe_artifact.get("analysis_contract", {}).get("split", {}).get("kind") != "chronological_holdout":
-        raise RuntimeError("safe ontology plan did not pin the semantic contract")
+    if safe_artifact.get("ontology", {}).get("sha256") != identity["sha256"] or not safe_artifact.get("plan_sha256") or safe_artifact.get("analysis_contract", {}).get("split", {}).get("kind") != "chronological_holdout" or safe_artifact.get("business_question") != "Which observed factors are associated with daily heat-rate differences?":
+        raise RuntimeError("safe ontology plan did not pin the semantic contract or business question")
     unsafe = {
         "target_as_feature": {**safe_contract, "features": ["heat_rate"]},
         "unknown_feature": {**safe_contract, "features": ["missing_feature"]},

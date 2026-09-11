@@ -45,7 +45,7 @@ def main() -> int:
             "preprocessing_fit_scope": "training_only", "calibration_method": "isotonic",
             "best_params": {"depth": 3},
         },
-        baseline_metrics={"accuracy": 0.5},
+        baseline_metrics={"accuracy": 0.5, "pr_auc": 0.45, "roc_auc": 0.6},
         selected_metrics={"accuracy": 0.75, "pr_auc": 0.8, "roc_auc": 0.8},
         guards={"generalization_gap": 0.01, "importance_stability": 0.8, "max_psi": 0.01, "verdict": "accepted"},
         trials=[{"rank": rank, "cv_score": 0.8 - rank * 0.01, "params": {"trial": rank}} for rank in range(1, 6)],

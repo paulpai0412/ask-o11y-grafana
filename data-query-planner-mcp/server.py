@@ -59,7 +59,19 @@ PROTOCOL = "2025-03-26"
 MAX_PLAN_ROWS = 100_000
 MAX_PLAN_FIELDS = 200
 MAX_PLAN_RESPONSE_BYTES = 50 * 1024 * 1024
+MAX_BUSINESS_QUESTION_BYTES = 2048
 ANALYSIS_KINDS = ("catboost", "random_forest_shap", "gradient_boosting", "logistic_regression", "xgboost")
+
+
+def normalize_business_question(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > MAX_BUSINESS_QUESTION_BYTES:
+        raise ValueError("business_question must be a bounded non-empty string")
+    lowered = value.lower()
+    if any(token in lowered for token in ("<", ">", "http://", "https://", "javascript:")):
+        raise ValueError("business_question contains unsafe content")
+    return value.strip()
 
 
 def execution_template_for_kind(kind: str) -> str:
@@ -129,11 +141,15 @@ def bounded_metadata_time_range(metadata: dict[str, Any]) -> dict[str, str]:
 
 def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
     step = "plan_query"
-    unexpected = sorted(set(args) - {"dataset_metadata_ref", "selected_fields", "minimum_rows", "maximum_rows", "refId", "analysis_contract", "context", "_server_context"})
+    unexpected = sorted(set(args) - {"dataset_metadata_ref", "selected_fields", "minimum_rows", "maximum_rows", "refId", "analysis_contract", "business_question", "context", "_server_context"})
     if unexpected:
         return error_response(step=step, error="unsupported planner arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; Planner accepts only opaque metadata refs and explicit projection options.")
     metadata_ref = args.get("dataset_metadata_ref")
     selected_fields = args.get("selected_fields")
+    try:
+        business_question = normalize_business_question(args.get("business_question"))
+    except ValueError as exc:
+        return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; retain the exact confirmed business question in a new bounded plan.")
     if not isinstance(metadata_ref, str):
         return error_response(step=step, error="dataset_metadata_ref is required", recoverable=False, instruction="Stop; inspect an authorized Grafana dataset before planning.")
     if not isinstance(selected_fields, list) or not selected_fields or any(not isinstance(field, str) or not field for field in selected_fields):
@@ -183,6 +199,14 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
         if analysis_contract is not None:
             if not isinstance(analysis_contract, dict):
                 raise workflow_node.WorkflowContractError("analysis_contract must be an object")
+            try:
+                missing_value_policy = ontology_contract.normalize_missing_target_split_policy(
+                    analysis_contract.get("missing_value_policy"),
+                    allow_drop=analysis_contract.get("task_kind") == "regression",
+                )
+            except ValueError as exc:
+                raise workflow_node.WorkflowContractError(str(exc)) from exc
+            analysis_contract = {**analysis_contract, "missing_value_policy": missing_value_policy}
             if analysis_contract.get("autotune"):
                 budget = analysis_contract.get("search_budget", 20)
                 regression = analysis_contract.get("task_kind") == "regression"
@@ -283,6 +307,9 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
             "analysis_input_contract": {"required_fields": selected_fields, "optional_fields": [], "validity_rules": validity_rules, "minimum_rows": minimum_rows, "maximum_rows": maximum_rows, "maximum_fields": MAX_PLAN_FIELDS, "maximum_response_bytes": MAX_PLAN_RESPONSE_BYTES},
             "provenance": {"dataset_metadata_ref": metadata_ref, "dataset_id": metadata.get("dataset_id"), "datasource_uid": metadata.get("datasource_uid"), "requested_fields": requested_fields, "selected_fields": selected_fields, "time_range": time_range},
         }
+        if business_question is not None:
+            plan["business_question"] = business_question
+            plan["provenance"]["business_question"] = business_question
         if generic_upload_snapshot is not None:
             expected_rows = upload_metadata["rows"]
             if isinstance(expected_rows, bool) or not isinstance(expected_rows, int) or not minimum_rows <= expected_rows <= maximum_rows:
@@ -302,6 +329,7 @@ def tool_plan_query(args: dict[str, Any]) -> dict[str, Any]:
             plan["analysis_input_contract"]["analysis_kind"] = analysis_contract.get("task_kind") or analysis_contract.get("kind")
             plan["analysis_input_contract"]["execution_template"] = execution_template_for_contract(analysis_contract)
             plan["analysis_input_contract"]["preprocessing_fit_scope"] = analysis_contract["split"]["preprocessing_fit_scope"]
+            plan["analysis_input_contract"]["missing_value_policy"] = dict(semantic_validation.get("missing_value_policy") or {"mode": "reject", "approved": False})
             if analysis_contract.get("autotune") or analysis_contract.get("search_budget") is not None:
                 plan["analysis_input_contract"]["autoresearch"] = {
                     "objective": analysis_contract.get("objective", "mae" if analysis_contract.get("task_kind") == "regression" else "roc_auc"),
@@ -393,6 +421,7 @@ def tool_plan_wferp_query(args: dict[str, Any]) -> dict[str, Any]:
         }
         plan = {
             "dataset_id": "wferp",
+            "business_question": prompt.strip(),
             "datasource_uid": metadata["datasource_uid"],
             "datasource_type": metadata["datasource_type"],
             "query_language": "mssql",
@@ -408,6 +437,7 @@ def tool_plan_wferp_query(args: dict[str, Any]) -> dict[str, Any]:
                 "sql_author": "ask-o11y-llm",
                 "sql_sha256": hashlib.sha256(query["rawSql"].encode()).hexdigest(),
                 "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                "business_question": prompt.strip(),
                 "validated_tables": validation["tables"],
             },
             "validation_input": {"prompt": prompt},
@@ -501,6 +531,12 @@ TOOLS = [
                 "minimum": 1,
                 "maximum": 100000,
                 "default": 100000
+            },
+            "business_question": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "description": "The exact confirmed decision question retained in the immutable plan; it is not a method or authorization token."
             },
             "refId": {
                 "type": "string",
@@ -770,6 +806,16 @@ TOOLS = [
                         "type": "number",
                         "minimum": 0,
                         "maximum": 1
+                    },
+                    "missing_value_policy": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "mode": {"type": "string", "enum": ["reject", "drop_invalid_target_split"]},
+                            "approved": {"type": "boolean"}
+                        },
+                        "required": ["mode", "approved"],
+                        "description": "Defaults to reject. Only {mode: drop_invalid_target_split, approved: true} may exclude rows invalid in the target or split field; never drops feature-only missing rows."
                     }
                 },
                 "required": [

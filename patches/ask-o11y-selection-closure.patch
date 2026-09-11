@@ -1,0 +1,92 @@
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -416,7 +416,7 @@
+ 		return false
+ 	}
+ 	step, _ := result["step"].(string)
+-	return strings.HasPrefix(step, "execute_")
++	return strings.HasPrefix(step, "execute_") || step == "profile_dataset"
+ }
+ 
+ func conversationSupportsDatasourceFamily(messages []Message, family string) bool {
+@@ -565,30 +565,18 @@
+ 			}
+ 		}
+ 	}
+-	for _, server := range req.MCPServers {
+-		prefix := server.ID + "_"
+-		serverSelected := false
+-		for name := range selected {
+-			if strings.HasPrefix(name, prefix) {
+-				serverSelected = true
+-				break
+-			}
+-		}
+-		if serverSelected {
+-			for _, tool := range tools {
+-				if strings.HasPrefix(tool.Name, prefix) {
+-					selected[tool.Name] = struct{}{}
+-				}
+-			}
+-		}
+-	}
+ 	previewToolAvailable := false
+ 	if decision.PrepareGrafanaPreviewAfterExecution && decision.PublishReviewedGrafanaPreview {
+ 		return tools, selectedSkillMessages(decision.Skills), false, false
+ 	}
+ 	if decision.PrepareGrafanaPreviewAfterExecution {
+ 		for _, tool := range tools {
+-			if tool.Name == "mcp-grafana_update_dashboard" {
++			switch tool.Name {
++			case "artifact-bridge_compose_ml_dashboard":
++				// A requested analysis dashboard needs the generic composer available
++				// for the report artifacts; the model still chooses when and how to use it.
++				selected[tool.Name] = struct{}{}
++			case "mcp-grafana_update_dashboard":
+ 				selected[tool.Name] = struct{}{}
+ 				previewToolAvailable = true
+ 			}
+diff --git a/pkg/agent/loop_test.go b/pkg/agent/loop_test.go
+--- a/pkg/agent/loop_test.go
++++ b/pkg/agent/loop_test.go
+@@ -1345,3 +1345,39 @@
+ 		})
+ 	}
+ }
++
++func TestSelectRelevantToolsKeepsDynamicSelectionNarrow(t *testing.T) {
++	loop, grafanaURL, cleanup := setupTestLoop(t, []ChatCompletionResponse{{
++		Choices: []Choice{{
++			Message:      Message{Role: "assistant", Content: `{"tools":["mcp-grafana_update_dashboard"],"skills":["dashboarding"],"datasource_families":[],"prepare_grafana_preview_after_execution":true,"publish_reviewed_grafana_preview":false}`},
++			FinishReason: "stop",
++		}},
++	}})
++	defer cleanup()
++
++	tools := []mcp.Tool{
++		{Name: "mcp-grafana_update_dashboard"},
++		{Name: "mcp-grafana_query_prometheus"},
++		{Name: "artifact-bridge_compose_ml_dashboard"},
++		{Name: "mcp-grafana_get_dashboard_by_uid"},
++	}
++	selected, _, prepare, publish := loop.selectRelevantTools(context.Background(), LoopRequest{
++		Model:      "base",
++		GrafanaURL: grafanaURL,
++		Messages:   []Message{{Role: "user", Content: "analyze the uploaded dataset and create a Grafana preview"}},
++		MCPServers: []mcp.ServerConfig{{ID: "mcp-grafana", Enabled: true}},
++	}, tools)
++	if !prepare || publish {
++		t.Fatalf("preview selection = prepare:%t publish:%t, want true,false", prepare, publish)
++	}
++	var names []string
++	for _, tool := range selected {
++		names = append(names, tool.Name)
++	}
++	if got := strings.Join(names, ","); got != "mcp-grafana_update_dashboard,artifact-bridge_compose_ml_dashboard" {
++		t.Fatalf("selected tools = %q, want writer and composer only", got)
++	}
++	if !isExecutionResult(`{"ok":true,"step":"profile_dataset"}`) {
++		t.Fatal("successful profile result was not recognized")
++	}
++}

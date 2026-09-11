@@ -45,7 +45,7 @@ def http_json(path: str, *, method: str = "GET", body: dict[str, Any] | None = N
         raise RuntimeError(f"Grafana request failed: {method} {path}: {exc}") from exc
 
 
-def assemble_execution(bridge, context: dict[str, str]) -> tuple[str, int]:
+def assemble_execution(bridge, context: dict[str, str]) -> tuple[str, str]:
     try:
         manifest = json.loads((OUTPUT / "ml-presentation.json").read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -59,11 +59,15 @@ def assemble_execution(bridge, context: dict[str, str]) -> tuple[str, int]:
         plotly_path = OUTPUT / f"ml-plotly-{artifact_id}.json"
         if plotly_path.exists():
             results.append({"mime": {"application/json": plotly_path.read_text()}, "display_name": plotly_path.name})
-    manifest_index = len(results)
+    source = bridge.ml_presentation.build_report_source(manifest, plotly_names={Path(item["name"]).stem for item in manifest.get("artifacts") or [] if (OUTPUT / f"ml-plotly-{Path(item['name']).stem}.json").exists()})
+    results.insert(0, {"mime": {"application/json": json.dumps(source, ensure_ascii=False)}, "display_name": "report-source.json"})
     results.append({"mime": {"application/json": json.dumps(manifest, ensure_ascii=False)}, "display_name": "ml-presentation.json"})
     run_id = bridge.ARTIFACTS.create_run(context)
     execution_ref = bridge.ARTIFACTS.write_json(context, run_id, "sandbox-execution", {"results": results, "error": None})
-    return execution_ref, manifest_index
+    report_manifest = bridge.ml_report_contract.normalize_report_manifest(execution_ref=execution_ref, results=results)
+    report_manifest_ref = bridge.ARTIFACTS.write_json(context, run_id, "report-manifest", report_manifest)
+    bridge.ARTIFACTS.write_json(context, run_id, "sandbox-provenance", {"executor_kind": "profile_dataset", "trusted_ml_contract": False, "report_manifest_ref": report_manifest_ref})
+    return execution_ref, report_manifest_ref
 
 
 def main() -> int:
@@ -74,12 +78,12 @@ def main() -> int:
     bridge = load_module("dynamic_report_e2e_bridge", ROOT / "artifact-bridge-mcp/server.py")
     setattr(bridge, "ARTIFACTS", bridge.ArtifactStore(ROOT / ".analysis-artifacts/runs"))
     context = {"org_id": "1", "user_id": "dynamic-report-e2e"}
-    execution_ref, manifest_index = assemble_execution(bridge, context)
-    prepared = bridge.prepare_ml_report({"execution_ref": execution_ref, "manifest_output_index": manifest_index, "_server_context": context})
+    execution_ref, report_manifest_ref = assemble_execution(bridge, context)
+    prepared = bridge.prepare_ml_report({"report_manifest_ref": report_manifest_ref, "_server_context": context})
     if not prepared.get("ok"):
         raise RuntimeError(f"prepare_ml_report failed: {prepared}")
     report_context_ref = prepared["refs"]["report_context_ref"]
-    OUTPUT.joinpath("report-runtime.json").write_text(json.dumps({"execution_ref": execution_ref, "manifest_output_index": manifest_index, "report_context_ref": report_context_ref, "context": context}, ensure_ascii=False, indent=2))
+    OUTPUT.joinpath("report-runtime.json").write_text(json.dumps({"execution_ref": execution_ref, "report_manifest_ref": report_manifest_ref, "report_context_ref": report_context_ref, "context": context}, ensure_ascii=False, indent=2))
     OUTPUT.joinpath("report-context.json").write_text(json.dumps(prepared["report_context"], ensure_ascii=False, indent=2))
     if args.prepare_only:
         print(json.dumps({"ok": True, "report_context": str(OUTPUT / "report-context.json"), "artifact_count": prepared["evidence"]["artifact_count"], "fact_count": prepared["evidence"]["fact_count"]}, ensure_ascii=False))
@@ -105,7 +109,7 @@ def main() -> int:
     if not composed.get("ok"):
         raise RuntimeError(f"compose_ml_dashboard failed: {composed}")
     dashboard = composed["dashboard"]
-    resolved = bridge.resolve_dashboard_refs({"dashboard": dashboard, "_server_context": context})
+    resolved = bridge.resolve_dashboard_refs({"dashboard": {"$dashboard_ref": composed["refs"]["dashboard_ref"]}, "_server_context": context})
     if not resolved.get("ok"):
         raise RuntimeError(f"resolve_dashboard_refs failed: {resolved}")
     OUTPUT.joinpath("dynamic-dashboard-raw.json").write_text(json.dumps(dashboard, ensure_ascii=False, indent=2))

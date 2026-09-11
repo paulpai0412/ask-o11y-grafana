@@ -17,7 +17,6 @@ import pandas as pd  # type: ignore[reportMissingImports]
 from sklearn.compose import ColumnTransformer  # type: ignore[reportMissingImports]
 from sklearn.dummy import DummyRegressor  # type: ignore[reportMissingImports]
 from sklearn.ensemble import ExtraTreesRegressor, HistGradientBoostingRegressor, RandomForestRegressor  # type: ignore[reportMissingImports]
-from sklearn.impute import SimpleImputer  # type: ignore[reportMissingImports]
 from sklearn.linear_model import Ridge  # type: ignore[reportMissingImports]
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score  # type: ignore[reportMissingImports]
 from sklearn.model_selection import GroupKFold, RandomizedSearchCV, TimeSeriesSplit  # type: ignore[reportMissingImports]
@@ -73,12 +72,10 @@ def _preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
     transformers: list[tuple[str, Pipeline, list[str]]] = []
     if numeric:
         transformers.append(("numeric", Pipeline([
-            ("impute", SimpleImputer(strategy="median", add_indicator=True)),
             ("scale", StandardScaler()),
         ]), numeric))
     if categorical:
         transformers.append(("categorical", Pipeline([
-            ("impute", SimpleImputer(strategy="most_frequent")),
             ("encode", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
         ]), categorical))
     if not transformers:
@@ -136,11 +133,20 @@ def _estimator(kind: str, seed: int) -> tuple[Any, dict[str, list[Any]], int]:
 
 
 def _bootstrap_mae_interval(actual: np.ndarray, predicted: np.ndarray, *, seed: int, samples: int) -> list[float]:
+    if isinstance(samples, bool) or not isinstance(samples, int) or not 100 <= samples <= 10_000:
+        raise ValueError("bootstrap_samples must be between 100 and 10000")
+    if actual.size == 0 or actual.size != predicted.size:
+        raise ValueError("bootstrap MAE inputs must have equal non-zero lengths")
     try:
         errors = np.abs(actual - predicted)
+        if not np.isfinite(errors).all():
+            raise ValueError("bootstrap MAE inputs must be finite")
         rng = np.random.default_rng(seed)
         bootstrapped = [float(errors[rng.integers(0, len(errors), size=len(errors))].mean()) for _ in range(samples)]
-        return [float(value) for value in np.quantile(bootstrapped, [0.025, 0.975])]
+        interval = [float(value) for value in np.quantile(bootstrapped, [0.025, 0.975])]
+        if not all(math.isfinite(value) for value in interval):
+            raise ValueError("bootstrap MAE interval is non-finite")
+        return interval
     except (IndexError, TypeError, ValueError) as exc:
         raise ValueError("bootstrap MAE interval could not be calculated") from exc
 
@@ -184,6 +190,9 @@ def search_candidate_settings(
         raise ValueError("candidate support frame lacks fields: " + ", ".join(missing))
     if any(name not in feature_columns for name in controllable_fields):
         raise ValueError("controllable fields must be model features")
+    candidate_fields = list(dict.fromkeys([*feature_columns, *controllable_fields, *support_group_fields, *(fixed_context or {})]))
+    if bool(frame[candidate_fields].isna().to_numpy().any()):
+        raise ValueError("candidate settings require complete feature/context values; imputation and feature-row dropping are not supported")
 
     work = frame.copy()
     for name, value in (fixed_context or {}).items():
@@ -212,7 +221,6 @@ def search_candidate_settings(
         if low > high:
             return {"status": "insufficient_support", "candidate_settings": [], "rejected_sparse_groups": 0}
         work = work.loc[pd.Series(pd.to_numeric(work[name], errors="coerce"), index=work.index).between(low, high)]
-    work = work.dropna(subset=controllable_fields)
     if work.empty:
         return {"status": "insufficient_support", "candidate_settings": [], "rejected_sparse_groups": 0}
 
@@ -286,6 +294,8 @@ def run_multi_model_regression(
         raise ValueError("bootstrap_samples must be between 100 and 10000")
     if list(train.columns) != list(holdout.columns):
         raise ValueError("train/holdout feature columns must match")
+    if bool(train.isna().to_numpy().any()) or bool(holdout.isna().to_numpy().any()):
+        raise ValueError("regression feature values must be complete; imputation and feature-row dropping are not supported")
 
     y_train = pd.Series(pd.to_numeric(pd.Series(target).reset_index(drop=True), errors="coerce"))
     x_train = train.reset_index(drop=True)
@@ -388,12 +398,27 @@ def evaluate_regression_candidate(candidate: dict[str, Any], holdout: pd.DataFra
             "r2": float(r2_score(actual, predictions)),
             "mae_interval": _bootstrap_mae_interval(actual, predictions, seed=seed, samples=bootstrap_samples),
         }
+        baseline_holdout_mae_interval = _bootstrap_mae_interval(actual, baseline_predictions, seed=seed + 1, samples=bootstrap_samples)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("holdout metrics could not be calculated") from exc
+    uncertainty = {
+        "method": "nonparametric_bootstrap_fixed_holdout_predictions",
+        "confidence": 0.95,
+        "samples": bootstrap_samples,
+        "metrics": ["mae"],
+        "limitations": {
+            "model_selection": "The interval conditions on the locked selected model and does not include model-selection uncertainty.",
+            "calibration": "Regression predictions are held fixed; the bootstrap does not refit or recalibrate the estimator.",
+            "holdout": "The interval resamples one fixed holdout and is not a causal or future-performance guarantee.",
+            "multiple_comparisons": "Candidate scores are selected by training CV; no inferential p-value or multiplicity claim is made.",
+        },
+    }
     beats_baseline = selected_cv_beats_baseline and holdout_metrics["mae"] < baseline_holdout_mae
     return {
         **candidate,
         "baseline_holdout_mae": baseline_holdout_mae,
+        "baseline_holdout_mae_interval": baseline_holdout_mae_interval,
+        "uncertainty": uncertainty,
         "selected_cv_beats_baseline": selected_cv_beats_baseline,
         "beats_baseline": beats_baseline,
         "can_run_constrained_search": beats_baseline,

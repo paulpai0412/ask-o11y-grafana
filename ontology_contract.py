@@ -13,6 +13,24 @@ MAX_FIELDS = 200
 ALLOWED_ANALYSIS_KINDS = ("catboost", "random_forest_shap", "gradient_boosting", "logistic_regression", "xgboost")
 ALLOWED_REGRESSION_KINDS = ("dummy", "ridge", "random_forest", "extra_trees", "hist_gradient_boosting", "catboost", "xgboost")
 REGRESSION_MODES = ("retrospective_association", "forward_prediction")
+MISSING_TARGET_SPLIT_POLICY_DEFAULT = {"mode": "reject", "approved": False}
+MISSING_TARGET_SPLIT_POLICY_MODES = ("reject", "drop_invalid_target_split")
+
+
+def normalize_missing_target_split_policy(value: Any, *, allow_drop: bool = True) -> dict[str, Any]:
+    """Return the only bounded policy that can govern invalid target/split rows."""
+    if value is None:
+        return dict(MISSING_TARGET_SPLIT_POLICY_DEFAULT)
+    if not isinstance(value, dict) or set(value) != {"mode", "approved"}:
+        raise ValueError("missing_value_policy must contain only mode and approved")
+    mode, approved = value.get("mode"), value.get("approved")
+    if mode not in MISSING_TARGET_SPLIT_POLICY_MODES or not isinstance(approved, bool):
+        raise ValueError("missing_value_policy mode or approval is invalid")
+    if (mode == "reject") != (not approved):
+        raise ValueError("missing_value_policy approval must exactly match its mode")
+    if mode == "drop_invalid_target_split" and not allow_drop:
+        raise ValueError("missing_value_policy row dropping is unsupported for this analysis")
+    return {"mode": mode, "approved": approved}
 
 
 def optimization_direction(contract: dict[str, Any]) -> str | None:
@@ -93,7 +111,7 @@ def load_snapshot(path: Path | None = None, *, snapshot_ref: str | None = None, 
 
 def snapshot_identity(snapshot: dict[str, Any]) -> dict[str, str]:
     registry = snapshot["registry"]
-    return {"snapshot_id": str(registry["snapshot_id"]), "namespace": str(registry.get("namespace", "analysis.u1")), "version": str(registry["registry_version"]), "sha256": str(snapshot["snapshot_sha256"]), "status": str(registry["status"])}
+    return {"snapshot_id": str(registry["snapshot_id"]), "namespace": str(registry.get("namespace", "analysis.u1")), "version": str(registry["registry_version"]), "sha256": str(snapshot["snapshot_sha256"]), "status": str(registry["status"]), "approval_scope": str(registry.get("approval_scope", "unknown"))}
 
 
 def verify_snapshot_ref(snapshot: dict[str, Any], snapshot_ref: str | None) -> str | None:
@@ -123,7 +141,7 @@ def fields_by_name(dataset: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def field_view(field: dict[str, Any]) -> dict[str, Any]:
-    return {key: field.get(key) for key in ("canonical_id", "physical_name", "type", "unit", "semantic_kind", "analysis_role", "status", "availability", "lineage", "evidence", "reason") if key in field}
+    return {key: field.get(key) for key in ("canonical_id", "physical_name", "display_name", "aliases", "definition", "description", "type", "unit", "semantic_kind", "analysis_role", "status", "availability", "lineage", "operating_limits", "evidence", "reason") if key in field}
 
 
 def verify_plan(plan: dict[str, Any]) -> None:
@@ -160,11 +178,16 @@ def validate_analysis_contract(snapshot: dict[str, Any], contract: dict[str, Any
     population_filter: dict[str, Any] = {}
     feature_set_count = 0
     feature_set_ids: list[str] = []
-    allowed = {"task_kind", "analysis_mode", "include_treatment_candidates", "algorithms", "target_direction", "optimization", "controllable_fields", "context_fields", "forbidden_fields", "constrained_search", "population_filter", "feature_sets", "kind", "dataset_id", "target", "features", "as_of", "split", "seed", "ontology_snapshot_sha256", "quality_filter", "positive_class", "purpose", "conclusion", "autotune", "objective", "objective_minimum", "search_budget", "class_imbalance_strategy", "cost_matrix", "cost_matrix_approved", "reporting_denominator", "minimum_recall"}
+    allowed = {"task_kind", "analysis_mode", "include_treatment_candidates", "algorithms", "target_direction", "optimization", "controllable_fields", "context_fields", "forbidden_fields", "constrained_search", "population_filter", "feature_sets", "kind", "dataset_id", "target", "features", "as_of", "split", "seed", "ontology_snapshot_sha256", "quality_filter", "positive_class", "purpose", "conclusion", "autotune", "objective", "objective_minimum", "search_budget", "class_imbalance_strategy", "cost_matrix", "cost_matrix_approved", "reporting_denominator", "minimum_recall", "missing_value_policy"}
     if not isinstance(contract, dict) or set(contract) - allowed:
         reject("ANALYSIS_CONTRACT_INVALID", "contract.shape")
         contract = contract if isinstance(contract, dict) else {}
     dataset_id = contract.get("dataset_id")
+    try:
+        missing_value_policy = normalize_missing_target_split_policy(contract.get("missing_value_policy"), allow_drop=regression)
+    except ValueError:
+        reject("ANALYSIS_CONTRACT_INVALID", "analysis.missing_value_policy")
+        missing_value_policy = dict(MISSING_TARGET_SPLIT_POLICY_DEFAULT)
     dataset = find_dataset(snapshot, str(dataset_id)) if isinstance(dataset_id, str) else None
     if dataset is None:
         reject("UNKNOWN_DATASET", "dataset.exists")
@@ -349,4 +372,5 @@ def validate_analysis_contract(snapshot: dict[str, Any], contract: dict[str, Any
         "population_filter": population_filter,
         "feature_set_count": feature_set_count,
         "feature_set_ids": feature_set_ids,
+        "missing_value_policy": missing_value_policy,
     }

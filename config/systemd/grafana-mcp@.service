@@ -1,0 +1,16 @@
+[Unit]
+Description=Grafana local MCP (%i)
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+WorkingDirectory=%h/apps/grafana
+ExecStart=/bin/bash -c 'set -a; source .env; set +a; exec .venv/bin/python %i/server.py'
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=append:%h/apps/grafana/.scratch/live-services/%i.log
+StandardError=inherit
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,138 @@
+diff --git a/pkg/agent/delivery_state.go b/pkg/agent/delivery_state.go
+--- a/pkg/agent/delivery_state.go
++++ b/pkg/agent/delivery_state.go
+@@ -45,13 +45,17 @@
+ 	parseErr := json.Unmarshal([]byte(content), &payload)
+ 	failed := isError || payload["ok"] == false
+ 	defer func() {
++		if !failed && hasPresentationErrors(payload) {
++			s.delivery = "partial"
++			s.addGap("FIGURE_UNAVAILABLE: Some figures could not be presented; retained analysis results remain available. This is not a complete report.")
++		}
+ 		if failed {
+ 			s.lastToolError = deliveryErrorSummary(payload)
+ 			s.lastErrorFrame = firstRef(payload, "frame_ref")
+ 			s.lastErrorExecution = firstRef(payload, "execution_ref", "source_execution_ref")
+ 		}
+ 	}()
+-	if !failed && payload["ok"] == true && firstRef(payload, "report_manifest_ref") != "" {
++	if !failed && !hasPresentationErrors(payload) && payload["ok"] == true && firstRef(payload, "report_manifest_ref") != "" {
+ 		provenance, _ := payload["provenance"].(map[string]interface{})
+ 		frame := firstString(provenance, "input_frame_ref")
+ 		if frame == "" {
+@@ -175,6 +179,12 @@
+ 	}
+ }
+ 
++func hasPresentationErrors(payload map[string]interface{}) bool {
++	evidence, _ := payload["evidence"].(map[string]interface{})
++	errors, _ := evidence["presentation_errors"].([]interface{})
++	return len(errors) > 0
++}
++
+ func (s *deliveryState) clearToolError() {
+ 	s.lastToolError, s.lastErrorFrame, s.lastErrorExecution = "", "", ""
+ }
+diff --git a/pkg/agent/plotly_recovery_test.go b/pkg/agent/plotly_recovery_test.go
+--- a/pkg/agent/plotly_recovery_test.go
++++ b/pkg/agent/plotly_recovery_test.go
+@@ -26,8 +26,8 @@
+ 		t.Fatal(err)
+ 	}
+ 	var fixture struct {
+-		Tools     []mcp.Tool      `json:"tools"`
+-		Rejection json.RawMessage `json:"rejection"`
++		Tools  []mcp.Tool      `json:"tools"`
++		Result json.RawMessage `json:"result"`
+ 	}
+ 	if err := json.Unmarshal(data, &fixture); err != nil {
+ 		t.Fatal(err)
+@@ -38,7 +38,7 @@
+ 			selected = tool
+ 		}
+ 	}
+-	if !strings.Contains(selected.Description, "nested_keys") {
++	if !strings.Contains(selected.Description, "plotly_js_version") || strings.Contains(selected.Description, "nested_keys") {
+ 		t.Fatal("producer capability missing")
+ 	}
+ 	t.Setenv("ASKO11Y_EFFECT_STORE", t.TempDir())
+@@ -47,7 +47,7 @@
+ 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"tools": []mcp.Tool{selected}})
+ 			return
+ 		}
+-		_ = json.NewEncoder(w).Encode(mcp.CallToolResult{IsError: true, Content: []mcp.ContentBlock{{Type: "text", Text: string(fixture.Rejection)}}})
++		_ = json.NewEncoder(w).Encode(mcp.CallToolResult{IsError: false, Content: []mcp.ContentBlock{{Type: "text", Text: string(fixture.Result)}}})
+ 	}))
+ 	defer server.Close()
+ 	requests := make(chan ChatCompletionRequest, 8)
+@@ -66,7 +66,7 @@
+ 		case 1:
+ 			message = Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "compute", Type: "function", Function: FunctionCall{Name: "sandbox-analysis_execute_python_analysis", Arguments: `{"frame_ref":"artifact://fixture/grafana-frame","python_code":"bad"}`}}}}
+ 		default:
+-			message = Message{Role: "assistant", Content: "Report rejected; retain the original error and correct code on the same frame after approval."}
++			message = Message{Role: "assistant", Content: "Calculation succeeded, but one figure could not be presented. Retain the available results and do not claim a complete report."}
+ 		}
+ 		calls++
+ 		respondAsStream(w, ChatCompletionResponse{Choices: []Choice{{Message: message, FinishReason: "stop"}}})
+@@ -98,11 +98,11 @@
+ 		}
+ 		if event.Type == "final_report" {
+ 			final := event.Data.(FinalReportEvent)
+-			seenFinal = strings.Contains(final.Summary, "unsupported_axis_key")
++			seenFinal = final.DeliveryStatus == "partial" && len(final.Gaps) > 0
+ 		}
+ 	}
+ 	if !seenFinal {
+-		t.Fatal("final host summary hid structural error")
++		t.Fatal("final host report hid partial presentation")
+ 	}
+ 	foundDescription, foundOriginal := false, false
+ 	for len(requests) > 0 {
+@@ -113,12 +113,12 @@
+ 			}
+ 		}
+ 		for _, msg := range request.Messages {
+-			if msg.Role == "tool" && msg.Content == string(fixture.Rejection) {
++			if msg.Role == "tool" && msg.Content == string(fixture.Result) {
+ 				foundOriginal = true
+ 			}
+ 		}
+ 	}
+ 	if !foundDescription || !foundOriginal {
+-		t.Fatalf("capability=%v original error=%v", foundDescription, foundOriginal)
++		t.Fatalf("capability=%v original partial result=%v", foundDescription, foundOriginal)
+ 	}
+ }
+diff --git a/pkg/agent/native_presentation_test.go b/pkg/agent/native_presentation_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/agent/native_presentation_test.go
+@@ -0,0 +1,28 @@
++package agent
++
++import "testing"
++
++func TestNativePresentationFailureRemainsPartial(t *testing.T) {
++	s := newDeliveryState("Explain the observations")
++	s.observe("sandbox-analysis_execute_python_analysis", `{"ok":true,"refs":{"report_manifest_ref":"artifact://r/report-manifest"},"evidence":{"presentation_errors":[{"artifact_id":"plot","code":"invalid_native_figure"}]}}`, false)
++	if s.deliveryStatus() != "partial" || len(s.gaps) == 0 {
++		t.Fatalf("partial presentation hidden: %+v", s)
++	}
++	s.observe("mcp-grafana_update_dashboard", `{"ok":true,"uid":"preview"}`, false)
++	if s.deliveryStatus() != "partial" || s.writerStatus != "succeeded" {
++		t.Fatalf("writer promoted presentation: %+v", s)
++	}
++	s.observeCall("grafana-query_execute_planned_query", `{"plan_ref":"artifact://new/query-plan"}`, `{"ok":true,"refs":{"frame_ref":"artifact://new/grafana-frame"}}`, false)
++	if s.deliveryStatus() != "not_assessed" {
++		t.Fatalf("fresh query retained stale partial: %+v", s)
++	}
++}
++
++func TestPartialFigureCannotClearUnresolvedToolError(t *testing.T) {
++	s := newDeliveryState("Explain the observations")
++	s.lastToolError, s.lastErrorFrame = "prior error", "artifact://r/grafana-frame"
++	s.observeCall("sandbox-analysis_execute_python_analysis", `{"frame_ref":"artifact://r/grafana-frame"}`, `{"ok":true,"refs":{"report_manifest_ref":"artifact://r/report-manifest"},"evidence":{"presentation_errors":[{"code":"invalid_native_figure"}]}}`, false)
++	if s.lastToolError != "prior error" || s.deliveryStatus() != "partial" {
++		t.Fatalf("partial cleared error: %+v", s)
++	}
++}

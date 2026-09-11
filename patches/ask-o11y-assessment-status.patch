@@ -1,0 +1,123 @@
+diff --git a/pkg/agent/delivery_state.go b/pkg/agent/delivery_state.go
+--- a/pkg/agent/delivery_state.go
++++ b/pkg/agent/delivery_state.go
+@@ -94,7 +94,6 @@
+ 				s.planQuestion = businessQuestion(payload["business_question"])
+ 			}
+ 			s.delivery = "not_assessed"
+-			s.addGap("PLAN_NOT_ASSESSED: No report coverage has been verified for this plan.")
+ 		}
+ 		return
+ 	}
+@@ -109,7 +108,6 @@
+ 			provenance, _ := payload["provenance"].(map[string]interface{})
+ 			s.dataQuestion = businessQuestion(provenance["business_question"])
+ 			s.delivery = "not_assessed"
+-			s.addGap("REPORT_NOT_ASSESSED: The query supplied validated data, not report coverage.")
+ 		}
+ 		return // Question context only; no coverage or permission promotion.
+ 	}
+@@ -127,7 +125,6 @@
+ 		if coverageObject(payload) == nil {
+ 			if !s.profileOnly {
+ 				s.delivery = "not_assessed"
+-				s.addGap("REPORT_NOT_ASSESSED: Retained output has not established report coverage.")
+ 			}
+ 			if !success {
+ 				s.addGap("REPORT_UNAVAILABLE: The producer did not return an accepted report; retain its execution receipt.")
+@@ -378,11 +375,18 @@
+ 		}
+ 		return ""
+ 	}
+-	warning := fmt.Sprintf("Host delivery status: %s. Analytical completion is not established", status)
++	warning := fmt.Sprintf("Host delivery status: %s.", status)
++	if status == "not_assessed" {
++		warning = "Automated analysis assessment: not_assessed. Completeness was not evaluated; this is not a finding of missing work or failure."
++	} else if status == "evidence_available" {
++		warning = "Automated evidence assessment: evidence_available."
++	}
+ 	if question := s.question(); question != "" {
+-		warning += fmt.Sprintf(" for the requested question %q", question)
+-	}
+-	warning += fmt.Sprintf(". Dashboard writer status for this delivery: %s.", s.writerEvidenceStatus())
++		warning += fmt.Sprintf(" Question: %q.", question)
++	}
++	if s.writerStatus != "" {
++		warning += fmt.Sprintf(" Dashboard writer status: %s.", s.writerStatus)
++	}
+ 	if s.lastToolError != "" {
+ 		warning += " Last tool error: " + s.lastToolError
+ 	}
+diff --git a/pkg/agent/delivery_producer_test.go b/pkg/agent/delivery_producer_test.go
+--- a/pkg/agent/delivery_producer_test.go
++++ b/pkg/agent/delivery_producer_test.go
+@@ -14,6 +14,31 @@
+ 	"consensys-asko11y-app/pkg/mcp"
+ 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+ )
++
++func TestUnassessedIsNotMissingDelivery(t *testing.T) {
++	state := newDeliveryState("Explain the observations")
++	state.observeCall("data-query-planner_plan_query", `{"business_question":"Explain the observations"}`, `{"ok":true,"refs":{"plan_ref":"artifact://plan/query-plan"}}`, false)
++	if state.deliveryStatus() != "not_assessed" || len(state.gaps) != 0 {
++		t.Fatalf("planning manufactured an analytical gap: %#v", state)
++	}
++	state.observeCall("grafana-query_execute_planned_query", `{"plan_ref":"artifact://plan/query-plan"}`, `{"ok":true,"refs":{"frame_ref":"artifact://plan/grafana-frame"}}`, false)
++	if len(state.gaps) != 0 {
++		t.Fatal("query manufactured an analytical gap")
++	}
++	state.observe("sandbox-analysis_execute_python_analysis", `{"ok":true,"refs":{"execution_ref":"artifact://run/sandbox-execution"}}`, false)
++	if len(state.gaps) != 0 {
++		t.Fatal("successful computation manufactured an analytical gap")
++	}
++	state.observe("mcp-grafana_update_dashboard", `{"uid":"saved"}`, false)
++	text := state.warning()
++	if !strings.Contains(text, "not a finding of missing work or failure") || !strings.Contains(text, "succeeded") || strings.Contains(text, "Host delivery status: not_assessed") {
++		t.Fatalf("assessment and persistence were conflated: %s", text)
++	}
++	state.observe("sandbox-analysis_execute_python_analysis", `{"ok":false,"error":"actual failure"}`, true)
++	if !strings.Contains(state.warning(), "Tool failed") || len(state.gaps) == 0 {
++		t.Fatal("real failure was hidden")
++	}
++}
+ 
+ type deliveryReplayCall struct {
+ 	Name      string                 `json:"name"`
+@@ -64,8 +89,8 @@
+ 				if report == nil || report.DeliveryStatus != tc.Status || report.BusinessQuestion != tc.Question {
+ 					t.Fatalf("real producer delivery lost at %s: %#v; want %s / %s", ending, report, tc.Status, tc.Question)
+ 				}
+-				if len(report.Gaps) == 0 || !strings.Contains(content, tc.Question) || !strings.Contains(content, "REQUIREMENTS_NOT_RECORDED") {
+-					t.Fatalf("original question/gaps absent from final content: report=%#v content=%q", report, content)
++				if len(report.Gaps) != 0 || !strings.Contains(content, tc.Question) || strings.Contains(content, "REQUIREMENTS_NOT_RECORDED") {
++					t.Fatalf("unassessed report manufactured gaps or lost the question: report=%#v content=%q", report, content)
+ 				}
+ 				wantLast := "error"
+ 				if ending == "normal" {
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -186,7 +186,7 @@
+ 		if warning != "" {
+ 			finalContent = warning
+ 			if content != "" {
+-				finalContent += "\n\nAssistant response (not host-confirmed):\n" + content
++				finalContent += "\n\n" + content
+ 			}
+ 		}
+ 		if finalContent == "" && status == "" {
+diff --git a/pkg/agent/loop_test.go b/pkg/agent/loop_test.go
+--- a/pkg/agent/loop_test.go
++++ b/pkg/agent/loop_test.go
+@@ -1573,7 +1573,7 @@
+ 	if len(report.Gaps) != 1 || !strings.Contains(report.Gaps[0], "REQUIREMENTS_NOT_RECORDED") {
+ 		t.Fatalf("final report gaps = %#v", report.Gaps)
+ 	}
+-	if !strings.Contains(content.Content, "Analytical completion is not established") {
+-		t.Fatalf("host warning missing from persisted content: %q", content.Content)
+-	}
+-}
++	if !strings.Contains(content.Content, "Automated analysis assessment: not_assessed") || strings.Contains(content.Content, "Assistant response (not host-confirmed)") {
++		t.Fatalf("assessment notice missing or response falsely discredited: %q", content.Content)
++	}
++}

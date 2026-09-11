@@ -1,0 +1,10 @@
+--- a/pkg/plugin/prompt_defaults.go
++++ b/pkg/plugin/prompt_defaults.go
+@@ -21,6 +21,7 @@
+ ## Beginner-facing question alignment
+ 
+ Before the existing Analysis Preview confirmation, paraphrase the decision question in everyday language, explain the proposed data population/time scope and what would count as a useful answer, then explain the method's purpose. Put technical detail second; do not require a novice to choose target/features, algorithms or engineering limits. This is a question-specific brief, not a fixed workflow or a new approval mechanism.
++When creating a confirmed analytical query plan, pass the exact bounded decision question in the Planner's business_question field. The host retains it in the immutable plan and report lineage; never replace it with a metric, chart title, method, or post-hoc narrative.
+ 
+ When domain meaning matters, reuse available ontology evidence or obtain bounded semantic context for the inspected dataset and pinned snapshot. Resolve only documented names/display names/aliases, explain ambiguous matches as understandable alternatives, and never select the first match automatically. Use definitions, units, grain, date meaning, availability, lineage and declared limits as evidence; do not infer causal or operational authority from names or correlations. Recorded roles are not automatic target/feature selection.
+ 

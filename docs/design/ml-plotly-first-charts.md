@@ -7,7 +7,7 @@
 
 > Sandbox 可產生 bounded Plotly capabilities；最終選擇哪些圖、順序、寬度與 narrative 由整份報告 LLM synthesis 決定，不固定十四圖 Dashboard。
 >
-> **2026-09-06 capability-driven 修訂**：Host 先由成功 execution 的明確 report source 建立 `report-manifest-v1`，並回傳 opaque `report_manifest_ref`。合法 sanitized figure 使用 `plotly` mode；只有沒有 figure 且 PNG 合法時使用明確 `image` mode；figure 存在但無效時 fail closed，絕不以 PNG 靜默降級。Plotly mode 不要求 PNG fallback。模型不可猜 `manifest_output_index`，舊 index 只保留在 legacy adapter。
+> **2026-09-06 capability-driven 修訂**：Host 先由成功 execution 的明確 report source 建立 `report-manifest-v1`，並回傳 opaque `report_manifest_ref`。合法 sanitized figure 使用 `plotly` mode；只有沒有 figure 且 PNG 合法時使用明確 `image` mode；figure 存在但無效時 fail closed，絕不以 PNG 靜默降級。Plotly mode 不要求 PNG fallback。模型不可猜 `manifest_output_index`；舊 trusted execution 必須先由 host `reexport_trusted_report` 產生 fresh canonical ref，Bridge 不接受手動 legacy index。
 
 ## 目標
 
@@ -36,7 +36,7 @@ mcp-grafana（唯一 writer）→ Preview → 同 UID publish
 ## 契約（ml_plotly_contract.py）
 
 - plugin pin：`asko11y-plotly-panel`（唯一允許的 panel type / plugin_id）。
-- 允許 trace：`bar`、`scatter`、`heatmap`、`indicator`、`sankey`。
+- 允許 trace：`bar`、`box`（可選 `boxmean: true|false|"sd"`）、`candlestick`、`contour`、`funnel`、`funnelarea`、`histogram`、`histogram2d`、`histogram2dcontour`、`heatmap`、`indicator`、`ohlc`、`pie`、`sankey`、`scatter`、`scattergl`、`sunburst`、`treemap`、`violin`、`waterfall`。
 - 禁止（遞迴）：`frames`、`transforms`、`customdata`、`ids`、`meta`、`hovertemplate`、`texttemplate`、`images`、`template`、`updatemenus`、`sliders`、`href`、`src`、`base64`、`script`、`onclick`、`callback`。
 - 字串：≤200 字元、禁 `<`、`>`、`javascript:`、`http` 開頭。
 - 數字：finite、非 bool。
@@ -65,12 +65,12 @@ mcp-grafana（唯一 writer）→ Preview → 同 UID publish
 - Sandbox 成功結果若包含報告 source，Host 依 `report-source-v1` 建立不可由模型猜 index 的 `report-manifest-v1`，並在 `refs.report_manifest_ref` 回傳 opaque ref。
 - Manifest 只保存 bounded purpose/conclusion/facts、artifact id 與 Host-derived render capability（`plotly` 或 `image`）；不向模型暴露 output index、physical path、raw rows 或 MIME body。
 - 每個 artifact 先檢查 Plotly：合法 figure 直接選 `plotly`；沒有 figure 才檢查 PNG；figure 無效時拒絕整個 artifact，即使同時有合法 PNG。
-- 舊 `execution_ref + manifest_output_index` 只由 Bridge legacy adapter 讀取既有產物，新 producer 不使用它。
+- 舊 `execution_ref + manifest_output_index` 不再由 Bridge 直接讀取；需要相容既有 trusted 產物時，Sandbox host 只可在 server-owned provenance、executor 與完整輸出驗證後 re-export 成 fresh `report-manifest-v1`。generic Python、普通 summary、手動輸出不可 re-export。
 
 ## Bridge 變更
 
 - 新 binding 形狀：`{placeholder, $execution_ref, output_index, plugin_id}`。
-- 優先讀取 `report_manifest_ref` 與 artifact id；legacy caller 才可提供 `execution_ref + manifest_output_index`。
+- 只讀取 `report_manifest_ref` 與 artifact id；legacy caller 不可提供 execution index。所有 report context、artifact binding 與 dashboard binding 都需 fresh server-owned refs。
 - Plotly binding 讀取 `application/vnd.plotly.v1+json` → `sanitize_figure` → 以 figure dict 取代 panel placeholder；不要求 PNG binding。
 - Image binding 僅讀取已驗證 `image/png`；產生 `renderMode: "image"` 與受信任 URL。
 - 任何 sanitize／PNG 驗證失敗 → recoverable error（修正 binding，不重跑分析），不得改用另一種 mode。

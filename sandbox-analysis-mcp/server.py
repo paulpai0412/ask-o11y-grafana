@@ -46,9 +46,12 @@ mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 artifact_assets = load_module("artifact_assets", ROOT / "artifact_assets.py")
 uploaded_datasets = load_module("uploaded_datasets", ROOT / "uploaded_datasets.py")
 ontology_contract = load_module("ontology_contract", ROOT / "ontology_contract.py")
+ml_plotly_contract = load_module("ml_plotly_contract", ROOT / "sandbox-analysis-mcp/ml_plotly_contract.py")
 ml_report_contract = load_module("ml_report_contract", ROOT / "ml_report_contract.py")
+ml_presentation = load_module("ml_presentation", ROOT / "sandbox-analysis-mcp/ml_presentation.py")
 data_profile = load_module("data_profile", ROOT / "sandbox-analysis-mcp/data_profile.py")
 ArtifactStore = artifact_store.ArtifactStore
+ArtifactAuthError = artifact_store.ArtifactAuthError
 WorkflowContractError = workflow_node.WorkflowContractError
 authenticate_headers = mcp_security.authenticate_headers
 error_response = workflow_node.error_response
@@ -83,12 +86,22 @@ ARTIFACT_PUBLIC_BASE = os.environ.get("ARTIFACT_PUBLIC_BASE", "http://127.0.0.1:
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
 
+
+def _plotly_capability_description() -> str:
+    capability = ml_plotly_contract.capability_summary()
+    return (
+        " Installed native Plotly presentation: "
+        + json.dumps(capability, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + ". A failed figure remains visible as an error while successful results stay available. Respect any user instruction to stop on failure; never silently drop a figure or retry computation. Corrected Python still needs exact-call approval."
+    )
+
+
 TOOLS = [
     {"name": "reconcile_operation", "description": "Recover a session-owned compute receipt from durable host completion evidence without running Python again. An indeterminate status is not success and never authorizes redispatch.", "inputSchema": {"type": "object", "additionalProperties": False, "required": ["operation_id"], "properties": {"operation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}}},
     {"name": "get_ml_capabilities", "description": "Inspect actual imports and package versions in the configured sandbox image, without user data. Returns supported trusted task/split combinations and sequential global-budget limits; unsupported or unavailable algorithms are never substituted.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
     {
         "name": "execute_python_analysis",
-        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. Plotly is the default presentation: emit Plotly figures as *.json so the host can create interactive panels. Use presentation_mode='image' only when the user explicitly requests a static PNG. The sandbox receives df, pd, np, display(value), and emit(value, name=None). Derived datasets and model-input chaining are disabled. Arbitrary Python outputs cannot claim verified ML; use execute_ml_contract for that. Name JSON results *.json for bounded inline return and DataFrame/string downloads *.csv for a signed URL. The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna.",
+        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. Return the numbers, tables, text or charts needed to answer the question. Charts are optional; when needed, emit Plotly figures as *.json using the capability below. Only renderable outputs receive a fresh report_manifest_ref for dashboard synthesis. Use presentation_mode='image' only when the user explicitly requests a static PNG. The sandbox receives df, pd, np, display(value), and emit(value, name=None). Derived datasets and model-input chaining are disabled. Arbitrary Python outputs cannot claim verified ML; use execute_ml_contract for that. Name JSON results *.json for bounded inline return and DataFrame/string downloads *.csv for a signed URL. The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna." + _plotly_capability_description(),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -111,6 +124,26 @@ TOOLS = [
                 "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295, "default": DEFAULT_SEED},
             },
             "required": ["frame_ref"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "reexport_trusted_report",
+        "description": "Re-export one successful pre-manifest profile or trusted ML execution into a fresh host-owned report_manifest_ref without running Python again. Requires authenticated server provenance and rejects generic or untrusted outputs; use the returned fresh ref for prepare_ml_report.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"execution_ref": {"type": "string", "description": "Opaque successful pre-manifest sandbox-execution ref."}},
+            "required": ["execution_ref"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "repair_generic_report",
+        "description": "Repair only report persistence from same-session succeeded generic Python with retained, contract-valid renderables. Cannot change invalid charts or code. Existing indeterminate operations must be reconciled first. Contract rejection requires corrected Python on the original authorized frame, not this tool. Creates fresh refs without rerunning Python or changing original receipts; remains generic and untrusted.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"execution_ref": {"type": "string", "description": "Opaque same-session generic sandbox-execution ref from a succeeded/rejected report receipt."}},
+            "required": ["execution_ref"],
             "additionalProperties": False,
         },
     },
@@ -159,7 +192,7 @@ TOOLS = [
     },
     {
         "name": "revise_python_analysis",
-        "description": "Execute replacement Python against the same authorized persisted Grafana frame as an earlier Sandbox Analysis revision.",
+        "description": "Execute replacement Python against the same authorized persisted Grafana frame as an earlier Sandbox Analysis revision. Numbers, tables and text need no charts. Renderable replacement outputs receive a fresh report_manifest_ref; use it instead of legacy execution coordinates." + _plotly_capability_description(),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -298,6 +331,19 @@ def validate_frame(frame: dict[str, Any]) -> tuple[list[str], int]:
 
 
 def validate_ml_execution_contract(contract: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
+    task_kind = analysis.get("task_kind", "binary_classification")
+    allow_missing_row_drop = task_kind == "regression"
+    try:
+        analysis_missing_policy = ontology_contract.normalize_missing_target_split_policy(
+            analysis.get("missing_value_policy"), allow_drop=allow_missing_row_drop
+        )
+        input_missing_policy = ontology_contract.normalize_missing_target_split_policy(
+            contract.get("missing_value_policy"), allow_drop=allow_missing_row_drop
+        )
+    except ValueError as exc:
+        raise WorkflowContractError(str(exc)) from exc
+    if analysis_missing_policy != input_missing_policy:
+        raise WorkflowContractError("missing_value_policy differs between analysis and execution contract")
     if analysis.get("sample_weight_fields", []) != []:
         raise WorkflowContractError("sample weights are not supported by this executor")
     split = analysis.get("split") or {}
@@ -306,7 +352,6 @@ def validate_ml_execution_contract(contract: dict[str, Any], analysis: dict[str,
         raise WorkflowContractError("split test_fraction must be between 0.05 and 0.5")
     if "seed" in analysis and "seed" in split and analysis["seed"] != split["seed"]:
         raise WorkflowContractError("analysis and split seeds must agree")
-    task_kind = analysis.get("task_kind", "binary_classification")
     kind = analysis.get("kind")
     if task_kind == "regression":
         algorithms = analysis.get("algorithms")
@@ -338,7 +383,11 @@ def validate_ml_execution_contract(contract: dict[str, Any], analysis: dict[str,
         raise WorkflowContractError("ML execution template does not match analysis kind")
     if contract.get("preprocessing_fit_scope") != "training_only":
         raise WorkflowContractError("ML preprocessing must be fit on training data only")
-    result: dict[str, Any] = {"execution_template": expected_template, "preprocessing_fit_scope": "training_only"}
+    result: dict[str, Any] = {
+        "execution_template": expected_template,
+        "preprocessing_fit_scope": "training_only",
+        "missing_value_policy": analysis_missing_policy,
+    }
     autoresearch = contract.get("autoresearch")
     objectives = {"mae"} if task_kind == "regression" else {"accuracy", "roc_auc", "pr_auc"}
     if autoresearch is not None:
@@ -348,13 +397,25 @@ def validate_ml_execution_contract(contract: dict[str, Any], analysis: dict[str,
         if isinstance(budget, bool) or not isinstance(budget, int) or not 1 <= budget <= 40:
             raise WorkflowContractError("autoresearch budget is invalid")
         result["autoresearch"] = autoresearch
+    objective = (autoresearch or {}).get("objective", analysis.get("objective", "mae" if task_kind == "regression" else "roc_auc"))
+    if not isinstance(objective, str) or objective not in objectives:
+        raise WorkflowContractError("ML objective is invalid")
+    if analysis.get("objective") is not None and analysis["objective"] != objective:
+        raise WorkflowContractError("ML objective conflicts with the analysis contract")
+    result["planned_objective"] = objective
     return result
 
 
 def verify_plan_for_context(context: dict[str, str], plan: dict[str, Any]) -> None:
     dataset_id = str(plan.get("dataset_id") or "")
     if not dataset_id.startswith("upload_"):
-        ontology_contract.verify_plan(plan)
+        if plan.get("ontology") is None and isinstance(plan.get("plan_sha256"), str):
+            payload = {key: value for key, value in plan.items() if key != "plan_sha256"}
+            actual = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if plan["plan_sha256"] != actual:
+                raise WorkflowContractError("CONTRACT_HASH_MISMATCH")
+        else:
+            ontology_contract.verify_plan(plan)
         return
     claimed = plan.get("plan_sha256")
     ontology = plan.get("ontology")
@@ -390,10 +451,14 @@ def read_plan_contract(context: dict[str, str], source_run_id: str, field_names:
         accepted = rule.get("accepted_values")
         if not isinstance(field, str) or field not in field_names or not isinstance(accepted, list) or not accepted:
             raise WorkflowContractError("query plan validity rule is incomplete")
-    semantic = {key: plan.get(key) for key in ("ontology", "analysis_contract", "plan_sha256") if plan.get(key) is not None}
-    if semantic and set(semantic) not in ({"ontology", "analysis_contract", "plan_sha256"}, {"ontology", "plan_sha256"}):
+    semantic = {key: plan.get(key) for key in ("ontology", "analysis_contract", "business_question", "plan_sha256") if plan.get(key) is not None}
+    business_question = semantic.get("business_question")
+    if business_question is not None and (not isinstance(business_question, str) or not business_question.strip() or len(business_question.encode("utf-8")) > 2048 or any(token in business_question.lower() for token in ("<", ">", "http://", "https://", "javascript:"))):
+        raise WorkflowContractError("query plan business_question is invalid")
+    semantic_core = set(semantic) - {"business_question"}
+    if semantic_core and semantic_core not in ({"ontology", "analysis_contract", "plan_sha256"}, {"ontology", "plan_sha256"}, {"plan_sha256"}):
         raise WorkflowContractError("ontology analysis plan contract is incomplete")
-    if set(semantic) == {"ontology", "analysis_contract", "plan_sha256"}:
+    if semantic_core == {"ontology", "analysis_contract", "plan_sha256"}:
         analysis = semantic.get("analysis_contract")
         if not isinstance(analysis, dict):
             raise WorkflowContractError("ontology analysis contract must be an object")
@@ -464,8 +529,11 @@ class _ExecutionCompleteResponse:
             elif kind == "error":
                 if complete_deadline is None:
                     raise payload
+                time.sleep(max(0, complete_deadline - time.monotonic()))
                 return
             else:
+                if complete_deadline is not None:
+                    time.sleep(max(0, complete_deadline - time.monotonic()))
                 return
 
 
@@ -839,6 +907,177 @@ def output_summary(execution: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_GENERIC_REPORT_STEPS = frozenset({"execute_python_analysis", "revise_python_analysis"})
+
+
+def _generic_report_segment(value: Any, fallback: str) -> str:
+    segment = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value)).strip("_")[:80]
+    if not segment:
+        segment = fallback
+    if segment[0].isdigit():
+        segment = f"artifact_{segment}"
+    return segment
+
+
+def _generic_report_source(
+    execution: dict[str, Any], validity: dict[str, Any], *, purpose: str | None = None,
+) -> dict[str, Any] | None:
+    """Bind captured generic renderables to a fresh host-owned report source.
+
+    Generic Python is not trusted to declare report facts. The host binds only
+    its verified input counts; figure output coordinates and digests are added by
+    the existing report normalizer after this source is captured. Plotly/PNG
+    outputs are paired only when their stem has exactly one of each MIME type.
+    """
+    facts = {
+        "rows": {"kind": "number", "label": "Input rows", "value": validity["input_rows"]},
+        "valid_rows": {"kind": "number", "label": "Valid rows", "value": validity["valid_rows"]},
+        "excluded_rows": {"kind": "number", "label": "Excluded rows", "value": validity["excluded_rows"]},
+    }
+    renderables: list[tuple[int, str, str, str]] = []
+    by_stem: dict[str, dict[str, list[tuple[int, str]]]] = {}
+    for index, result in enumerate(execution.get("results", [])):
+        if not isinstance(result, dict):
+            continue
+        display_name = result.get("display_name")
+        mime = result.get("mime")
+        if not isinstance(display_name, str) or not isinstance(mime, dict):
+            continue
+        is_plotly = isinstance(mime.get("application/vnd.plotly.v1+json"), str) or ml_report_contract._is_plotly_output(result)
+        is_png = isinstance(mime.get("image/png"), str)
+        if not is_plotly and not is_png:
+            continue
+        kind = "plotly" if is_plotly else "png"
+        stem = Path(display_name).stem or f"output_{index + 1}"
+        if stem.startswith("ml-plotly-"):
+            stem = stem.removeprefix("ml-plotly-")
+        by_stem.setdefault(stem, {}).setdefault(kind, []).append((index, display_name))
+        renderables.append((index, stem, kind, display_name))
+
+    if not renderables:
+        return None
+    groups: list[dict[str, Any]] = []
+    paired: set[str] = set()
+    for _index, stem, kind, display_name in renderables:
+        if stem in paired:
+            continue
+        candidates = by_stem[stem]
+        plots, pngs = candidates.get("plotly", []), candidates.get("png", [])
+        if len(plots) == 1 and len(pngs) == 1:
+            groups.append({"stem": stem, "plotly_output_name": plots[0][1], "png_output_name": pngs[0][1]})
+            paired.add(stem)
+            continue
+        # Ambiguous stems are represented as separate artifacts in captured
+        # output order; no renderable is silently dropped or overwritten.
+        plot_output_names = {name for _output_index, name in plots}
+        for output_index, output_name in sorted((*plots, *pngs)):
+            groups.append({"stem": stem, "kind": "plotly" if output_name in plot_output_names else "png", "output_name": output_name, "output_index": output_index})
+        paired.add(stem)
+
+    artifacts = []
+    used_ids: set[str] = set()
+    for group in groups:
+        artifact_id = _generic_report_segment(group["stem"], f"artifact_{len(artifacts) + 1}")
+        suffix = 2
+        while artifact_id in used_ids:
+            artifact_id = f"{_generic_report_segment(group['stem'], 'artifact')}_{suffix}"
+            suffix += 1
+        used_ids.add(artifact_id)
+        item = {"artifact_id": artifact_id, "fact_refs": ["rows", "valid_rows", "excluded_rows"]}
+        if "plotly_output_name" in group:
+            item.update({"plotly_output_name": group["plotly_output_name"], "png_output_name": group["png_output_name"]})
+        elif group["kind"] == "plotly":
+            item["plotly_output_name"] = group["output_name"]
+        else:
+            item["png_output_name"] = group["output_name"]
+        artifacts.append(item)
+    return {
+        "format": ml_report_contract.REPORT_SOURCE_FORMAT,
+        "purpose": purpose.strip() if isinstance(purpose, str) and purpose.strip() else "Bounded analysis outputs over the authorized Grafana frame.",
+        "conclusion": "Evidence is descriptive and requires report synthesis before dashboard publication.",
+        "facts": facts,
+        "artifacts": artifacts,
+    }
+
+
+def _ensure_generic_report_source(
+    execution: dict[str, Any], validity: dict[str, Any], step: str, *, purpose: str | None = None,
+) -> bool:
+    if step not in _GENERIC_REPORT_STEPS or execution.get("error"):
+        return False
+    for result in execution.get("results", []):
+        if not isinstance(result, dict):
+            continue
+        display_name = result.get("display_name")
+        payload = (result.get("mime") or {}).get("application/json") if isinstance(result.get("mime"), dict) else None
+        if isinstance(display_name, str) and display_name.casefold() == "report-source.json":
+            raise WorkflowContractError("generic Python cannot emit the reserved report-source.json; the host creates report bindings")
+        if isinstance(payload, str):
+            try:
+                value = json.loads(payload)
+            except json.JSONDecodeError:
+                value = None
+            if isinstance(value, dict) and value.get("format") == ml_report_contract.REPORT_SOURCE_FORMAT:
+                raise WorkflowContractError("generic Python cannot provide report-source-v1; the host creates report bindings")
+    source = _generic_report_source(execution, validity, purpose=purpose)
+    if source is None:
+        return False
+    execution.setdefault("results", []).append({
+        "text": None,
+        "timestamp": 0,
+        "mime": {"application/json": json.dumps(source, ensure_ascii=False, separators=(",", ":"))},
+        "display_name": "report-source.json",
+    })
+    return True
+
+
+def _preflight_report(
+    execution: dict[str, Any], validity: dict[str, Any], presentation_mode: str, step: str, *, purpose: str | None = None,
+) -> tuple[dict[str, Any], str, str | None]:
+    """Validate presentation on a copy before retaining the immutable receipt.
+
+    Unsafe or oversized additions retain only the original execution. Once a
+    bounded host source is created, retain it even when figure validation fails
+    so repair can verify that source without reconstructing or rerunning it.
+    """
+    if execution.get("error"):
+        return execution, "not_attempted", None
+    try:
+        candidate = json.loads(json.dumps(execution, ensure_ascii=False))
+    except (TypeError, ValueError) as exc:
+        return execution, "rejected", f"sandbox execution cannot be normalized as JSON: {exc}"
+    output_mimes = {
+        str(mime)
+        for result in candidate.get("results", [])
+        if isinstance(result, dict) and isinstance(result.get("mime"), dict)
+        for mime in result["mime"]
+    }
+    try:
+        source_present = _ensure_generic_report_source(candidate, validity, step, purpose=purpose)
+    except (TypeError, ValueError, KeyError, WorkflowContractError) as exc:
+        return execution, "rejected", f"generic report source rejected: {exc}"
+    # Validate reserved report metadata before allowing standalone plain outputs.
+    # A presentation preference is not a requirement to generate a chart.
+    if step in _GENERIC_REPORT_STEPS and not source_present:
+        if output_mimes <= {"application/json", "text/plain", "text/csv"}:
+            return execution, "not_requested", None
+        return execution, "rejected", "generic output must be bounded plain data or a named supported renderable"
+    required_mime = "application/vnd.plotly.v1+json" if presentation_mode == "plotly" else "image/png"
+    if required_mime not in output_mimes:
+        return execution, "rejected", f"Plotly figure JSON presentation requires an output with MIME {required_mime}; PNG-only output is not accepted by default" if presentation_mode == "plotly" else f"image presentation requires an output with MIME {required_mime}"
+    if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > MAX_OUTPUT_BYTES:
+        return execution, "rejected", f"sandbox output plus report metadata exceeds {MAX_OUTPUT_BYTES} bytes"
+    if source_present:
+        try:
+            manifest = ml_report_contract.normalize_report_manifest(
+                execution_ref="artifact://preflight/sandbox-execution", results=candidate.get("results", []),
+            )
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            return candidate, "rejected", f"report manifest rejected: {exc}"
+        return candidate, "partial" if ml_report_contract.presentation_errors(manifest) else "accepted", None
+    return candidate, "not_requested", None
+
+
 def compose_regression_template(plan: dict[str, Any], contract: dict[str, Any], seed: int) -> str:
     """Trusted chronological-regression template; host-owned, never model-authored."""
     split = contract.get("split") or {}
@@ -860,15 +1099,22 @@ def compose_regression_template(plan: dict[str, Any], contract: dict[str, Any], 
     split_field = str(split["time_field"] if split_kind == "chronological_holdout" else split["group_field"])
     target_direction = ontology_contract.optimization_direction(contract)
     objective = str(autoresearch.get("objective") or "mae")
-    purpose = str(contract.get("purpose") or "比較迴歸模型並在觀察支持範圍內提出候選設定。")
+    plan_sha = str(plan.get("plan_sha256") or "")
+    purpose = str(plan.get("business_question") or contract.get("purpose") or "比較迴歸模型並在觀察支持範圍內提出候選設定。")
     conclusion = str(contract.get("conclusion") or "模型與候選設定僅供受控試驗規劃，不代表因果最佳。")
     population_filter = contract.get("population_filter") or {}
     if not isinstance(population_filter, dict):
         raise WorkflowContractError("regression population_filter is invalid")
+    try:
+        missing_value_policy = ontology_contract.normalize_missing_target_split_policy(contract.get("missing_value_policy"), allow_drop=True)
+    except ValueError as exc:
+        raise WorkflowContractError(str(exc)) from exc
     constrained = contract.get("constrained_search") or {"enabled": False, "minimum_support": 5, "top_k": 5, "fixed_context": {}, "bounds": {}}
-    return f'''import math
+    return f'''# report-capture-stabilization-v6
+import math
 import matplotlib.pyplot as plt
 import pandas as pd
+from ml_plotly_contract import sanitize_figure
 from ml_presentation import build_report_source
 from ml_regression import apply_population_filter, run_multi_model_regression, evaluate_regression_candidate, search_candidate_settings
 from ml_execution import outer_split, sum_fit_counts
@@ -888,17 +1134,28 @@ PURPOSE = {purpose!r}
 CONCLUSION = {conclusion!r}
 CONSTRAINED = {constrained!r}
 POPULATION_FILTER = {population_filter!r}
+MISSING_VALUE_POLICY = {missing_value_policy!r}
+PLAN_SHA = {plan_sha!r}
 
 missing = [name for name in [SPLIT_FIELD, TARGET, *FEATURES, *POPULATION_FILTER] if name not in df.columns]
 if missing:
     raise ValueError("authorized frame lacks planned regression fields: " + ", ".join(missing))
+source_rows = int(len(df))
 work = df[[SPLIT_FIELD, *FEATURES, TARGET, *POPULATION_FILTER]].copy()
 work = apply_population_filter(work, POPULATION_FILTER)
+filtered_rows = int(len(work))
 work[TARGET] = pd.to_numeric(work[TARGET], errors="coerce")
 if SPLIT_KIND == "chronological_holdout":
     work[SPLIT_FIELD] = pd.to_datetime(work[SPLIT_FIELD], errors="coerce")
-if work[[SPLIT_FIELD, TARGET]].isna().any().any():
-    raise ValueError("target/split contains missing or invalid values; explicit preprocessing approval is required")
+invalid_target_split = work[[SPLIT_FIELD, TARGET]].isna().any(axis=1)
+policy_excluded_rows = int(invalid_target_split.sum())
+if policy_excluded_rows:
+    if MISSING_VALUE_POLICY != {{"mode": "drop_invalid_target_split", "approved": True}}:
+        raise ValueError("target/split contains missing or invalid values; approved missing_value_policy is required")
+    work = work.loc[~invalid_target_split].copy()
+feature_missing_rows = int(work[FEATURES].isna().to_numpy().any(axis=1).sum())
+if feature_missing_rows:
+    raise ValueError("feature fields contain missing values; feature imputation or feature-row dropping is not authorized")
 work = work.sort_values(SPLIT_FIELD, kind="stable").reset_index(drop=True)
 if work[TARGET].nunique() < 2:
     raise ValueError("regression target must be numeric, non-missing, and non-constant")
@@ -954,6 +1211,11 @@ comparison_axis.set(title="Selected feature-set model comparison", ylabel="CV MA
 comparison_axis.tick_params(axis="x", rotation=25)
 comparison_figure.tight_layout()
 emit(comparison_figure, name="regression_model_comparison.png")
+emit(sanitize_figure({{
+    "data": [{{"type": "bar", "name": "CV MAE", "x": [row["kind"] for row in result["comparison"]], "y": [float(row["cv_mae_mean"]) for row in result["comparison"]], "marker": {{"color": "#4fd1c5"}}}}],
+    "layout": {{"title": "Selected feature-set model comparison", "yaxis": {{"title": "CV MAE", "rangemode": "tozero"}}}},
+    "config": {{"displaylogo": False, "responsive": True}},
+}}), name="ml-plotly-regression_model_comparison.json")
 plt.close(comparison_figure)
 
 feature_set_figure, feature_set_axis = plt.subplots(figsize=(9, 4.8))
@@ -964,6 +1226,11 @@ feature_set_axis.set(title="Nested regression feature-set comparison", ylabel="M
 feature_set_axis.legend()
 feature_set_figure.tight_layout()
 emit(feature_set_figure, name="regression_feature_set_comparison.png")
+emit(sanitize_figure({{
+    "data": [{{"type": "bar", "name": "CV MAE", "x": [str(row["id"]) for row in feature_set_comparison], "y": [float(row["cv_mae"]) for row in feature_set_comparison], "marker": {{"color": "#7fcaa6"}}}}],
+    "layout": {{"title": "Nested regression feature-set comparison", "yaxis": {{"title": "MAE", "rangemode": "tozero"}}}},
+    "config": {{"displaylogo": False, "responsive": True}},
+}}), name="ml-plotly-regression_feature_set_comparison.json")
 plt.close(feature_set_figure)
 
 candidate_figure, candidate_axis = plt.subplots(figsize=(9, 4.8))
@@ -981,32 +1248,64 @@ else:
 candidate_axis.set_title("Observed-support candidate settings")
 candidate_figure.tight_layout()
 emit(candidate_figure, name="regression_candidate_settings.png")
+candidate_plotly_x = list(range(len(candidate_rows))) if candidate_rows else ["status"]
+candidate_plotly_y = [float(row["predicted_target"]) for row in candidate_rows] if candidate_rows else [0.0]
+candidate_plotly_text = [str(row["settings"]) for row in candidate_rows] if candidate_rows else [str(constrained_result["status"])]
+emit(sanitize_figure({{
+    "data": [{{"type": "scatter", "mode": "markers", "name": "Predicted target", "x": candidate_plotly_x, "y": candidate_plotly_y, "text": candidate_plotly_text, "marker": {{"color": "#eda06a", "size": 8}}}}],
+    "layout": {{"title": "Observed-support candidate settings", "yaxis": {{"title": "Predicted target"}}}},
+    "config": {{"displaylogo": False, "responsive": True}},
+}}), name="ml-plotly-regression_candidate_settings.json")
 plt.close(candidate_figure)
 
+selected_metrics = {{
+    "mae": float(result["holdout_metrics"]["mae"]),
+    "rmse": float(result["holdout_metrics"]["rmse"]),
+    "r2": float(result["holdout_metrics"]["r2"]),
+    "mae_interval": [float(value) for value in result["holdout_metrics"]["mae_interval"]],
+}}
+baseline_metrics = {{
+    "cv_mae": float(result["baseline_cv_mae"]),
+    "holdout_mae": float(result["baseline_holdout_mae"]),
+    "holdout_mae_interval": [float(value) for value in (result.get("baseline_holdout_mae_interval") or [result["baseline_holdout_mae"], result["baseline_holdout_mae"]])],
+}}
+uncertainty = result["uncertainty"]
+uncertainty_summary = {{
+    "method": str(uncertainty["method"]),
+    "confidence": float(uncertainty["confidence"]),
+    "samples": int(uncertainty["samples"]),
+    "limitations": {{str(key): str(value) for key, value in uncertainty["limitations"].items()}},
+}}
+candidate_facts = {{"candidate_count": int(len(candidate_rows)), "candidate_settings_available": bool(candidate_rows)}}
+for index, row in enumerate(candidate_rows):
+    candidate_facts["candidate_" + str(index) + "_predicted_target"] = float(row["predicted_target"])
+    candidate_facts["candidate_" + str(index) + "_support"] = int(row["support"])
+    candidate_facts["candidate_" + str(index) + "_uncertainty_lower"] = float(row["uncertainty"]["lower"])
+    candidate_facts["candidate_" + str(index) + "_uncertainty_upper"] = float(row["uncertainty"]["upper"])
 manifest = {{
     "format": "ask-o11y-ml-regression-v1",
     "schema_version": "ask-o11y.ml-regression/v1",
     "purpose": PURPOSE,
     "conclusion": CONCLUSION,
-    "objective": {{"target": TARGET, "task_kind": "regression", "primary_metric": OBJECTIVE, "metric_direction": "minimize", "optimization_direction": TARGET_DIRECTION}},
-    "weighting": {{"used": False, "fields": [], "interpretation": "核准特徵作為一般 predictors；本次未使用 sample weights。"}},
-    "data": {{"rows": int(len(work)), "source_rows": int(len(df)), "explained_rows": int(len(holdout)), "train_rows": int(len(train)), "holdout_rows": int(len(holdout)), "features": len(FEATURES), "feature_set_count": len(FEATURE_SETS), "feature_set_ids": [item["id"] for item in FEATURE_SETS], "split_kind": SPLIT_KIND, "split_field": SPLIT_FIELD, "population_filter": POPULATION_FILTER}},
-    "process": {{"algorithms": ALGORITHMS, "search_budget": BUDGET, "completed_trials": sum(item["result"]["completed_trials"] for item in feature_set_results), "execution_mode": "sequential", "preprocessing_fit_scope": "training_only", "outer_split": outer_receipt, "fit_count_unit": "successful estimator/calibrator fits; excludes preprocessing; holdout reuses fitted winner", "fit_counts": sum_fit_counts([item["result"]["fit_counts"] for item in feature_set_results]), "cv_folds": result["cv_folds"], "comparison": result["comparison"], "feature_set_comparison": feature_set_comparison, "selected_feature_set": selected_feature_set["id"], "unavailable_algorithms": result["unavailable_kinds"], "predictor_fields": FEATURES, "sample_weight_fields": []}},
-    "baseline_metrics": {{"kind": result["baseline_kind"], "cv_mae": result["baseline_cv_mae"], "holdout_mae": result["baseline_holdout_mae"]}},
-    "selected_model": {{"kind": result["selected_kind"], "feature_set": selected_feature_set["id"], "beats_baseline": result["beats_baseline"]}},
-    "selected_metrics": result["holdout_metrics"],
-    "guards": {{"selected_cv_beats_baseline": result["selected_cv_beats_baseline"], "selected_holdout_beats_baseline": result["holdout_metrics"]["mae"] < result["baseline_holdout_mae"], "can_run_constrained_search": result["can_run_constrained_search"], "holdout_evaluations": result["holdout_evaluations"]}},
-    "constrained_search": constrained_result,
-    "feature_set_comparison": feature_set_comparison,
-    "governance": {{"controllable_fields": {list(contract.get("controllable_fields") or [])!r}, "context_fields": {list(contract.get("context_fields") or [])!r}, "forbidden_fields": {list(contract.get("forbidden_fields") or [])!r}}},
-    "limitations": ["觀察性資料只支持候選設定，不能解讀為因果最佳。"],
+    "data": {{"rows": int(len(work)), "source_rows": source_rows, "used_rows": int(len(work)), "excluded_rows": policy_excluded_rows, "policy_excluded_rows": policy_excluded_rows, "population_filter_excluded_rows": source_rows - filtered_rows, "train_rows": int(len(train)), "holdout_rows": int(len(holdout)), "features": int(len(FEATURES))}},
+    "process": {{"algorithms": [str(value) for value in ALGORITHMS], "search_budget": int(BUDGET), "completed_trials": int(sum(item["result"]["completed_trials"] for item in feature_set_results)), "preprocessing_fit_scope_training_only": True, "sample_weight_fields": [], "selected_feature_set": str(selected_feature_set["id"]), "missing_value_policy": MISSING_VALUE_POLICY, "missing_value_policy_approved": bool(MISSING_VALUE_POLICY["approved"]), "missing_target_split_rows_excluded": policy_excluded_rows, "uncertainty": uncertainty_summary}},
+    "results": {{"selected": selected_metrics, "baseline": baseline_metrics}},
+    "decision": candidate_facts,
+    "guards": {{"selected_cv_beats_baseline": bool(result["selected_cv_beats_baseline"]), "selected_holdout_beats_baseline": bool(selected_metrics["mae"] < baseline_metrics["holdout_mae"]), "can_run_constrained_search": bool(result["can_run_constrained_search"]), "constrained_search_blocked_by_baseline": constrained_result.get("status") == "blocked_by_baseline", "constrained_search_insufficient_support": constrained_result.get("status") == "insufficient_support", "selection_holdout_separation": True, "causal_identification_established": False}},
+    "selected_metrics": selected_metrics,
+    "baseline_metrics": baseline_metrics,
     "artifacts": [
         {{"name": "regression_model_comparison.png", "caption": "相同切分與預算下的模型比較", "alt_text": "各候選模型的交叉驗證平均絕對誤差長條圖"}},
         {{"name": "regression_feature_set_comparison.png", "caption": "不同 nested feature sets 的泛化比較", "alt_text": "不同 feature set 的交叉驗證誤差比較"}},
         {{"name": "regression_candidate_settings.png", "caption": "觀察支持範圍內的候選設定與不確定區間", "alt_text": "候選設定預測值與 bootstrap 不確定區間"}},
     ],
+    "limitations": [
+        "Only target/split invalid rows may be excluded, and only under the exact approved missing_value_policy; feature-only missing values are never row-dropped by this policy.",
+        "Excluded rows are reported counts, not imputed or silently removed; results remain bounded to the authorized source frame and approved split/model guards.",
+    ],
 }}
-emit(build_report_source(manifest), name="report-source.json")
+emit({{"source_rows": source_rows, "used_rows": int(len(work)), "eligible_rows": int(len(work)), "excluded_rows": policy_excluded_rows, "policy_excluded_rows": policy_excluded_rows, "population_filter_excluded_rows": source_rows - filtered_rows, "train_rows": int(len(train)), "test_rows": int(len(holdout)), "explained_rows": int(len(holdout)), "target": TARGET, "missing_value_policy": MISSING_VALUE_POLICY, "plan_sha256": PLAN_SHA}}, name="dataset-summary.json")
+emit(build_report_source(manifest, plotly_names={"regression_model_comparison", "regression_feature_set_comparison", "regression_candidate_settings"}), name="report-source.json")
 emit(manifest, name="ml-regression.json")
 '''
 
@@ -1084,11 +1383,11 @@ def compose_ml_template(plan: dict[str, Any], contract: dict[str, Any], seed: in
         budget = int(autoresearch.get("search_budget", 20))
     except (TypeError, ValueError) as exc:
         raise WorkflowContractError("autoresearch budget is invalid") from exc
-    objective = str(autoresearch.get("objective", "roc_auc"))
+    objective = str(autoresearch.get("objective", contract.get("objective", "roc_auc")))
     minimum = autoresearch.get("objective_minimum")
     positive = contract.get("positive_class")
     algorithms = contract.get("algorithms") or [kind]
-    purpose = str(contract.get("purpose") or "依核准的分析契約預測目標，供主管判斷是否可試用。")
+    purpose = str(plan.get("business_question") or contract.get("purpose") or "依核准的分析契約預測目標，供主管判斷是否可試用。")
     conclusion = str(contract.get("conclusion") or "模型驗證完成；營運門檻與成本確認前不建議直接部署。")
     dataset_id = str(plan.get("dataset_id") or "")
     ontology = plan.get("ontology") or {}
@@ -1183,7 +1482,6 @@ result = comparison["best_result"]
 KIND = comparison["best_kind"]
 
 positive_rate = float(y_hold.mean())
-baseline_accuracy = float((y_hold == 0).mean())
 probs = result["calibrated_probabilities"]
 preds = [1 if value >= result["operating_threshold"] else 0 for value in probs]
 tp = sum(1 for actual, predicted in zip(y_hold.tolist(), preds) if actual == 1 and predicted == 1)
@@ -1198,13 +1496,14 @@ manifest = build_manifest(
     identity={{"run_id": "ml-contract", "dataset_id": DATASET_ID, "ontology_snapshot_id": SNAPSHOT_ID, "ontology_sha256": SNAPSHOT_SHA, "contract_sha256": PLAN_SHA, "seed": SEED}},
     objective={{"target": TARGET, "task_kind": "binary_classification", "primary_metric": OBJECTIVE, "positive_class": POSITIVE, "threshold": result["operating_threshold"], "threshold_cost_approved": COST_APPROVED, "cost_matrix": COST_MATRIX, "normalization_denominator": REPORTING_DENOMINATOR}},
     data={{"rows": int(len(work)), "source_rows": int(len(df)), "explained_rows": int(len(X_hold)), "features": len(FEATURES), "train_rows": int(len(X_train)), "holdout_rows": int(len(X_hold)), "split_kind": "stratified_holdout", "minority_rate": positive_rate, "excluded_fields": [{{"name": name, "reason": "未納入模型特徵"}} for name in df.columns if name not in FEATURES and name != TARGET]}},
-    process={{"model_family": KIND, "search_budget": BUDGET, "completed_trials": comparison["completed_trials"], "comparison": comparison["comparison"], "fit_counts": comparison["fit_counts"], "fit_count_unit": "successful estimator/calibrator fits; excludes preprocessing; holdout reuses fitted winner", "outer_split": outer_receipt, "cv_receipts": comparison["cv_receipts"], "execution_mode": "sequential", "cv_folds": 5, "preprocessing_fit_scope": "training_only", "calibration_method": "isotonic", "best_params": result["best_params"]}},
-    baseline_metrics={{"accuracy": baseline_accuracy}},
+    process={{"model_family": KIND, "search_budget": BUDGET, "completed_trials": comparison["completed_trials"], "comparison": comparison["comparison"], "fit_counts": comparison["fit_counts"], "fit_count_unit": "successful estimator/calibrator fits; excludes preprocessing; holdout reuses fitted winner", "outer_split": outer_receipt, "cv_receipts": comparison["cv_receipts"], "execution_mode": "sequential", "cv_folds": 5, "preprocessing_fit_scope": "training_only", "calibration_method": "isotonic", "best_params": result["best_params"], "uncertainty": comparison["uncertainty"]}},
+
+    baseline_metrics=comparison["baseline_metrics"],
     selected_metrics=result["metrics"],
-    guards={{**result["guards"], "verdict": result["verdict"]}},
+    guards={{**result["guards"], "verdict": result["verdict"], "assumptions": {{"selection_holdout_separation": True, "preprocessing_fit_scope_training_only": True, "independence_assumption_verified": False, "causal_identification_established": False, "multiplicity_adjusted_inference": False}}}},
     trials=result["trials"],
     features=[{{"name": item["name"], "importance": item["importance"], "explanation": item["name"] + " 是模型參考的資料；重要不代表因果"}} for item in result["top_features"]],
-    limitations=["觀察性資料，不能解讀為因果。"] + ([] if COST_APPROVED else ["成本矩陣與營運門檻尚未獲業務核准，不能直接部署。"]),
+    limitations=["觀察性資料，不能解讀為因果。", comparison["uncertainty"]["limitations"]["model_selection"], comparison["uncertainty"]["limitations"]["calibration"], comparison["uncertainty"]["limitations"]["holdout"]] + ([] if COST_APPROVED else ["成本矩陣與營運門檻尚未獲業務核准，不能直接部署。"]),
 )
 manifest["operating_scenarios"] = result["operating_scenarios"]
 manifest["model_comparison"] = [{{**row, "is_best": row["kind"] == KIND}} for row in comparison["comparison"]]
@@ -1253,6 +1552,419 @@ emit(build_report_source(manifest, plotly_names=set(plotly_figures)), name="repo
 emit(manifest, name="ml-presentation.json")
 """
     return template + shap_block
+
+
+_TRUSTED_REEXPORT_EXECUTORS = frozenset({"execute_ml_contract", "profile_dataset"})
+_TRUSTED_REEXPORT_FORMATS = frozenset({"ask-o11y-ml-presentation-v1", "ask-o11y-ml-regression-v1", data_profile.PROFILE_FORMAT})
+
+
+def _verify_trusted_lineage(context: dict[str, str], execution_ref: str, provenance: dict[str, Any]) -> None:
+    """Bind re-export eligibility to the authorized source packet, not hashes alone."""
+    execution_run_id, _ = parse_artifact_ref(execution_ref)
+    code_ref = provenance.get("code_ref")
+    if not isinstance(code_ref, str):
+        raise WorkflowContractError("trusted execution provenance has no source code artifact")
+    code_run_id, code_parts = parse_artifact_ref(code_ref)
+    if code_run_id != execution_run_id or code_parts != ("sandbox-code",):
+        raise WorkflowContractError("trusted execution code lineage is not paired")
+    code = ARTIFACTS.read_json(context, code_ref)
+    if not isinstance(code, dict) or not isinstance(code.get("source"), str):
+        raise WorkflowContractError("trusted execution code artifact is invalid")
+    code_digest = hashlib.sha256(code["source"].encode("utf-8")).hexdigest()
+    if code_digest != provenance.get("code_sha256") or code.get("sha256") != provenance.get("code_sha256"):
+        raise WorkflowContractError("trusted execution code lineage does not match")
+
+    frame_ref = provenance.get("input_frame_ref")
+    if not isinstance(frame_ref, str):
+        raise WorkflowContractError("trusted execution provenance has no valid source frame")
+    frame_run_id, frame = read_authorized_frame(context, frame_ref)
+    frame_digest = hashlib.sha256(json.dumps(frame, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    if frame_digest != provenance.get("input_frame_sha256"):
+        raise WorkflowContractError("trusted execution frame lineage does not match")
+    field_names, _ = validate_frame(frame)
+    plan_ref = f"artifact://{frame_run_id}/query-plan"
+    plan = ARTIFACTS.read_json(context, plan_ref)
+    if not isinstance(plan, dict):
+        raise WorkflowContractError("trusted execution plan lineage is unavailable")
+    if plan.get("ontology") is not None:
+        verify_plan_for_context(context, plan)
+    elif not isinstance(plan.get("plan_sha256"), str):
+        raise WorkflowContractError("trusted execution plan lineage is incomplete")
+    plan_digest = hashlib.sha256(json.dumps({key: value for key, value in plan.items() if key != "plan_sha256"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if plan_digest != provenance.get("plan_sha256") or plan.get("plan_sha256") != provenance.get("plan_sha256"):
+        raise WorkflowContractError("trusted execution plan lineage does not match")
+    read_plan_contract(context, frame_run_id, field_names)
+    if provenance.get("business_question") != plan.get("business_question"):
+        raise WorkflowContractError("trusted execution question lineage does not match")
+    if provenance.get("executor_kind") == "execute_ml_contract" and provenance.get("analysis_contract") != plan.get("analysis_contract"):
+        raise WorkflowContractError("trusted execution analysis lineage does not match")
+
+
+def _result_json(result: Any) -> dict[str, Any] | None:
+    if not isinstance(result, dict) or not isinstance(result.get("mime"), dict):
+        return None
+    payload = result["mime"].get("application/json")
+    if not isinstance(payload, str):
+        return None
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _is_report_source_result(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    value = _result_json(result)
+    return result.get("display_name") == "report-source.json" or (value or {}).get("format") == ml_report_contract.REPORT_SOURCE_FORMAT
+
+
+def _is_reexport_source_result(result: Any) -> bool:
+    value = _result_json(result)
+    return _is_report_source_result(result) or (value or {}).get("format") in _TRUSTED_REEXPORT_FORMATS
+
+
+def _canonical_results_digest(results: list[Any], *, include_report_source: bool) -> str:
+    selected = [result for result in results if include_report_source or not _is_reexport_source_result(result)]
+    return hashlib.sha256(json.dumps(selected, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _verify_reexport_parent(
+    context: dict[str, str], execution_ref: str, execution: dict[str, Any], provenance_ref: str, provenance: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Authenticate the one permitted source execution for a trusted re-export."""
+    if "reexport_of" in execution or "source_provenance_ref" in execution:
+        raise WorkflowContractError("trusted re-export chains are unsupported")
+    source_run_id, source_parts = parse_artifact_ref(execution_ref)
+    if source_parts != ("sandbox-execution",) or parse_artifact_ref(provenance_ref)[0] != source_run_id:
+        raise WorkflowContractError("trusted re-export source provenance is not paired")
+    source_provenance = ARTIFACTS.read_json(context, provenance_ref)
+    if not isinstance(source_provenance, dict) or source_provenance.get("report_manifest_ref"):
+        raise WorkflowContractError("trusted re-export source provenance is not a fresh pre-manifest receipt")
+    if "reexport_of" in source_provenance or "source_provenance_ref" in source_provenance:
+        raise WorkflowContractError("trusted re-export chains are unsupported")
+    if source_provenance.get("computation_status") != "succeeded":
+        raise WorkflowContractError("trusted re-export source computation is not verified")
+    if source_provenance.get("report_status") not in {"rejected", "not_attempted"}:
+        raise WorkflowContractError("trusted re-export source report state is incompatible")
+    _verify_trusted_lineage(context, execution_ref, source_provenance)
+    source_results = execution.get("results")
+    if not isinstance(source_results, list) or not source_results:
+        raise WorkflowContractError("trusted re-export source results are unavailable")
+    return {"provenance": source_provenance, "source_results_digest": _canonical_results_digest(source_results, include_report_source=False)}
+
+
+def _canonical_provenance_digest(provenance: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(provenance, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def _repair_operation_id(context: dict[str, str], inputs: dict[str, Any]) -> str:
+    actor = {key: str(context.get(key) or "") for key in ("org_id", "user_id", "session_id")}
+    encoded = json.dumps([actor, "repair_generic_report", inputs], sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _verify_generic_repair_source(
+    context: dict[str, str], execution_ref: str,
+) -> tuple[dict[str, Any], dict[str, Any], str, str]:
+    """Verify the one same-session generic receipt eligible for repair."""
+    run_id, parts = parse_artifact_ref(execution_ref)
+    if parts != ("sandbox-execution",):
+        raise WorkflowContractError("execution_ref must reference sandbox-execution")
+    provenance_ref = f"artifact://{run_id}/sandbox-provenance"
+    try:
+        metadata = json.loads(ARTIFACTS._metadata_path(run_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ArtifactAuthError("generic repair source metadata is unavailable") from exc
+    if any(str(metadata.get(key, "")) != str(context.get(key, "")) for key in ("org_id", "user_id", "session_id")):
+        raise ArtifactAuthError("generic repair requires the original source session")
+    execution = ARTIFACTS.read_json(context, execution_ref)
+    provenance = ARTIFACTS.read_json(context, provenance_ref)
+    if not isinstance(execution, dict) or "error" not in execution or execution.get("error") is not None or not isinstance(execution.get("results"), list) or not execution["results"]:
+        raise WorkflowContractError("generic repair requires a concrete retained execution")
+    if not isinstance(provenance, dict) or provenance.get("report_manifest_ref") not in (None, ""):
+        raise WorkflowContractError("generic repair requires a pre-manifest receipt")
+    if provenance.get("computation_status") != "succeeded" or provenance.get("report_status") != "rejected":
+        raise WorkflowContractError("generic repair requires succeeded computation and rejected report status")
+    if provenance.get("executor_kind") not in _GENERIC_REPORT_STEPS or provenance.get("trusted_ml_contract") is not False:
+        raise WorkflowContractError("only untrusted generic Python receipts can be repaired")
+    if any(key in execution or key in provenance for key in ("reexport_of", "source_provenance_ref", "generic_repair_of")):
+        raise WorkflowContractError("generic repair chains are unsupported")
+    question = provenance.get("business_question")
+    if not isinstance(question, str) or not question.strip() or len(question.encode("utf-8")) > 2048 or any(token in question.lower() for token in ("<", ">", "http://", "https://", "javascript:")):
+        raise WorkflowContractError("generic repair requires a valid retained business question")
+    validity = provenance.get("validity")
+    audit = execution.get("input_audit")
+    if not isinstance(validity, dict) or audit != validity:
+        raise WorkflowContractError("generic repair validity evidence does not match the retained input audit")
+    source_results = [result for result in execution["results"] if _is_report_source_result(result)]
+    captured_digest = provenance.get("captured_results_sha256")
+    actual_digest = _canonical_results_digest(execution["results"], include_report_source=False)
+    if not isinstance(captured_digest, str) or captured_digest != actual_digest:
+        raise WorkflowContractError("generic repair captured-results digest is missing or invalid")
+    if len(source_results) != 1:
+        raise WorkflowContractError("generic repair requires exactly one host-created report source")
+    host_source_digest = provenance.get("host_report_source_sha256")
+    source_value = _result_json(source_results[0])
+    if not isinstance(source_value, dict) or source_value.get("format") != ml_report_contract.REPORT_SOURCE_FORMAT or not isinstance(host_source_digest, str):
+        raise WorkflowContractError("generic repair rejects reserved or unverified report sources")
+    actual_source_digest = hashlib.sha256(json.dumps(source_value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    if host_source_digest != actual_source_digest:
+        raise WorkflowContractError("generic repair host report source digest is invalid")
+    expected_source = _generic_report_source(execution, validity, purpose=question.strip())
+    if expected_source is None or source_value != expected_source:
+        raise WorkflowContractError("generic repair report source is not host-generated from retained evidence")
+    _verify_trusted_lineage(context, execution_ref, provenance)
+    presentation_mode = provenance.get("presentation_mode")
+    if presentation_mode not in PRESENTATION_MODES:
+        raise WorkflowContractError("generic repair presentation mode is invalid")
+    required_mime = "application/vnd.plotly.v1+json" if presentation_mode == "plotly" else "image/png"
+    if not any(isinstance(result, dict) and isinstance(result.get("mime"), dict) and required_mime in result["mime"] for result in execution["results"]):
+        raise WorkflowContractError("generic repair presentation output is missing")
+    return execution, provenance, provenance_ref, question.strip()
+
+
+def _report_recovery_evidence(frame_ref: str, *, correction: bool) -> dict[str, Any]:
+    evidence = {
+        "frame_ref": frame_ref, "computation_status": "succeeded", "report_status": "rejected",
+        "correction_required": correction, "automatic_retry": False,
+        "error_code": "report_contract_rejected" if correction else "report_persistence_failed",
+        "recovery_action": "correct_python_same_frame" if correction else "repair_generic_report",
+    }
+    if correction:
+        evidence["plotly_capability"] = ml_plotly_contract.capability_summary()
+    return evidence
+
+
+def _validated_generic_repair_candidate(execution: dict[str, Any], provenance: dict[str, Any], question: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    source = _generic_report_source(execution, provenance["validity"], purpose=question)
+    if source is None:
+        raise WorkflowContractError("generic repair requires at least one renderable output")
+    try:
+        captured_results = json.loads(json.dumps(execution["results"], ensure_ascii=False))
+    except (TypeError, ValueError) as exc:
+        raise WorkflowContractError("retained generic results are not valid JSON") from exc
+    clean_results = [result for result in captured_results if not _is_report_source_result(result)]
+    clean_results.append({
+        "text": None, "timestamp": 0,
+        "mime": {"application/json": json.dumps(source, ensure_ascii=False, separators=(",", ":"))},
+        "display_name": "report-source.json",
+    })
+    if len(json.dumps(clean_results, ensure_ascii=False).encode("utf-8")) > MAX_OUTPUT_BYTES:
+        raise WorkflowContractError("generic repair exceeds the captured output limit")
+    # Validate before reserving an effect. A contract rejection is deterministic,
+    # not an indeterminate persistence outcome.
+    candidate = ml_report_contract.normalize_report_manifest(execution_ref="artifact://generic-repair-preflight/sandbox-execution", results=clean_results)
+    if ml_report_contract.presentation_errors(candidate):
+        raise WorkflowContractError("retained figures still cannot be presented; generic repair cannot correct Python or claim a complete report")
+    return source, clean_results
+
+
+def _repair_generic_report(context: dict[str, str], execution_ref: str, operation_id: str) -> dict[str, Any]:
+    execution, provenance, provenance_ref, question = _verify_generic_repair_source(context, execution_ref)
+    source, clean_results = _validated_generic_repair_candidate(execution, provenance, question)
+    output_run_id: str | None = None
+    fresh_execution_ref: str | None = None
+    report_manifest_ref: str | None = None
+    try:
+        output_run_id = ARTIFACTS.create_run(context)
+        fresh_execution_ref = f"artifact://{output_run_id}/sandbox-execution"
+        fresh_execution = {
+            "results": clean_results, "error": None, "generic_repair_of": execution_ref,
+            "source_provenance_ref": provenance_ref,
+            "generic_repair_source_results_sha256": provenance["captured_results_sha256"],
+        }
+        ARTIFACTS.write_json(context, output_run_id, "sandbox-execution", fresh_execution)
+        # Re-normalize with the actual fresh ref; the source/result bytes remain unchanged.
+        report_manifest = ml_report_contract.normalize_report_manifest(execution_ref=fresh_execution_ref, results=clean_results)
+        report_manifest_ref = ARTIFACTS.write_json(context, output_run_id, "report-manifest", report_manifest)
+        fresh_provenance = dict(provenance)
+        fresh_provenance.update({
+            "report_manifest_ref": report_manifest_ref, "computation_status": "succeeded", "report_status": "accepted",
+            "generic_repair_of": execution_ref, "source_provenance_ref": provenance_ref,
+            "generic_repair_kind": "host_report_manifest", "generic_repair_source_results_sha256": provenance["captured_results_sha256"],
+            "generic_repair_source_provenance_sha256": _canonical_provenance_digest(provenance),
+            "generic_repair_report_source_sha256": hashlib.sha256(json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+        })
+        fresh_provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", fresh_provenance)
+    except Exception:
+        # The run reservation is already durable. Keep its identity and any
+        # paired refs visible, but never claim a partial repair succeeded or
+        # retry persistence (which could duplicate an effect).
+        return error_response(
+            step="repair_generic_report", error="generic repair persistence is indeterminate; reconcile the operation before retrying",
+            recoverable=False,
+            instruction="Keep the original generic receipt; reconcile this operation and do not rerun computation or repeat repair persistence.",
+            evidence={
+                "operation_id": operation_id, "effect_outcome": "indeterminate", "automatic_retry": False,
+                "source_execution_ref": execution_ref, "source_provenance_ref": provenance_ref,
+                "execution_ref": fresh_execution_ref, "report_manifest_ref": report_manifest_ref,
+                "computation_status": "succeeded", "report_status": "indeterminate", "trusted_ml_contract": False,
+            },
+        )
+    return success_response(
+        step="repair_generic_report", run_id=output_run_id,
+        refs={"execution_ref": fresh_execution_ref, "provenance_ref": fresh_provenance_ref, "report_manifest_ref": report_manifest_ref},
+        instruction="Use the fresh report_manifest_ref for prepare_ml_report; retained generic evidence remains untrusted and no Python was rerun.",
+        evidence={"source_execution_ref": execution_ref, "source_provenance_ref": provenance_ref, "source_results_sha256": provenance["captured_results_sha256"], "report_manifest_ref": report_manifest_ref, "trusted_ml_contract": False},
+    )
+
+
+def repair_generic_report(args: dict[str, Any]) -> dict[str, Any]:
+    step = "repair_generic_report"
+    try:
+        unexpected = sorted(set(args) - {"execution_ref", "context", "_server_context"})
+        if unexpected:
+            raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
+        execution_ref = args.get("execution_ref")
+        if not isinstance(execution_ref, str):
+            raise WorkflowContractError("execution_ref is required")
+        context = context_from_args(args)
+        # Bind replay identity to the authenticated source receipt and its
+        # immutable digests, then re-read all artifacts inside the callback.
+        execution, provenance, provenance_ref, question = _verify_generic_repair_source(context, execution_ref)
+        inputs = {"execution_ref": execution_ref, "source_results_sha256": provenance["captured_results_sha256"], "source_provenance_sha256": _canonical_provenance_digest(provenance)}
+        operation_id = _repair_operation_id(context, inputs)
+        if (ARTIFACTS.root / "operations" / operation_id).exists():
+            # A changed validator must not hide an older unresolved operation.
+            reconciliation_status = "indeterminate"
+            try:
+                existing = ARTIFACTS.reconcile_operation(context, operation_id)
+                if existing["status"] in {"completed", "failed"}:
+                    return existing["result"]
+            except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError):
+                reconciliation_status = "unavailable"  # Never permission to redispatch.
+            return error_response(
+                step=step, error="generic repair operation is indeterminate; reconcile it before any correction or retry", recoverable=False,
+                instruction="Reconcile this operation first. Do not rerun computation, repair, or corrected code while its outcome is unknown.",
+                evidence={"operation_id": operation_id, "effect_outcome": "indeterminate", "automatic_retry": False,
+                          "reconciliation_status": reconciliation_status,
+                          "source_execution_ref": execution_ref, "source_provenance_ref": provenance_ref,
+                          "frame_ref": provenance["input_frame_ref"], "original_report_error": provenance.get("report_error"),
+                          "computation_status": "succeeded", "report_status": "indeterminate", "recovery_action": "reconcile_operation"},
+            )
+        try:
+            _validated_generic_repair_candidate(execution, provenance, question)
+        except (ValueError, TypeError, KeyError, WorkflowContractError) as exc:
+            return error_response(
+                step=step,
+                error=f"generic repair cannot accept the retained renderable: {exc}",
+                recoverable=False,
+                instruction="Do not retry generic repair. Reuse the original frame_ref and execute corrected python_code; do not rerun the query.",
+                evidence={"source_execution_ref": execution_ref, "source_provenance_ref": provenance_ref,
+                          "original_report_error": provenance.get("report_error"),
+                          **_report_recovery_evidence(provenance["input_frame_ref"], correction=True)},
+            )
+        try:
+            return ARTIFACTS.run_once(context, step, inputs, lambda: _repair_generic_report(context, execution_ref, operation_id))
+        except Exception:
+            return error_response(
+                step=step, error="generic repair operation is indeterminate; reconcile the operation before retrying", recoverable=False,
+                instruction="Keep the original generic receipt; reconcile this operation and do not rerun computation or repeat repair persistence.",
+                evidence={
+                    "operation_id": operation_id, "effect_outcome": "indeterminate", "automatic_retry": False,
+                    "source_execution_ref": execution_ref, "source_provenance_ref": provenance_ref,
+                    "computation_status": "succeeded", "report_status": "indeterminate", "trusted_ml_contract": False,
+                },
+            )
+    except (ArtifactAuthError, PermissionError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; retain the original generic receipt and do not rerun computation or fabricate a report source.")
+
+
+def _reexport_trusted_report(context: dict[str, str], execution_ref: str) -> dict[str, Any]:
+    run_id, parts = parse_artifact_ref(execution_ref)
+    if parts != ("sandbox-execution",):
+        raise WorkflowContractError("execution_ref must reference sandbox-execution")
+    execution = ARTIFACTS.read_json(context, execution_ref)
+    provenance_ref = f"artifact://{run_id}/sandbox-provenance"
+    provenance = ARTIFACTS.read_json(context, provenance_ref)
+    if not isinstance(provenance, dict) or provenance.get("report_manifest_ref"):
+        raise WorkflowContractError("execution already has a report_manifest_ref or host provenance is invalid")
+    executor_kind = provenance.get("executor_kind")
+    if executor_kind not in _TRUSTED_REEXPORT_EXECUTORS:
+        raise WorkflowContractError("generic Python cannot be re-exported as a trusted report")
+    if not isinstance(execution, dict) or "error" not in execution or execution.get("error") is not None or not isinstance(execution.get("results"), list) or not execution["results"]:
+        raise WorkflowContractError("trusted re-export requires a successful execution")
+    if not isinstance(provenance.get("trusted_ml_contract"), bool) or provenance["trusted_ml_contract"] != (executor_kind == "execute_ml_contract"):
+        raise WorkflowContractError("trusted execution provenance is invalid")
+    computation_status = provenance.get("computation_status")
+    if computation_status is not None and computation_status != "succeeded":
+        raise WorkflowContractError("trusted re-export requires an explicitly succeeded computation")
+    report_status = provenance.get("report_status")
+    if report_status is not None and report_status not in {"rejected", "not_attempted"}:
+        raise WorkflowContractError("trusted re-export requires a compatible rejected report state")
+    source_receipt = _verify_reexport_parent(context, execution_ref, execution, provenance_ref, provenance)
+    legacy_manifest: dict[str, Any] | None = None
+    for result in execution["results"]:
+        candidate = _result_json(result)
+        if candidate is not None and candidate.get("format") in _TRUSTED_REEXPORT_FORMATS:
+            legacy_manifest = candidate
+            break
+    if legacy_manifest is None:
+        raise WorkflowContractError("no trusted pre-manifest report output is available")
+    plotly_names = {
+        Path(str(result.get("display_name"))).stem.removeprefix("ml-plotly-")
+        for result in execution["results"]
+        if isinstance(result, dict) and isinstance(result.get("display_name"), str) and (result.get("mime") or {}).get("application/vnd.plotly.v1+json") is not None
+    }
+    if legacy_manifest.get("format") == data_profile.PROFILE_FORMAT:
+        source = data_profile.build_profile_report_source(legacy_manifest, plotly_names=plotly_names)
+    else:
+        source = ml_presentation.build_report_source(legacy_manifest, plotly_names=plotly_names)
+    clean_results = [
+        result for result in execution["results"]
+        if not _is_report_source_result(result)
+    ]
+    clean_results.append({"text": None, "timestamp": 0, "mime": {"application/json": json.dumps(source, ensure_ascii=False, separators=(",", ":"))}, "display_name": "report-source.json"})
+    encoded = json.dumps(clean_results, ensure_ascii=False).encode("utf-8")
+    if len(encoded) > MAX_OUTPUT_BYTES:
+        raise WorkflowContractError("trusted re-export exceeds the captured output limit")
+    if source_receipt is None or _canonical_results_digest(clean_results, include_report_source=False) != source_receipt["source_results_digest"]:
+        raise WorkflowContractError("trusted re-export changed retained outputs")
+    output_run_id = ARTIFACTS.create_run(context)
+    reexport_execution = {
+        "results": clean_results, "error": None, "reexport_of": execution_ref, "source_provenance_ref": provenance_ref,
+        "reexport_source_results_sha256": source_receipt["source_results_digest"],
+    }
+    fresh_execution_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-execution", reexport_execution)
+    report_manifest = ml_report_contract.normalize_report_manifest(execution_ref=fresh_execution_ref, results=clean_results)
+    report_manifest_ref = ARTIFACTS.write_json(context, output_run_id, "report-manifest", report_manifest)
+    source_payload = json.dumps(legacy_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    fresh_report_source = next((candidate for candidate in (_result_json(result) for result in clean_results) if candidate and candidate.get("format") == ml_report_contract.REPORT_SOURCE_FORMAT), None)
+    if fresh_report_source is None:
+        raise WorkflowContractError("trusted re-export did not produce a canonical report source")
+    fresh_provenance = dict(provenance)
+    fresh_provenance.update({
+        "report_manifest_ref": report_manifest_ref, "computation_status": "succeeded", "report_status": "accepted",
+        "reexport_of": execution_ref, "source_provenance_ref": provenance_ref, "reexport_kind": "trusted_host_report_manifest",
+        "reexport_source_results_sha256": source_receipt["source_results_digest"],
+        "reexport_source_manifest_sha256": hashlib.sha256(source_payload.encode("utf-8")).hexdigest(),
+        "reexport_source_format": legacy_manifest.get("format"),
+        "reexport_report_source_sha256": hashlib.sha256(json.dumps(fresh_report_source, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+    })
+    fresh_provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", fresh_provenance)
+    return success_response(
+        step="reexport_trusted_report", run_id=output_run_id,
+        refs={"execution_ref": fresh_execution_ref, "report_manifest_ref": report_manifest_ref, "provenance_ref": fresh_provenance_ref},
+        instruction="Use the fresh report_manifest_ref for prepare_ml_report; do not use the source execution's output indexes.",
+        evidence={"source_execution_ref": execution_ref, "source_provenance_ref": provenance_ref, "executor_kind": executor_kind, "report_manifest_ref": report_manifest_ref},
+    )
+
+
+def reexport_trusted_report(args: dict[str, Any]) -> dict[str, Any]:
+    step = "reexport_trusted_report"
+    try:
+        unexpected = sorted(set(args) - {"execution_ref", "context", "_server_context"})
+        if unexpected:
+            raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
+        execution_ref = args.get("execution_ref")
+        if not isinstance(execution_ref, str):
+            raise WorkflowContractError("execution_ref is required")
+        context = context_from_args(args)
+        return ARTIFACTS.run_once(context, step, {"execution_ref": execution_ref}, lambda: _reexport_trusted_report(context, execution_ref))
+    except (ArtifactAuthError, PermissionError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; only a successful host-trusted pre-manifest execution can be re-exported. Do not rerun analysis or fabricate a report source.")
 
 
 def profile_dataset(args: dict[str, Any], executor: Callable[[str, str, int], dict[str, Any]] = execute_opensandbox) -> dict[str, Any]:
@@ -1349,7 +2061,6 @@ def _execute_python_analysis(
     step: str,
     parent_provenance_ref: str | None,
 ) -> dict[str, Any]:
-    presentation_mode = args.get("presentation_mode", DEFAULT_PRESENTATION_MODE)
     unexpected = sorted(set(args) - {"frame_ref", "python_code", "seed", "presentation_mode", "context", "_server_context"})
     if unexpected:
         return error_response(step=step, error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; pass only the declared opaque frame ref, Python source, and seed.")
@@ -1396,23 +2107,14 @@ def _execute_python_analysis(
         or validity.get("rules") != validity_rules
     ):
         return error_response(step=step, error="sandbox execution returned an invalid trusted input audit", recoverable=False, instruction="Stop; do not trust outputs without host-verified validity evidence.")
-    if not execution.get("error"):
-        output_mimes = {
-            str(mime)
-            for result in execution.get("results", [])
-            if isinstance(result, dict) and isinstance(result.get("mime"), dict)
-            for mime in result["mime"]
-        }
-        required_mime = "application/vnd.plotly.v1+json" if presentation_mode == "plotly" else "image/png"
-        if required_mime not in output_mimes:
-            requested = "Plotly figure JSON" if presentation_mode == "plotly" else "PNG"
-            return error_response(
-                step=step,
-                error=f"{requested} presentation requires an output with MIME {required_mime}; PNG-only output is not accepted by default" if presentation_mode == "plotly" else f"image presentation requires an output with MIME {required_mime}",
-                recoverable=True,
-                instruction="Revise the same Python analysis with Plotly figures emitted as *.json; do not rerun the query or silently use PNG." if presentation_mode == "plotly" else "Revise the same Python analysis to emit a valid PNG; do not rerun the query.",
-                evidence={"presentation_mode": presentation_mode, "output_mimes": sorted(output_mimes)},
-            )
+    captured_results_sha256 = _canonical_results_digest(execution.get("results", []), include_report_source=True)
+    preflight_execution, report_status, report_error = _preflight_report(
+        execution, validity, presentation_mode, step, purpose=semantic_contract.get("business_question"),
+    )
+    host_source_retained = preflight_execution is not execution and any(
+        _is_report_source_result(result) for result in preflight_execution.get("results", [])
+    )
+    execution = preflight_execution
     settings = runtime_settings() if executor is execute_opensandbox else {"image": "self-check", "runtime_class": "fake"}
     summary = output_summary(execution)
     summary["presentation_mode"] = presentation_mode
@@ -1448,13 +2150,46 @@ def _execute_python_analysis(
         "validity": validity,
         "ontology": semantic_contract.get("ontology"),
         "analysis_contract": semantic_contract.get("analysis_contract"),
+        "business_question": semantic_contract.get("business_question"),
+        "planned_objective": semantic_contract.get("planned_objective"),
         "plan_sha256": semantic_contract.get("plan_sha256"),
         "output_summary": summary,
         "parent_provenance_ref": parent_provenance_ref,
+        "captured_results_sha256": captured_results_sha256,
+        "host_report_source_sha256": (
+            hashlib.sha256(json.dumps(_result_json(next(result for result in execution.get("results", []) if _is_report_source_result(result))), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            if host_source_retained else None
+        ),
     }
     execution_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-execution", execution)
     execution_error = execution.get("error")
+    provenance["computation_status"] = "failed" if execution_error else "succeeded"
+    provenance["report_status"] = "not_attempted" if execution_error else report_status
+    summary["computation_status"] = provenance["computation_status"]
+    summary["report_status"] = provenance["report_status"]
+    if report_error is not None:
+        provenance["report_manifest_ref"] = None
+        provenance["report_error"] = report_error
+        provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
+        trusted_repair = step in _TRUSTED_REEXPORT_EXECUTORS and report_status == "rejected"
+        code_correction = step in _GENERIC_REPORT_STEPS and report_status == "rejected"
+        instruction = (
+            "Keep the successful execution and provenance; call reexport_trusted_report with the execution_ref. It may rebuild only the host report manifest without rerunning computation."
+            if trusted_repair else
+            "Keep the successful execution and provenance; do not call repair_generic_report. Reuse the same frame_ref and call execute_python_analysis again with corrected python_code; do not rerun the query."
+            if code_correction else
+            "Keep the successful execution and provenance; no report repair is authorized for this outcome. Do not rerun or fabricate a report source."
+        )
+        return error_response(
+            step=step, error=report_error, recoverable=trusted_repair or code_correction,
+            instruction=instruction,
+            evidence={"execution_ref": execution_ref, "provenance_ref": provenance_ref,
+                      **_report_recovery_evidence(frame_ref, correction=True),
+                      "correction_required": code_correction,
+                      "recovery_action": "reexport_trusted_report" if trusted_repair else "correct_python_same_frame" if code_correction else "stop"},
+        )
     report_manifest_ref = None
+    report_manifest: dict[str, Any] = {}
     if not execution_error:
         source_present = False
         for result in execution.get("results", []):
@@ -1472,11 +2207,39 @@ def _execute_python_analysis(
                     source_present = True
                     break
         if source_present:
+            manifest_validated = False
             try:
                 report_manifest = ml_report_contract.normalize_report_manifest(execution_ref=execution_ref, results=execution.get("results", []))
+                manifest_validated = True
                 report_manifest_ref = ARTIFACTS.write_json(context, output_run_id, "report-manifest", report_manifest)
+            # pi-lens-ignore: no-boolean-in-except, ast-grep:no-boolean-in-except
             except (ValueError, TypeError, KeyError, OSError) as exc:
-                return error_response(step=step, error=f"report manifest rejected: {exc}", recoverable=False, instruction="Stop; keep the successful execution receipt but do not synthesize a report from an invalid report source.", evidence={"execution_ref": execution_ref})
+                provenance["report_manifest_ref"] = None
+                provenance["report_status"] = "rejected"
+                provenance["report_error"] = str(exc)
+                provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
+                summary["report_status"] = "rejected"
+                trusted_repair = step in _TRUSTED_REEXPORT_EXECUTORS
+                deterministic_rejection = not manifest_validated
+                generic_repair = step in _GENERIC_REPORT_STEPS and not deterministic_rejection
+                instruction = (
+                    "Keep the successful execution and provenance; call reexport_trusted_report with the execution_ref. It may rebuild only the host report manifest without rerunning computation."
+                    if trusted_repair else
+                    "Keep the successful execution and provenance; do not call repair_generic_report. Reuse the same frame_ref and call execute_python_analysis again with corrected python_code; do not rerun the query."
+                    if deterministic_rejection else
+                    "Keep the successful execution and provenance; call repair_generic_report with the execution_ref only after this manifest validation succeeded; the failure may be a persistence failure."
+                    if generic_repair else
+                    "Keep the successful execution and provenance; no report repair is authorized for this outcome. Do not rerun or fabricate a report source."
+                )
+                return error_response(step=step, error=f"report manifest rejected: {exc}", recoverable=trusted_repair or deterministic_rejection or generic_repair, instruction=instruction, evidence={"execution_ref": execution_ref, "provenance_ref": provenance_ref,
+                    **_report_recovery_evidence(frame_ref, correction=deterministic_rejection),
+                    "correction_required": deterministic_rejection and not trusted_repair,
+                    "recovery_action": "reexport_trusted_report" if trusted_repair else "correct_python_same_frame" if deterministic_rejection else "repair_generic_report" if generic_repair else "stop"})
+    provenance["report_manifest_ref"] = report_manifest_ref
+    figure_errors = ml_report_contract.presentation_errors(report_manifest) if report_manifest_ref else []
+    provenance["report_status"] = "partial" if figure_errors else "accepted" if report_manifest_ref else "not_requested"
+    summary["report_status"] = provenance["report_status"]
+    summary["presentation_errors"] = figure_errors
     summary["assets"] = output_asset_summary(execution, execution_ref)
     summary["downloads"] = output_download_summary(execution, execution_ref, context)
     try:
@@ -1510,8 +2273,8 @@ def _execute_python_analysis(
         step=step,
         run_id=output_run_id,
         refs=refs,
-        instruction="Use report_manifest_ref for report synthesis when present; otherwise use the opaque execution_ref and output metadata. A Grafana Dashboard exists only after the approved built-in Grafana writer returns a URL.",
-        evidence={"validity": validity},
+        instruction="Explain the bounded results and limitations in the user's language. A requested report still needs an evidence-backed answer, not just a computation receipt. Charts are optional; use report_manifest_ref only when returned for renderable outputs, never guess a manifest from execution indexes. A Grafana Dashboard exists only after the approved writer returns its URL.",
+        evidence={"validity": validity, "presentation_errors": figure_errors},
         output_summary=summary,
         provenance={key: value for key, value in provenance.items() if key != "code_ref"},
     )
@@ -1645,6 +2408,9 @@ def list_python_analyses(args: dict[str, Any]) -> dict[str, Any]:
                 "code_sha256": provenance.get("code_sha256"),
                 "input_fields": provenance.get("input_fields", []),
                 "output_summary": provenance.get("output_summary", {}),
+                "report_manifest_ref": provenance.get("report_manifest_ref"),
+                "computation_status": provenance.get("computation_status"),
+                "report_status": provenance.get("report_status"),
                 "parent_provenance_ref": provenance.get("parent_provenance_ref"),
             })
     except (PermissionError, WorkflowContractError, OSError) as exc:
@@ -1676,6 +2442,9 @@ def inspect_python_analysis(args: dict[str, Any]) -> dict[str, Any]:
         code_sha256=provenance.get("code_sha256"),
         input_fields=provenance.get("input_fields", []),
         output_summary=provenance.get("output_summary", {}),
+        report_manifest_ref=provenance.get("report_manifest_ref"),
+        computation_status=provenance.get("computation_status"),
+        report_status=provenance.get("report_status"),
         parent_provenance_ref=provenance.get("parent_provenance_ref"),
     )
 
@@ -1787,6 +2556,8 @@ def handle_rpc(msg: dict[str, Any]):
         else:
             handlers = {
                 "profile_dataset": profile_dataset,
+                "reexport_trusted_report": reexport_trusted_report,
+                "repair_generic_report": repair_generic_report,
                 "execute_ml_contract": execute_ml_contract,
                 "get_ml_capabilities": get_ml_capabilities,
                 "reconcile_operation": reconcile_operation,
@@ -1873,19 +2644,16 @@ def self_check() -> None:
         setattr(uploaded_datasets, "UPLOAD_ROOT", Path(tmp) / "uploads")
         context = {"org_id": "1", "user_id": "self-check", "session_id": "session-self-check"}
         source_run = ARTIFACTS.create_run(context)
-        frame_ref = ARTIFACTS.write_json(
-            context,
-            source_run,
-            "grafana-frame",
-            [{"schema": {"fields": [{"name": "x"}, {"name": "heat_rate_valid"}]}, "data": {"values": [[1, 2, 3], [True, False, True]]}}],
-        )
-        ARTIFACTS.write_json(
-            context,
-            source_run,
-            "query-plan",
-            {"analysis_input_contract": {"validity_rules": [{"field": "heat_rate_valid", "accepted_values": [True], "applies_to": ["x"]}]}},
-        )
+        frame_payload = [{"schema": {"fields": [{"name": "x"}, {"name": "heat_rate_valid"}]}, "data": {"values": [[1, 2, 3], [True, False, True]]}}]
+        frame_ref = ARTIFACTS.write_json(context, source_run, "grafana-frame", frame_payload)
+        plan_payload = {
+            "business_question": "legacy trusted question",
+            "analysis_input_contract": {"validity_rules": [{"field": "heat_rate_valid", "accepted_values": [True], "applies_to": ["x"]}]},
+        }
+        plan_payload["plan_sha256"] = hashlib.sha256(json.dumps(plan_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        ARTIFACTS.write_json(context, source_run, "query-plan", plan_payload)
         observed = {}
+        png_1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
         def fake_executor(frame_bundle_json: str, code: str, seed: int) -> dict[str, Any]:
             try:
@@ -1903,7 +2671,7 @@ def self_check() -> None:
                     {"text": "mean=2", "timestamp": 1, "mime": {}, "display_name": "summary.txt"},
                     {"text": None, "timestamp": 1, "mime": {"application/json": "{\"mean\":2}"}, "display_name": "result.json"},
                     {"text": None, "timestamp": 1, "mime": {"text/csv": "x\n1\n2\n"}, "display_name": "result.csv"},
-                    {"text": None, "timestamp": 1, "mime": {"text/html": "<table></table>", "image/png": "aW1hZ2U="}, "display_name": "plot.png"},
+                    {"text": None, "timestamp": 1, "mime": {"text/html": "<table></table>", "image/png": png_1x1}, "display_name": "plot.png"},
                 ],
                 "stdout": [{"text": "done\n", "timestamp": 1}],
                 "stderr": [],
@@ -1915,10 +2683,11 @@ def self_check() -> None:
         args = {"frame_ref": frame_ref, "python_code": "display(df)", "seed": 7, "presentation_mode": "image", "_server_context": context}
         result = execute_python_analysis(args, executor=fake_executor)
         assert result["ok"] and result["output_summary"]["mime_types"] == ["application/json", "image/png", "text/csv", "text/html", "text/plain"]
-        assert result["output_summary"]["inline_results"] == [
+        assert result["output_summary"]["inline_results"][:2] == [
             {"output_index": 0, "display_name": "summary.txt", "mime_type": "text/plain", "value": "mean=2"},
             {"output_index": 1, "display_name": "result.json", "mime_type": "application/json", "value": {"mean": 2}},
         ]
+        assert any(item["display_name"] == "report-source.json" for item in result["output_summary"]["inline_results"])
         assert len(result["output_summary"]["downloads"]) == 1 and result["output_summary"]["downloads"][0]["display_name"] == "result.csv"
         download_token = result["output_summary"]["downloads"][0]["url"].rsplit("/", 1)[1]
         download, download_mime, download_name = artifact_assets.read_signed_output(download_token, secret=os.environ.get("MCP_SHARED_TOKEN", ""), artifacts=ARTIFACTS)
@@ -1933,17 +2702,132 @@ def self_check() -> None:
         assert observed["seed"] == 7 and observed["bundle"]["frame"]["data"]["values"][0] == [1, 2, 3]
         assert observed["bundle"]["validity_rules"][0]["field"] == "heat_rate_valid"
         assert "display(df)" not in json.dumps(result) and '"values"' not in json.dumps(result)
-        assert ARTIFACTS.read_json(context, result["refs"]["execution_ref"])["results"][3]["mime"]["image/png"] == "aW1hZ2U="
+        assert ARTIFACTS.read_json(context, result["refs"]["execution_ref"])["results"][3]["mime"]["image/png"] == png_1x1
         default_result = execute_python_analysis({"frame_ref": frame_ref, "python_code": "display(df)", "seed": 6, "_server_context": context}, executor=fake_executor)
         assert not default_result["ok"] and "Plotly figure JSON presentation requires" in default_result["error"]
+        assert default_result["evidence"]["computation_status"] == "succeeded" and default_result["evidence"]["report_status"] == "rejected"
+        assert ARTIFACTS.read_json(context, default_result["evidence"]["execution_ref"])["error"] is None
+        assert ARTIFACTS.read_json(context, default_result["evidence"]["provenance_ref"])["report_status"] == "rejected"
 
         def fake_plotly_executor(frame_bundle_json: str, code: str, seed: int) -> dict[str, Any]:
             execution = fake_executor(frame_bundle_json, code, seed)
-            execution["results"].append({"text": None, "timestamp": 1, "mime": {"application/vnd.plotly.v1+json": json.dumps({"data": [], "layout": {}, "config": {}})}, "display_name": "figure.json"})
+            execution["results"].append({"text": None, "timestamp": 1, "mime": {"application/vnd.plotly.v1+json": json.dumps({"data": [{"type": "scatter", "x": [1], "y": [2]}], "layout": {}, "config": {"displaylogo": False, "responsive": True}})}, "display_name": "figure.json"})
             return execution
 
         plotly_result = execute_python_analysis({"frame_ref": frame_ref, "python_code": "emit(figure, name='figure.json')", "seed": 10, "_server_context": context}, executor=fake_plotly_executor)
         assert plotly_result["ok"] and plotly_result["output_summary"]["presentation_mode"] == "plotly"
+        plotly_manifest_ref = plotly_result["refs"].get("report_manifest_ref")
+        assert isinstance(plotly_manifest_ref, str)
+        plotly_manifest = ARTIFACTS.read_json(context, plotly_manifest_ref)
+        assert plotly_manifest["execution_ref"] == plotly_result["refs"]["execution_ref"]
+        assert plotly_result["provenance"]["report_manifest_ref"] == plotly_manifest_ref
+        assert {item["artifact_id"] for item in plotly_manifest["artifacts"]} == {"plot", "figure"}
+        assert {item["render"]["mode"] for item in plotly_manifest["artifacts"]} == {"image", "plotly"}
+
+        def invalid_plotly_executor(frame_bundle_json: str, code: str, seed: int) -> dict[str, Any]:
+            execution = fake_plotly_executor(frame_bundle_json, code, seed)
+            invalid = {"data": [{"type": "scatter", "x": [1], "y": [2]}], "layout": {"xaxis": {"unsupported_axis_key": 1}}}
+            execution["results"][-1]["mime"]["application/vnd.plotly.v1+json"] = json.dumps(invalid)
+            return execution
+
+        invalid_plotly = execute_python_analysis({"frame_ref": frame_ref, "python_code": "emit(figure)", "seed": 12, "_server_context": context}, executor=invalid_plotly_executor)
+        assert not invalid_plotly["ok"] and invalid_plotly["evidence"]["correction_required"], invalid_plotly
+        assert "same frame_ref" in invalid_plotly["instruction"] and "do not call repair_generic_report" in invalid_plotly["instruction"], invalid_plotly
+        operation_root = ARTIFACTS.root / "operations"
+        operations_before_repair = sorted(path.name for path in operation_root.iterdir()) if operation_root.exists() else []
+        invalid_repair = repair_generic_report({"execution_ref": invalid_plotly["evidence"]["execution_ref"], "_server_context": context})
+        assert not invalid_repair["ok"] and "cannot accept the retained renderable" in invalid_repair["error"], invalid_repair
+        operations_after_repair = sorted(path.name for path in operation_root.iterdir()) if operation_root.exists() else []
+        assert operations_after_repair == operations_before_repair, "deterministic repair rejection reserved an operation"
+        try:
+            ml_report_contract.normalize_report_manifest(
+                execution_ref="artifact://run_without_source/sandbox-execution",
+                results=[{"display_name": "figure.json", "mime": {"application/vnd.plotly.v1+json": json.dumps({"data": [], "layout": {}, "config": {"displaylogo": False, "responsive": True}})}}],
+            )
+        except ValueError as exc:
+            if not str(exc).count("report source format is required"):
+                raise AssertionError("unexpected missing-source error")
+        else:
+            raise AssertionError("missing report source must remain invalid")
+
+        try:
+            saved_execution = ARTIFACTS.read_json(context, plotly_result["refs"]["execution_ref"])
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise AssertionError("plotly execution fixture is unavailable") from exc
+        unsafe_execution = {"error": None, "results": list(saved_execution["results"])}
+        unsafe_execution["results"].insert(0, {"display_name": "result.json", "mime": {"application/json": json.dumps({"api_token": "secret", "customer_email": "user@example.invalid", "records": [{"value": 7}]})}})
+        unsafe_source = _generic_report_source(unsafe_execution, {"input_rows": 3, "valid_rows": 2, "excluded_rows": 1})
+        assert unsafe_source and set(unsafe_source["facts"]) == {"rows", "valid_rows", "excluded_rows"}
+        for source_result in (
+            {"display_name": "report-source.json", "mime": {"application/json": "{}"}},
+            {"display_name": "REPORT-SOURCE.JSON", "mime": {"application/json": "{}"}},
+            {"display_name": "custom.json", "mime": {"application/json": json.dumps({"format": ml_report_contract.REPORT_SOURCE_FORMAT})}},
+        ):
+            try:
+                _ensure_generic_report_source({"error": None, "results": [*unsafe_execution["results"], source_result]}, {"input_rows": 3, "valid_rows": 2, "excluded_rows": 1}, "execute_python_analysis")
+            except WorkflowContractError:
+                continue
+            raise AssertionError("generic Python report source injection was accepted")
+
+        def fake_injected_report_source_executor(frame_bundle_json: str, code: str, seed: int) -> dict[str, Any]:
+            execution = fake_plotly_executor(frame_bundle_json, code, seed)
+            execution["results"].append({"display_name": "custom.json", "mime": {"application/json": json.dumps({"format": ml_report_contract.REPORT_SOURCE_FORMAT})}})
+            return execution
+
+        injected = execute_python_analysis({"frame_ref": frame_ref, "python_code": "emit(figure, name='figure.json')", "seed": 11, "_server_context": context}, executor=fake_injected_report_source_executor)
+        assert not injected["ok"] and "generic report source rejected" in injected["error"]
+        assert injected["evidence"]["computation_status"] == "succeeded" and injected["evidence"]["report_status"] == "rejected"
+        assert ARTIFACTS.read_json(context, injected["evidence"]["execution_ref"])["error"] is None
+
+        legacy_run = ARTIFACTS.create_run(context)
+        legacy_execution = ARTIFACTS.write_json(context, legacy_run, "sandbox-execution", {"results": [
+            {"text": None, "timestamp": 1, "mime": {"image/png": png_1x1}, "display_name": "legacy-chart.png"},
+            {"text": None, "timestamp": 1, "mime": {"application/json": json.dumps({"format": "ask-o11y-ml-presentation-v1", "purpose": "legacy trusted question", "conclusion": "legacy trusted evidence", "data": {"rows": 3}, "artifacts": [{"name": "legacy-chart.png"}]})}, "display_name": "ml-presentation.json"},
+        ], "error": None})
+        legacy_code = "legacy trusted code"
+        legacy_code_sha256 = hashlib.sha256(legacy_code.encode("utf-8")).hexdigest()
+        legacy_code_ref = ARTIFACTS.write_json(context, legacy_run, "sandbox-code", {"sha256": legacy_code_sha256, "source": legacy_code})
+        frame_sha256 = hashlib.sha256(json.dumps(frame_payload[0], sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+        legacy_provenance = ARTIFACTS.write_json(context, legacy_run, "sandbox-provenance", {"executor_kind": "execute_ml_contract", "trusted_ml_contract": True, "input_frame_ref": frame_ref, "input_frame_sha256": frame_sha256, "plan_sha256": plan_payload["plan_sha256"], "code_sha256": legacy_code_sha256, "code_ref": legacy_code_ref, "business_question": "legacy trusted question", "report_manifest_ref": None, "computation_status": "succeeded", "report_status": "rejected"})
+        reexported = reexport_trusted_report({"execution_ref": legacy_execution, "_server_context": context})
+        assert reexported["ok"] and reexported["refs"]["report_manifest_ref"] != legacy_execution
+        fresh_manifest = ARTIFACTS.read_json(context, reexported["refs"]["report_manifest_ref"])
+        fresh_provenance = ARTIFACTS.read_json(context, reexported["refs"]["provenance_ref"])
+        assert fresh_manifest["format"] == ml_report_contract.REPORT_MANIFEST_FORMAT and fresh_manifest["execution_ref"] == reexported["refs"]["execution_ref"]
+        assert fresh_provenance["report_manifest_ref"] == reexported["refs"]["report_manifest_ref"] and fresh_provenance["reexport_of"] == legacy_execution and fresh_provenance["source_provenance_ref"] == legacy_provenance
+        assert fresh_provenance["computation_status"] == "succeeded" and fresh_provenance["report_status"] == "accepted"
+        replayed_reexport = reexport_trusted_report({"execution_ref": legacy_execution, "_server_context": context})
+        assert replayed_reexport["refs"] == reexported["refs"], replayed_reexport
+        retained_lineage = ARTIFACTS.read_json(context, legacy_provenance)
+        for identity_key in ("code_sha256", "input_frame_sha256", "plan_sha256", "business_question"):
+            altered = dict(retained_lineage)
+            altered[identity_key] = ("0" * 64) if identity_key != "business_question" else "foreign question"
+            try:
+                _verify_trusted_lineage(context, legacy_execution, altered)
+            except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError):
+                continue
+            else:
+                raise AssertionError(f"mismatched {identity_key} lineage was accepted")
+        for missing_key in ("code_ref", "input_frame_ref"):
+            altered = dict(retained_lineage)
+            altered.pop(missing_key, None)
+            try:
+                _verify_trusted_lineage(context, legacy_execution, altered)
+            except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError):
+                continue
+            else:
+                raise AssertionError(f"missing {missing_key} lineage was accepted")
+        indeterminate_run = ARTIFACTS.create_run(context)
+        indeterminate_execution = ARTIFACTS.write_json(context, indeterminate_run, "sandbox-execution", {"results": ARTIFACTS.read_json(context, legacy_execution)["results"], "error": None})
+        indeterminate_code_ref = ARTIFACTS.write_json(context, indeterminate_run, "sandbox-code", {"sha256": legacy_code_sha256, "source": legacy_code})
+        indeterminate_provenance = ARTIFACTS.write_json(context, indeterminate_run, "sandbox-provenance", {**ARTIFACTS.read_json(context, legacy_provenance), "code_ref": indeterminate_code_ref, "computation_status": "indeterminate", "report_status": "rejected"})
+        refused_indeterminate = reexport_trusted_report({"execution_ref": indeterminate_execution, "_server_context": context})
+        assert not refused_indeterminate["ok"] and "succeeded computation" in refused_indeterminate["error"], refused_indeterminate
+        untrusted_run = ARTIFACTS.create_run(context)
+        untrusted_execution = ARTIFACTS.write_json(context, untrusted_run, "sandbox-execution", {"results": [], "error": None})
+        ARTIFACTS.write_json(context, untrusted_run, "sandbox-provenance", {"executor_kind": "execute_python_analysis", "trusted_ml_contract": False, "input_frame_ref": frame_ref, "code_ref": "artifact://untrusted/sandbox-code", "report_manifest_ref": None})
+        untrusted = reexport_trusted_report({"execution_ref": untrusted_execution, "_server_context": context})
+        assert not untrusted["ok"] and "generic Python" in untrusted["error"]
 
         source = uploaded_datasets.store_upload(context=context, session_id="session-self-check", filename="source.csv", raw=b"old_a,old_b\n1,3\n2,4\n")
         document_run = ARTIFACTS.create_run(context)
@@ -1964,11 +2848,17 @@ def self_check() -> None:
         assert not invalid_derived["ok"] and "derived frame rejected" in invalid_derived["error"]
 
         listed = list_python_analyses({"_server_context": context})
-        assert listed["ok"] and any(item["provenance_ref"] == result["refs"]["provenance_ref"] for item in listed["analyses"]), listed
+        listed_result = next(item for item in listed["analyses"] if item["provenance_ref"] == result["refs"]["provenance_ref"])
+        assert listed["ok"] and listed_result["report_manifest_ref"] == result["refs"].get("report_manifest_ref"), listed
         inspected = inspect_python_analysis({"provenance_ref": result["refs"]["provenance_ref"], "_server_context": context})
         assert inspected["ok"] and inspected["python_code"] == "display(df)" and "values" not in inspected
+        assert inspected["report_manifest_ref"] == result["refs"].get("report_manifest_ref")
         revised = revise_python_analysis({"provenance_ref": result["refs"]["provenance_ref"], "python_code": "display(df.head())", "seed": 8, "presentation_mode": "image", "_server_context": context}, executor=fake_executor)
         assert revised["ok"] and revised["step"] == "revise_python_analysis" and revised["provenance"]["parent_provenance_ref"] == result["refs"]["provenance_ref"]
+        revised_manifest_ref = revised["refs"].get("report_manifest_ref")
+        assert isinstance(revised_manifest_ref, str) and revised_manifest_ref != result["refs"].get("report_manifest_ref")
+        revised_manifest = ARTIFACTS.read_json(context, revised_manifest_ref)
+        assert revised_manifest["execution_ref"] == revised["refs"]["execution_ref"]
         foreign = execute_python_analysis({**args, "_server_context": {"org_id": "2", "user_id": "attacker", "session_id": "attacker-session"}}, executor=lambda *_: (_ for _ in ()).throw(AssertionError("must not execute")))
         assert not foreign["ok"] and "mismatch" in foreign["error"]
         oversized = execute_python_analysis({**args, "python_code": "x" * (MAX_CODE_BYTES + 1)}, executor=lambda *_: (_ for _ in ()).throw(AssertionError("must not execute")))
@@ -2004,7 +2894,7 @@ def self_check() -> None:
         assert not payload["ok"] and "unsupported tool arguments" in payload["error"]
     ARTIFACTS = original
     setattr(uploaded_datasets, "UPLOAD_ROOT", original_upload_root)
-    print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "document_derived_output_rejected", "foreign_document_rejected", "invalid_derived_frame_rejected", "bounded_inline_results", "signed_csv_download", "200_field_output_summary", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))
+    print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "document_derived_output_rejected", "foreign_document_rejected", "invalid_derived_frame_rejected", "bounded_inline_results", "signed_csv_download", "200_field_output_summary", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "host_report_manifest_bindings", "trusted_report_reexport", "fresh_revision_report_ref", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))
 
 
 def main() -> int:

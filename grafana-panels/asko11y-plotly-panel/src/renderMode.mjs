@@ -10,7 +10,9 @@ export function resolveRenderMode(options) {
   // Existing sanitized figure dashboards remain readable, never silently downgraded.
   return (!options?.renderMode || options.renderMode === "plotly") &&
     figure &&
+    !figure.error &&
     Array.isArray(figure.data) &&
+    figure.data.length > 0 &&
     figure.layout &&
     typeof figure.layout === "object"
     ? "plotly"

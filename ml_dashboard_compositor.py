@@ -64,12 +64,7 @@ def _narrative(panel: dict[str, Any], catalog: dict[str, dict[str, Any]]) -> dic
         for item in panel["evidence"]
     ]
     return {
-        "headline": panel["headline"],
-        "observation": panel["observation"],
-        "interpretation": panel["interpretation"],
-        "cross_chart_context": panel["cross_chart_context"],
-        "limitation": panel["limitation"],
-        "next_step": panel["next_step"],
+        **{key: panel[key] for key in ml_report_contract.TEXT_FIELDS if key in panel},
         "evidence": evidence,
     }
 
@@ -78,7 +73,7 @@ def _view_narratives(panel: dict[str, Any], catalog: dict[str, dict[str, Any]]) 
     output = []
     for item in panel["view_narratives"]:
         output.append({
-            **{key: item[key] for key in ("view_id", "headline", "data_observation", "visual_observation", "interpretation", "limitation", "next_step")},
+            **{key: item[key] for key in ("view_id", "visual_observation", *ml_report_contract.VIEW_TEXT_FIELDS) if key in item},
             "evidence": [
                 {
                     "fact_ref": evidence["fact_ref"],
@@ -89,34 +84,6 @@ def _view_narratives(panel: dict[str, Any], catalog: dict[str, dict[str, Any]]) 
             ],
         })
     return output
-
-
-def _narrative_html(narrative: dict[str, Any]) -> str:
-    facts = "".join(
-        f'<span style="display:inline-block;margin:4px 8px 4px 0;padding:4px 8px;border:1px solid currentColor;border-radius:4px">{html.escape(item["label"])}: <strong>{html.escape(item["display"])}</strong></span>'
-        for item in narrative["evidence"]
-    )
-    fields = (
-        ("观察", "observation"), ("解读", "interpretation"), ("跨图关系", "cross_chart_context"),
-        ("限制", "limitation"), ("下一步", "next_step"),
-    )
-    body = "".join(f'<div style="margin-top:8px"><strong>{label}：</strong>{html.escape(narrative[key])}</div>' for label, key in fields)
-    return f'<div style="padding:8px 12px"><h3>{html.escape(narrative["headline"])}</h3><div>{facts}</div>{body}</div>'
-
-
-def _view_narratives_html(view_narratives: list[dict[str, Any]]) -> str:
-    sections = []
-    for narrative in view_narratives:
-        visual = f'<div><strong>视觉：</strong>{html.escape(narrative["visual_observation"])}</div>' if narrative["visual_observation"] else ""
-        evidence = "".join(f'<span style="margin-right:8px">{html.escape(item["label"])}: <strong>{html.escape(item["display"])}</strong></span>' for item in narrative["evidence"])
-        sections.append(
-            f'<section style="margin-top:12px"><h4>{html.escape(narrative["headline"])}</h4>'
-            f'<div>{evidence}</div><div><strong>资料：</strong>{html.escape(narrative["data_observation"])}</div>{visual}'
-            f'<div><strong>解读：</strong>{html.escape(narrative["interpretation"])}</div>'
-            f'<div><strong>限制：</strong>{html.escape(narrative["limitation"])}</div>'
-            f'<div><strong>下一步：</strong>{html.escape(narrative["next_step"])}</div></section>'
-        )
-    return "".join(sections)
 
 
 def _panel_height(width: str) -> int:
@@ -197,6 +164,7 @@ def _evidence_panel(
             "options": {
                 "renderMode": "plotly",
                 "figure": plotly_placeholder,
+                **({"figureFormat": output["figure_format"]} if "figure_format" in output else {}),
                 **({"fallbackUrl": asset_placeholder} if has_png else {}),
                 "alt": panel["headline"],
                 "narrative": narrative,
@@ -231,6 +199,11 @@ def compose_dashboard(
     execution_ref: str,
     outputs: dict[str, dict[str, Any]],
     report_manifest_ref: str | None = None,
+    partial_notice: list[str] | None = None,
+    business_question: str | None = None,
+    business_question_source: str | None = None,
+    analysis_status: str | None = None,
+    analysis_gaps: list[dict[str, Any]] | None = None,
     uid: str,
     title: str,
 ) -> dict[str, Any]:
@@ -240,17 +213,39 @@ def compose_dashboard(
     if not isinstance(uid, str) or not uid or not isinstance(title, str) or not title:
         raise ValueError("dashboard uid and title are required")
     thesis_evidence = _format_evidence(validated["thesis_evidence"], catalog)
+    notice_html = ""
+    intro_height = 8
+    retained_question = business_question if business_question is not None else manifest.get("purpose")
+    if not isinstance(retained_question, str) or not retained_question.strip():
+        raise ValueError("report purpose is required for the business-question panel")
+    status_notice = partial_notice is not None or analysis_status in {"not_assessed", "incomplete"}
+    if status_notice:
+        intro_height = 12
+        if partial_notice is not None:
+            notice_html = '<div role="note"><strong>Partial report delivery</strong>'
+            messages = partial_notice
+        else:
+            notice_html = f'<div role="note"><strong>Automated evidence assessment: {html.escape(str(analysis_status))}</strong>'
+            messages = [str(gap.get("message")) for gap in (analysis_gaps or []) if isinstance(gap, dict) and isinstance(gap.get("message"), str)]
+        notice_html += "".join(f"<p>{html.escape(message)}</p>" for message in messages)
+        if analysis_status == "not_assessed":
+            notice_html += '<p>Completeness was not evaluated; this is not a finding of missing work or failure.</p>'
+        notice_html += '<p>Automated checks do not certify that the business question is fully answered.</p></div>'
+    question_html = f'<p><strong>Question:</strong> {html.escape(retained_question.strip())}</p>'
     panels: list[dict[str, Any]] = [{
         "id": 1,
         "type": "text",
         "title": validated["report_title"],
+        "askO11yBusinessQuestion": retained_question.strip(),
+        "askO11yBusinessQuestionSource": business_question_source or "retained_question_unverified",
+        **({"askO11yAnalysisStatus": analysis_status} if analysis_status is not None else {}),
         "askO11yReportThesis": validated["thesis"],
         "askO11yThesisEvidence": thesis_evidence,
-        "gridPos": {"h": 7, "w": 24, "x": 0, "y": 0},
-        "options": {"mode": "html", "content": f'<div style="padding:8px 12px"><h2>{html.escape(validated["report_title"])}</h2><p>{html.escape(validated["thesis"])}</p><div>{_evidence_html(thesis_evidence)}</div></div>'},
+        "gridPos": {"h": intro_height, "w": 24, "x": 0, "y": 0},
+        "options": {"mode": "html", "content": f'<div style="padding:8px 12px">{notice_html}<h2>{html.escape(validated["report_title"])}</h2>{question_html}<p>{html.escape(validated["thesis"])}</p><div>{_evidence_html(thesis_evidence)}</div></div>'},
     }]
     next_id = 2
-    y = 7
+    y = intro_height
     for section in validated["sections"]:
         row_panel = {
             "id": next_id, "type": "row", "title": section["title"], "collapsed": section["collapsed"],
@@ -289,6 +284,7 @@ def compose_dashboard(
         "uid": uid,
         "title": title,
         "tags": ["ask-o11y-preview", "ask-o11y-report"],
+        **({"askO11yDeliveryStatus": "partial"} if partial_notice is not None else {}),
         "timezone": "browser",
         "schemaVersion": 41,
         "version": 0,

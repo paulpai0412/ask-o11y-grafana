@@ -52,6 +52,50 @@ def _as_float(mapping: Any, key: str, default: float) -> float:
         return default
 
 
+def _bootstrap_metric_intervals(
+    actual: Any,
+    scores: Any,
+    predictions: Any,
+    *,
+    seed: int,
+    samples: int,
+) -> dict[str, list[float]]:
+    """Estimate holdout metric intervals conditional on locked predictions."""
+    if isinstance(samples, bool) or not isinstance(samples, int) or not 100 <= samples <= 10_000:
+        raise ValueError("bootstrap_samples must be between 100 and 10000")
+    y_true = np.asarray(actual)
+    probability = np.asarray(scores, dtype=float)
+    predicted = np.asarray(predictions)
+    if len(y_true) == 0 or len(y_true) != len(probability) or len(y_true) != len(predicted):
+        raise ValueError("bootstrap metric inputs must have equal non-zero lengths")
+    rng = np.random.default_rng(seed)
+    values = {"accuracy": [], "roc_auc": [], "pr_auc": []}
+    for _ in range(samples):
+        indices = rng.integers(0, len(y_true), size=len(y_true))
+        sampled_y = y_true[indices]
+        try:
+            values["accuracy"].append(float(accuracy_score(sampled_y, predicted[indices])))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("bootstrap accuracy interval could not be calculated") from exc
+        if np.unique(sampled_y).size < 2:
+            continue
+        try:
+            values["roc_auc"].append(float(roc_auc_score(sampled_y, probability[indices])))
+            values["pr_auc"].append(float(average_precision_score(sampled_y, probability[indices])))
+        except (TypeError, ValueError):
+            continue
+    minimum_valid = max(50, samples // 4)
+    if any(len(values[name]) < minimum_valid for name in ("roc_auc", "pr_auc")):
+        raise ValueError("bootstrap classification intervals have insufficient valid resamples")
+    try:
+        return {
+            name + "_interval": [float(value) for value in np.quantile(values[name], [0.025, 0.975])]
+            for name in values
+        }
+    except (TypeError, ValueError, IndexError) as exc:
+        raise ValueError("bootstrap classification intervals could not be calculated") from exc
+
+
 def _to_int(value: Any, name: str) -> int:
     try:
         return int(value)
@@ -538,12 +582,15 @@ def run_multi_model_comparison(
     minimum_recall: float | None = None,
     objective_minimum: float | None = None,
     imbalance_strategy: str | None = None,
+    bootstrap_samples: int = 1000,
 ) -> dict[str, Any]:
     """Compare on training CV only; evaluate the locked winner on holdout."""
     if not kinds or len(set(kinds)) != len(kinds) or not all(k in ("catboost", "gradient_boosting", "random_forest_shap", "logistic_regression", "xgboost") for k in kinds):
         raise ValueError("kinds must be a non-empty unique list of supported algorithm names")
     if isinstance(n_iter, bool) or not len(kinds) <= n_iter <= 40:
         raise ValueError("global trial budget must cover the candidate count and be at most 40")
+    if isinstance(bootstrap_samples, bool) or not 100 <= bootstrap_samples <= 10_000:
+        raise ValueError("bootstrap_samples must be between 100 and 10000")
     per_kind_budget = n_iter // len(kinds)
     comparison: list[dict[str, Any]] = []
     for kind in kinds:
@@ -558,6 +605,26 @@ def run_multi_model_comparison(
         comparison.append(result)
     winner = max(comparison, key=lambda row: row["cv_score"])
     best = evaluate_classification_candidate(winner, train, target, holdout, holdout_target, objective=objective, seed=seed, cv_folds=cv_folds, objective_minimum=objective_minimum, cost_matrix=cost_matrix, minimum_recall=minimum_recall)
+    selected_predictions = (np.asarray(best["calibrated_probabilities"], dtype=float) >= best["operating_threshold"]).astype(int)
+    selected_intervals = _bootstrap_metric_intervals(
+        holdout_target, best["calibrated_probabilities"], selected_predictions,
+        seed=seed, samples=bootstrap_samples,
+    )
+    best["metrics"].update(selected_intervals)
+    try:
+        negative_scores = np.zeros(len(holdout_target))
+        negative_predictions = np.zeros(len(holdout_target), dtype=int)
+        baseline_metrics: dict[str, Any] = {
+            "accuracy": float(accuracy_score(holdout_target, negative_predictions)),
+            "roc_auc": float(roc_auc_score(holdout_target, negative_scores)),
+            "pr_auc": float(average_precision_score(holdout_target, negative_scores)),
+        }
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("constant-negative baseline metrics are unavailable") from exc
+    baseline_metrics.update(_bootstrap_metric_intervals(
+        holdout_target, negative_scores, negative_predictions,
+        seed=seed + 1, samples=bootstrap_samples,
+    ))
     return {
         "comparison": [{"kind": row["kind"], "cv_score": row["cv_score"], "best_params": row["search"].best_params_, "search_trials": row["n_iter"]} for row in comparison],
         "best_kind": best["kind"],
@@ -568,9 +635,21 @@ def run_multi_model_comparison(
         "fit_counts": sum_fit_counts([row["fit_counts"] if row is not winner else best["fit_counts"] for row in comparison]),
         "cv_receipts": best["cv_receipts"],
         "baseline_kind": "constant_negative_no_fit",
+        "baseline_metrics": baseline_metrics,
         "execution_mode": "sequential",
         "eligible_kinds": [row["kind"] for row in comparison],
         "per_kind_budget": per_kind_budget,
         "objective": objective,
+        "uncertainty": {
+            "method": "nonparametric_bootstrap_fixed_holdout_predictions",
+            "confidence": 0.95,
+            "samples": bootstrap_samples,
+            "limitations": {
+                "model_selection": "Conditions on the model selected by training CV; it does not include model-selection uncertainty.",
+                "calibration": "Conditions on the fitted calibration and operating threshold; it does not refit either inside each resample.",
+                "holdout": "Resamples the locked holdout rows and does not turn the interval into a causal or future-performance guarantee.",
+                "multiple_comparisons": "Candidate scores are selected by training CV; no inferential p-value or multiplicity claim is made.",
+            },
+        },
         "seed": seed,
     }

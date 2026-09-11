@@ -88,6 +88,8 @@ def main() -> int:
             outputs=outputs, uid=f"fixture-{index}", title=f"Fixture {index}",
         )
         assert dashboard["panels"][0].get("askO11yReportThesis") == report["thesis"], dashboard["panels"][0]
+        assert dashboard["panels"][0].get("askO11yBusinessQuestion") == manifest["purpose"], dashboard["panels"][0]
+        assert dashboard["panels"][0].get("askO11yBusinessQuestionSource") == "retained_question_unverified", dashboard["panels"][0]
         rows = [item for item in dashboard["panels"] if item.get("type") == "row"]
         if [item["askO11ySectionId"] for item in rows] != [section["section_id"] for section in report["sections"]]:
             raise AssertionError("compositor changed the LLM-authored section order")

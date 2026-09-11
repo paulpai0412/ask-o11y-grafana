@@ -27,7 +27,7 @@ def load_bridge():
 
 
 def fixture(execution_ref: str) -> dict:
-    manifest = {"format": "fixture", "metrics": {"signal": 0.42}, "artifacts": [{"name": "chart.png", "caption": "x", "alt_text": "x"}]}
+    manifest = {"format": "fixture", "purpose": "fixture question", "metrics": {"signal": 0.42}, "artifacts": [{"name": "chart.png", "caption": "x", "alt_text": "x"}]}
     synthesis = {
         "format": "ask-o11y-report-synthesis-v1", "report_title": "动态报告", "thesis": "证据支持当前解释，行动前仍需验证。",
         "thesis_evidence": [{"fact_ref": "metrics.signal", "format": "percent_1"}],
@@ -57,14 +57,16 @@ def main() -> int:
             {"mime": {"application/json": json.dumps({"data": [{"type": "bar", "x": ["a"], "y": [1]}], "layout": {}})}, "display_name": "ml-plotly-chart.json"},
         ], "error": None})
         value = fixture(execution_ref)
-        result = bridge.resolve_dashboard_refs({"dashboard": value, "_server_context": context})
+        dashboard_run = bridge.ARTIFACTS.create_run(context)
+        dashboard_ref = bridge.ARTIFACTS.write_json(context, dashboard_run, "dashboard", value)
+        result = bridge.resolve_dashboard_refs({"dashboard": {"$dashboard_ref": dashboard_ref}, "_server_context": context})
         assert result["ok"], result
         assert result["evidence"]["resolved_assets"] == 1 and result["evidence"]["resolved_plotly"] == 1, result
 
         bad = copy.deepcopy(value)
         next(item for item in bad["panels"] if item.get("askO11yArtifactId")).pop("askO11yNarrative")
         denied = bridge.resolve_dashboard_refs({"dashboard": bad, "_server_context": context})
-        assert not denied["ok"], denied
+        assert not denied["ok"] and "opaque composed" in denied["error"], denied
 
     print("ok: generic report dashboard bridge write-gate")
     return 0

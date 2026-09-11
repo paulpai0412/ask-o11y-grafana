@@ -118,8 +118,10 @@ def main() -> int:
     if len(png_outputs) < 3 or not manifest["profile"].get("temporal_fields"):
         raise RuntimeError("profile did not render the expected bounded real-data views")
     try:
-        manifest_output_index = next(index for index, result in enumerate(execution["results"]) if result.get("display_name") == "data-profile.json")
-        report = mcp(8773, "prepare_ml_report", {"execution_ref": execution_ref, "manifest_output_index": manifest_output_index}, headers)
+        report_manifest_ref = profiled["refs"].get("report_manifest_ref")
+        if not isinstance(report_manifest_ref, str):
+            raise RuntimeError("profile execution did not return a canonical report_manifest_ref")
+        report = mcp(8773, "prepare_ml_report", {"report_manifest_ref": report_manifest_ref}, headers)
         artifact_ids = [item["artifact_id"] for item in report["report_context"]["artifacts"]]
         inspected_report = mcp(8773, "inspect_report_artifacts", {"report_context_ref": report["refs"]["report_context_ref"], "artifact_ids": artifact_ids, "mode": "vision"}, headers)
     except (RuntimeError, StopIteration, KeyError, TypeError, ValueError) as exc:

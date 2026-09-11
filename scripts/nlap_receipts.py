@@ -117,7 +117,7 @@ def verify_recovery(evidence: dict[str, Any]) -> dict[str, Any]:
     if "ml_execution" not in runs:
         raise ValueError("recovery must retain the originating ML run receipt")
     ml_calls = tool_calls(runs["ml_execution"])
-    execution_refs = set()
+    report_manifest_refs = set()
     for call in ml_calls:
         result = call["result"]
         if call["name"] != "sandbox-analysis_execute_ml_contract" or call["error"] or not isinstance(result, dict) or not result.get("ok"):
@@ -125,13 +125,13 @@ def verify_recovery(evidence: dict[str, Any]) -> dict[str, Any]:
         provenance = result.get("provenance") or {}
         if not isinstance(provenance.get("trusted_ml_contract"), bool) or not provenance["trusted_ml_contract"] or (provenance.get("analysis_contract") or {}).get("dataset_id") != evidence["dataset_id"]:
             raise ValueError("ML receipt does not bind the declared uploaded dataset")
-        execution_ref = (result.get("refs") or {}).get("execution_ref")
-        if isinstance(execution_ref, str):
-            execution_refs.add(execution_ref)
-    if not execution_refs:
-        raise ValueError("missing successful originating ML execution receipt")
+        report_manifest_ref = (result.get("refs") or {}).get("report_manifest_ref")
+        if isinstance(report_manifest_ref, str):
+            report_manifest_refs.add(report_manifest_ref)
+    if not report_manifest_refs:
+        raise ValueError("missing successful originating ML report_manifest_ref")
     calls = tool_calls(runs["recovery"])
-    report_contexts = {(call["result"].get("refs") or {}).get("report_context_ref") for call in calls if call["name"] == "artifact-bridge_prepare_ml_report" and not call["error"] and isinstance(call["result"], dict) and call["result"].get("ok") and call["args"].get("execution_ref") in execution_refs}
+    report_contexts = {(call["result"].get("refs") or {}).get("report_context_ref") for call in calls if call["name"] == "artifact-bridge_prepare_ml_report" and not call["error"] and isinstance(call["result"], dict) and call["result"].get("ok") and call["args"].get("report_manifest_ref") in report_manifest_refs}
     if any(call["name"] in {"grafana-query_execute_planned_query", "sandbox-analysis_profile_dataset", "sandbox-analysis_execute_ml_contract", "sandbox-analysis_execute_python_analysis"} for call in calls):
         raise ValueError("recovery reran successful query or analysis")
     failed = [call for call in calls if call["error"]]

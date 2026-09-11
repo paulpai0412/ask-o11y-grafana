@@ -13,7 +13,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from ontology_contract import optimization_direction
+from ontology_contract import normalize_missing_target_split_policy, optimization_direction
 
 ROOT = Path(__file__).resolve().parent
 MISSING_TOKENS = {"", "?", "na", "n/a", "null", "none"}
@@ -140,6 +140,11 @@ def annotate_upload(upload_dir: Path, dataset_id: str, org_id: str, user_id: str
 
 def _validate_regression_contract(hints: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
     codes: list[str] = []
+    try:
+        missing_value_policy = normalize_missing_target_split_policy(contract.get("missing_value_policy"), allow_drop=True)
+    except ValueError:
+        codes.append("ANALYSIS_CONTRACT_INVALID")
+        missing_value_policy = normalize_missing_target_split_policy(None)
     fields = {field["physical_name"]: field for field in hints.get("fields", [])}
     target_name = contract.get("target")
     target = fields.get(target_name)
@@ -292,6 +297,7 @@ def _validate_regression_contract(hints: dict[str, Any], contract: dict[str, Any
         "population_filter": population_filter,
         "feature_set_count": feature_set_count,
         "feature_set_ids": feature_set_ids,
+        "missing_value_policy": missing_value_policy,
         "snapshot": {"snapshot_id": f"candidate:{hints.get('dataset_id')}", "status": "observed"},
     }
 
@@ -303,6 +309,11 @@ def validate_analysis_contract(hints: dict[str, Any], contract: dict[str, Any]) 
     codes: list[str] = []
     fields = {field["physical_name"]: field for field in hints.get("fields", [])}
     policy = hints.get("quality_policy") or {}
+    try:
+        missing_value_policy = normalize_missing_target_split_policy(contract.get("missing_value_policy"), allow_drop=False)
+    except ValueError:
+        codes.append("ANALYSIS_CONTRACT_INVALID")
+        missing_value_policy = normalize_missing_target_split_policy(None)
     target_name = contract.get("target")
     target = fields.get(target_name)
     if target is None or target.get("analysis_role") in {"sensitive", "leakage_risk", "constant"}:
@@ -349,6 +360,7 @@ def validate_analysis_contract(hints: dict[str, Any], contract: dict[str, Any]) 
         "included_fields": included,
         "excluded_fields": excluded,
         "limitations": limitations,
+        "missing_value_policy": missing_value_policy,
         "snapshot": {"snapshot_id": f"candidate:{hints.get('dataset_id')}", "status": "observed"},
     }
 

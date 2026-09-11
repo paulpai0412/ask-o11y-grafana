@@ -230,9 +230,9 @@ def profile_columns(
         declared_role = str((item or {}).get("analysis_role") or "unknown")
         numbers = [_number(value) for value in present]
         temporal_declared = declared_kind in {"temporal", "date", "datetime"} or declared_type.casefold() in {"date", "datetime", "time", "timestamp"}
-        is_numeric = bool(present) and len(numbers) == len(present) and not temporal_declared
+        is_numeric = bool(present) and all(value is not None for value in numbers) and not temporal_declared
         dates = [_datetime(value) for value in present]
-        is_temporal = temporal_declared or (bool(present) and len(dates) == len(present) and not is_numeric)
+        is_temporal = temporal_declared or (bool(present) and all(value is not None for value in dates) and not is_numeric)
         semantic_kind = declared_kind or ("temporal" if is_temporal else "measurement" if is_numeric else "categorical")
         field: dict[str, Any] = {
             "name": name,

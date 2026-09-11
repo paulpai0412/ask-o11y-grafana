@@ -1,0 +1,67 @@
+diff --git a/pkg/plugin/prompt_defaults.go b/pkg/plugin/prompt_defaults.go
+--- a/pkg/plugin/prompt_defaults.go
++++ b/pkg/plugin/prompt_defaults.go
+@@ -104,7 +104,7 @@
+ 
+ Before analyzing an unfamiliar upload, ERP/WFERP dataset, or numeric table, use the data-understanding skill and the available inspect/schema tools. Keep dataset IDs, physical fields, date semantics, grain, relations, and opaque refs dynamic from tool evidence. Show an Analysis Preview and wait for confirmation before query or sandbox execution. Use profile_dataset when full-data quality or distribution facts are needed; reuse an existing valid profile. It is evidence, not a mandatory terminal answer or method selector. Choose descriptive, diagnostic, statistical, or predictive analysis only when it serves the user's decision question, and propose any necessary contract revision for confirmation. Do not require the user to name a method, and do not invoke ML merely because columns are numeric. Profile charts are visual-only aggregations, never a derived dataset or training input. Use all approved rows for modeling and explanations; never sample, truncate, or create derived datasets. Report resource limits explicitly. Model and feature-set selection use training CV only, sharing one global search budget; lock the winner before holdout evaluation. MAE direction is not a business target direction; pure prediction does not require optimization. An uploaded ontology remains inferred/observed unless an approved snapshot says otherwise.
+ 
+-When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. When the currently agreed work includes a Dashboard report from completed profile/analysis results, use prepare_ml_report, inspect_report_artifacts, and compose_ml_dashboard generically: inspect all bounded facts and artifact/view evidence, then synthesize once with evidence-bound per-view narratives before the sole approved Grafana writer.
++When a data or report tool fails, read its exact error, schema, refs, and current evidence; repair only from that information. Do not guess fields or IDs, fabricate data, use a mock/fixture/fallback, or run a fixed retry loop. When the currently agreed work includes a Dashboard report from completed profile/analysis results, use prepare_ml_report, inspect_report_artifacts, and compose_ml_dashboard generically: inspect all bounded facts and artifact/view evidence, then synthesize one evidence-bound report before the sole approved Grafana writer. Each panel needs a plain-language observation, interpretation and limitation; add per-view details only where useful, not a repeated template.
+ 
+ The compose_ml_dashboard synthesis must contain exactly format, report_title, thesis, thesis_evidence, and sections; pass uid and title as separate tool arguments, never as legacy top-level synthesis fields.
+ 
+diff --git a/pkg/agent/analyst_skills_test.go b/pkg/agent/analyst_skills_test.go
+--- a/pkg/agent/analyst_skills_test.go
++++ b/pkg/agent/analyst_skills_test.go
+@@ -16,7 +16,7 @@
+ 			"Keep facts, uncertainty and limitations unchanged across audiences",
+ 			"indeterminate compute/write outcomes", "Dummy baseline gate",
+ 			"mode=spec", "visual_observation=null", "thesis_evidence",
+-			"refs.dashboard_ref", "independent per-view narratives",
++			"refs.dashboard_ref", "per-view details only when useful",
+ 		},
+ 		"ml-method-selection": {
+ 			"advisory knowledge", "Do not ask the user to choose algorithms",
+@@ -28,7 +28,7 @@
+ 			"calibrated_probabilities", "CatBoost", "受控 challenger",
+ 			"pre-specified confirmatory result", "mode=spec", "visual_observation=null",
+ 			"Keep facts, uncertainty and limitations unchanged across audiences",
+-			"refs.dashboard_ref", "thesis_evidence", "independent per-view narratives",
++			"refs.dashboard_ref", "thesis_evidence", "optional when useful", "does not reduce inspection or fact coverage",
+ 		},
+ 	}
+ 	found := 0
+@@ -52,6 +52,7 @@
+ 				}
+ 			}
+ 			for _, forbidden := range []string{
++				"independent per-view narratives", "every selected view needs its own",
+ 				"Only after the user explicitly asks", "一般無時間欄的二元分類使用 stratified holdout",
+ 				"一律 `TimeSeriesSplit`", "處理順序：", "小樣本（n<1000）",
+ 				"預設往高 recall 偏移", "PSI<0.1", "Cpk≥1.33",
+diff --git a/pkg/agent/skills/data-understanding/SKILL.md b/pkg/agent/skills/data-understanding/SKILL.md
+--- a/pkg/agent/skills/data-understanding/SKILL.md
++++ b/pkg/agent/skills/data-understanding/SKILL.md
+@@ -52,8 +52,8 @@
+ 
+ ## Dashboard/report safety
+ 
+-A dashboard presents completed evidence; it is not the analysis objective unless requested. Preview writes require explicit write intent and publication a separate confirmation. For a requested profile/analysis report, use `prepare_ml_report`, `inspect_report_artifacts`, and `compose_ml_dashboard` under their current schemas: inspect all bounded facts and artifact/view specs, then create one cross-artifact synthesis with independent per-view narratives. The current host is text-only: use `mode=spec` and `visual_observation=null`, never claim visual inspection. Do not author asset URLs, raw figure data, datasource targets or scripts.
++A dashboard presents completed evidence; it is not the analysis objective unless requested. Preview writes require explicit write intent and publication a separate confirmation. For a requested profile/analysis report, use `prepare_ml_report`, `inspect_report_artifacts`, and `compose_ml_dashboard` under their current schemas: inspect all bounded facts and artifact/view specs, then create one cross-artifact synthesis, adding per-view details only when useful. The current host is text-only: use `mode=spec` and `visual_observation=null`, never claim visual inspection. Do not author asset URLs, raw figure data, datasource targets or scripts.
+ 
+-Choose sections, ordering, titles, collapsed state and relevant views from the question and evidence, not a fixed report template. Every numeric claim must reference a deterministic fact; every selected view needs its own data observation, visual observation (null for spec-only), interpretation, limitation, next step and evidence. The compositor/validator is authoritative: repair the exact rejected fields without rerunning completed analysis. Pass the returned opaque `refs.dashboard_ref` to the sole writer as `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` rather than copying dashboard JSON.
++Choose sections, ordering, titles, collapsed state and relevant views from the question and evidence, not a fixed report template. Every numeric claim must reference a deterministic fact. Each panel needs a plain-language observation, interpretation and limitation with evidence; per-view details, cross-chart context and next steps are optional, not repetitive required fields. Spec-only visual observations remain null, and all required evidence must still be inspected. The compositor/validator is authoritative: repair the exact rejected fields without rerunning completed analysis. Pass the returned opaque `refs.dashboard_ref` to the sole writer as `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` rather than copying dashboard JSON.
+ 
+ The `synthesis` object must contain exactly `format`, `report_title`, `thesis`, `thesis_evidence`, and `sections`; never include legacy top-level `purpose`, `title`, or `uid` inside it. Pass the new unique `uid` and dashboard `title` as separate `compose_ml_dashboard` arguments. Follow the current section schema rather than inventing report fields for audience metadata.
+diff --git a/pkg/agent/skills/ml-method-selection/SKILL.md b/pkg/agent/skills/ml-method-selection/SKILL.md
+--- a/pkg/agent/skills/ml-method-selection/SKILL.md
++++ b/pkg/agent/skills/ml-method-selection/SKILL.md
+@@ -72,7 +72,7 @@
+ - First use the host-owned `report_manifest_ref` returned by Sandbox; if a qualifying pre-manifest trusted profile/ML execution is returned by an older service, call `sandbox-analysis_reexport_trusted_report` once to obtain a fresh ref, then call `prepare_ml_report(report_manifest_ref)`. Never choose an execution output index. `inspect_report_artifacts` must cover all report artifacts in bounded batches, retaining each `inspection_ref`; selected views must be inspected. Current Ask O11y transport is text-only: use `mode=spec`, `visual_observation=null`, and never claim visual inspection. Browser rendering is a separate check.
+ - After inspection, create 一次整份报告 synthesis with a cross-artifact thesis and `thesis_evidence`, not disconnected captions. Dynamically choose sections, relevant `view_ids`, order, titles, collapsed technical detail and optional `narrative_blocks`.
+ - `ask-o11y-report-synthesis-v1` has exactly these top-level keys: `format`, `report_title`, `thesis`, `thesis_evidence`, `sections`. The dashboard `uid` and `title` are separate compose arguments, never legacy synthesis fields such as `purpose`.
+-- Each selected panel/view follows the live schema: `artifact_id`, `view_ids`, `view_narratives`, `headline`, `data_observation`, `visual_observation`, `interpretation`, `limitation`, `next_step`, `evidence`. Provide independent per-view narratives in the whole-report context. Spec-only visual observations are null; do not add audience fields to the schema.
++- Follow the live synthesis schema: explain each panel's observation, interpretation and limitation with evidence. Per-view narratives, cross-chart context and next steps are optional when useful; do not repeat a panel explanation for every view. Spec-only visual observations remain null; optional prose does not reduce inspection or fact coverage. Do not add audience fields to the schema.
+ - Numeric claims use deterministic `evidence: [{fact_ref, format}]`, not invented narrative numbers. Facts are authoritative; do not invent findings from graphics. If provided, a normalized operational summary may be explained using a business-appropriate denominator, never an automatic per-thousand template.
+ - `compose_ml_dashboard(report_context_ref, inspection_refs, synthesis, ...)` validates evidence and returns opaque `refs.dashboard_ref`. Pass `{"dashboard": {"$dashboard_ref": "<refs.dashboard_ref>"}}` to the sole approved Grafana writer; do not copy full JSON or author asset URLs, raw Plotly data, datasource targets or scripts. Repair exact synthesis validation errors without rerunning completed analysis.
+ - Plotly is the default analysis presentation: when charts or a dashboard are requested, emit sanitized Plotly figure artifacts and use `asko11y-plotly-panel` in `plotly` mode. Use `image` mode only for an explicit static-PNG request or an explicit `presentation_mode=image` tool argument. Text panels are narrative-only, never HTML/CSS/Markdown image workarounds. Invalid figures are errors, not silent fallbacks. Deterministic presentation supplies facts/artifacts, not the final story; fixture-only builders never belong in production.

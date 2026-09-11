@@ -31,7 +31,7 @@ def report(module):
         objective={"target": "churn", "task_kind": "binary_classification", "primary_metric": "pr_auc", "positive_class": "1", "threshold": 0.5, "threshold_cost_approved": False},
         data={"rows": 12, "features": 2, "train_rows": 8, "holdout_rows": 4, "split_kind": "stratified_holdout", "excluded_fields": []},
         process={"model_family": "xgboost", "search_budget": 2, "completed_trials": 2, "cv_folds": 2, "preprocessing_fit_scope": "training_only", "best_params": {}},
-        baseline_metrics={"accuracy": 0.5}, selected_metrics={"accuracy": 0.75},
+        baseline_metrics={"accuracy": 0.5, "pr_auc": 0.45, "roc_auc": 0.55}, selected_metrics={"accuracy": 0.75, "pr_auc": 0.7, "roc_auc": 0.8},
         guards={"generalization_gap": 0.01, "importance_stability": 0.8, "max_psi": 0.02, "verdict": "accepted"},
         trials=[],
         features=[

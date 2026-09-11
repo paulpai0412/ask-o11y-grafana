@@ -49,6 +49,7 @@ def main() -> int:
         }
         plan = {
             "dataset_id": dataset_id, "datasource_uid": "csv-poc", "upload_session_id": context["session_id"],
+            "business_question": "Which observed factors are associated with income classification?", "provenance": {"business_question": "Which observed factors are associated with income classification?"},
             "analysis_input_contract": {"required_fields": ["age", "income"], "optional_fields": [], "validity_rules": [], "minimum_rows": 2, "maximum_rows": 100000, "maximum_fields": 200, "maximum_response_bytes": 52428800, "execution_template": "ask_o11y_gradient_boosting_v1", "preprocessing_fit_scope": "training_only", "autoresearch": {"objective": "accuracy", "search_budget": 2, "max_search_budget": 40}},
             "ontology": {"snapshot_id": f"candidate:{dataset_id}", "sha256": uploaded["source_sha256"], "status": "observed"},
             "analysis_contract": analysis_contract,
@@ -64,9 +65,10 @@ def main() -> int:
 
         result = sandbox.execute_ml_contract({"frame_ref": frame_ref, "contract_ref": contract_ref, "seed": 42, "_server_context": context}, executor=fake_executor)
         assert result["ok"], result
+        assert result["provenance"]["business_question"] == "Which observed factors are associated with income classification?", result
         code = captured["code"]
         ast.parse(code)  # template must be syntactically valid Python
-        for needle in ("run_multi_model_comparison", "build_manifest", "render_assets", "emit(manifest", "'accuracy'", "'>50K'", "BUDGET = 2", "n_iter=BUDGET", "COST_MATRIX = {'false_negative': 3.0, 'false_positive': 1.0}", "MIN_RECALL = 0.7", "operating_scenarios", "render_shap_summary", "render_model_comparison", "shap.TreeExplainer"):
+        for needle in ("run_multi_model_comparison", "build_manifest", "render_assets", "emit(manifest", "'accuracy'", "'>50K'", "BUDGET = 2", "n_iter=BUDGET", "COST_MATRIX = {'false_negative': 3.0, 'false_positive': 1.0}", "MIN_RECALL = 0.7", "PURPOSE = 'Which observed factors are associated with income classification?'", "operating_scenarios", "render_shap_summary", "render_model_comparison", "shap.TreeExplainer"):
             assert needle in code, f"template missing {needle}"
         assert "plt.style.use" not in code
         assert ".sample(" not in code and "recommend_spec_values" not in code

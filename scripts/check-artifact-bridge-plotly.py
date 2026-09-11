@@ -64,6 +64,11 @@ def main() -> int:
             "panels": [panel],
         }, "_server_context": context})
 
+    def resolve_opaque(panel: dict):
+        run = store.create_run(context)
+        dashboard_ref = store.write_json(context, run, "dashboard", {"uid": "opaque-report", "title": "Opaque report", "panels": [panel]})
+        return bridge.resolve_dashboard_refs({"dashboard": {"$dashboard_ref": dashboard_ref}, "_server_context": context})
+
     import copy
 
     class IntendedRed(Exception):
@@ -111,6 +116,12 @@ def main() -> int:
         assert str(options["fallbackUrl"]).startswith("http"), options["fallbackUrl"]
         assert "askO11yPlotlyBindings" not in resolved_panel and "askO11yAssetBindings" not in resolved_panel
 
+    def manual_report_dashboard_case() -> None:
+        result = bridge.resolve_dashboard_refs({"dashboard": {"uid": "manual-report", "tags": ["ask-o11y-report"], "panels": []}, "_server_context": context})
+        assert not result["ok"] and "opaque composed dashboard ref" in result["error"], result
+        binding = bridge.resolve_dashboard_refs({"dashboard": {"uid": "manual-binding", "panels": [{"type": bridge.ml_plotly_contract.PLOTLY_PLUGIN_ID, "options": {"renderMode": "image", "fallbackUrl": "$asset_url_cost"}, "askO11yAssetBindings": [{"placeholder": "$asset_url_cost", "$report_manifest_ref": report_manifest_ref, "artifact_id": "cost"}]}]}, "_server_context": context})
+        assert not binding["ok"] and "opaque composed dashboard ref" in binding["error"], binding
+
     def wrong_plugin_case() -> None:
         panel = {
             "type": bridge.ml_plotly_contract.PLOTLY_PLUGIN_ID,
@@ -127,7 +138,7 @@ def main() -> int:
             "askO11yPlotlyBindings": [{"placeholder": "$plotly_figure_cost", "$execution_ref": execution_ref, "output_index": 1, "plugin_id": bridge.ml_plotly_contract.PLOTLY_PLUGIN_ID}],
             "askO11yAssetBindings": [{"placeholder": "$asset_url_cost_fallback", "$execution_ref": execution_ref, "output_index": 0}],
         }
-        expect_reject(lambda: resolve(panel), "script")
+        expect_reject(lambda: resolve(panel), "executable handlers")
 
     def literal_figure_case() -> None:
         panel = {
@@ -191,7 +202,7 @@ def main() -> int:
         }
         expect_reject(lambda: resolve(legacy_image), "renderMode")
 
-    clean_figure = bridge.ml_plotly_contract.sanitize_figure(figure)
+    clean_figure = bridge.ml_plotly_contract.sanitize_figure(figure, legacy=True)
     figure_digest = hashlib.sha256(json.dumps(clean_figure, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
     png_digest = hashlib.sha256(base64.b64decode(PNG_1X1)).hexdigest()
 
@@ -201,6 +212,9 @@ def main() -> int:
         manifest_copy = copy.deepcopy(manifest)
         manifest_copy["execution_ref"] = execution
         report_ref = store.write_json(context, report_run, "report-manifest", manifest_copy)
+        store.write_json(context, report_run, "sandbox-provenance", {
+            "executor_kind": "profile_dataset", "trusted_ml_contract": False, "report_manifest_ref": report_ref,
+        })
         return execution, report_ref
 
     source = {
@@ -257,7 +271,7 @@ def main() -> int:
     }
 
     def figure_only_report_binding_case() -> None:
-        resolved = resolve(copy.deepcopy(figure_only_panel))
+        resolved = resolve_opaque(copy.deepcopy(figure_only_panel))
         expected_success_or_red(resolved, ("plotly binding requires only", "fallback"))
         options = resolved["dashboard"]["panels"][0]["options"]
         assert options["renderMode"] == "plotly" and isinstance(options["figure"], dict), resolved
@@ -267,7 +281,7 @@ def main() -> int:
         paired = copy.deepcopy(figure_only_panel)
         paired["options"]["fallbackUrl"] = "$asset_url_cost"
         paired["askO11yAssetBindings"] = [{"placeholder": "$asset_url_cost", "$report_manifest_ref": report_manifest_ref, "artifact_id": "cost"}]
-        resolved = resolve(paired)
+        resolved = resolve_opaque(paired)
         assert resolved["ok"], resolved
         options = resolved["dashboard"]["panels"][0]["options"]
         assert str(options["fallbackUrl"]).startswith("http"), resolved
@@ -288,7 +302,7 @@ def main() -> int:
     def invalid_report_figure_case() -> None:
         bad_panel = copy.deepcopy(figure_only_panel)
         bad_panel["askO11yPlotlyBindings"][0]["$report_manifest_ref"] = bad_report_ref
-        resolved = resolve(bad_panel)
+        resolved = resolve_opaque(bad_panel)
         if isinstance(resolved, dict) and resolved.get("ok"):
             raise AssertionError("invalid Plotly report figure was accepted")
         error = str(resolved.get("error") if isinstance(resolved, dict) else resolved).casefold()
@@ -311,9 +325,26 @@ def main() -> int:
             "options": {"renderMode": "image", "fallbackUrl": "$asset_url_cost", "alt": "門檻成本圖", "caption": "靜態證據圖。"},
             "askO11yAssetBindings": [{"placeholder": "$asset_url_cost", "$report_manifest_ref": image_report_ref, "artifact_id": "cost"}],
         }
-        resolved = resolve(image_panel)
+        resolved = resolve_opaque(image_panel)
         expected_success_or_red(resolved, ("asset binding requires only", "report manifest"))
         assert resolved["dashboard"]["panels"][0]["options"]["fallbackUrl"].startswith("http"), resolved
+
+    def legacy_generic_manifest_bypass_case() -> None:
+        generic_run = store.create_run(context)
+        generic_results = [
+            {"display_name": "analysis.png", "mime": {"image/png": PNG_1X1}},
+            {"display_name": "analysis.json", "mime": {"application/json": json.dumps({
+                "format": "ask-o11y-report-source-v1",
+                "facts": {"secret": {"kind": "text", "value": "should-not-reach-report"}},
+                "artifacts": [{"name": "analysis.png"}],
+            })}},
+        ]
+        generic_ref = store.write_json(context, generic_run, "sandbox-execution", {"results": generic_results, "error": None})
+        store.write_json(context, generic_run, "sandbox-provenance", {"executor_kind": "execute_python_analysis", "report_manifest_ref": None})
+        prepared = bridge.prepare_ml_report({"execution_ref": generic_ref, "manifest_output_index": 1, "_server_context": context})
+        assert isinstance(prepared, dict) and not prepared.get("ok"), prepared
+        assert "report_manifest_ref" in str(prepared.get("error") or "").casefold(), prepared
+        assert "report_context_ref" not in (prepared.get("refs") or {}), prepared
 
     def ordinary_summary_wrong_index_case() -> None:
         ordinary_summary = {"result_count": 6, "summary": "ordinary execution output", "mime_types": ["image/png"]}
@@ -346,6 +377,7 @@ def main() -> int:
 
     for name, case in (
         ("plotly-with-fallback", plotly_with_fallback_case),
+        ("manual-report-dashboard-rejects", manual_report_dashboard_case),
         ("wrong-plugin-rejects", wrong_plugin_case),
         ("script-rejects", script_rejection_case),
         ("literal-figure-rejects", literal_figure_case),

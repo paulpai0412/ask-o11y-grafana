@@ -1,0 +1,68 @@
+--- a/packages/grafana-llm-app/pkg/plugin/openai_provider.go
++++ b/packages/grafana-llm-app/pkg/plugin/openai_provider.go
+@@ -21,7 +21,7 @@
+ 
+ func NewOpenAIProvider(settings OpenAISettings, models *ModelSettings) (LLMProvider, error) {
+ 	client := &http.Client{
+-		Timeout: 2 * time.Minute,
++		Timeout: 10 * time.Minute,
+ 	}
+ 	cfg := openai.DefaultConfig(settings.apiKey)
+ 
+--- /dev/null
++++ b/packages/grafana-llm-app/pkg/plugin/openai_timeout_regression_test.go
+@@ -0,0 +1,54 @@
++package plugin
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"github.com/sashabaranov/go-openai"
++)
++
++// Exercise the real provider constructor and SSE reader past the old 120s cap.
++// This uses a local fake SSE server, no model/provider or private data.
++func TestOpenAIStreamSurvivesTwoMinutes(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "text/event-stream")
++		fmt.Fprint(w, ": waiting for a long response\n\n")
++		w.(http.Flusher).Flush()
++		select {
++		case <-r.Context().Done():
++			return
++		case <-time.After(125 * time.Second):
++		}
++		fmt.Fprint(w, "data: {\"id\":\"local\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
++	}))
++	defer server.Close()
++	path := "/v1"
++	provider, err := NewOpenAIProvider(OpenAISettings{URL: server.URL, APIPath: &path}, &ModelSettings{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
++	defer cancel()
++	stream, err := streamOpenAIRequest(ctx, openai.ChatCompletionRequest{Model: "local", Messages: []openai.ChatCompletionMessage{{Role: "user", Content: "local timeout check"}}}, provider.(*openAI).oc)
++	if err != nil {
++		t.Fatal(err)
++	}
++	finished := false
++	for event := range stream {
++		if event.Error != nil {
++			t.Fatalf("long SSE response aborted: %v", event.Error)
++		}
++		for _, choice := range event.Choices {
++			if choice.FinishReason == "stop" {
++				finished = true
++			}
++		}
++	}
++	if !finished {
++		t.Fatal("missing terminal response")
++	}
++}
