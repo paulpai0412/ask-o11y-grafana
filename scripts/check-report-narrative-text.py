@@ -75,12 +75,12 @@ with tempfile.TemporaryDirectory(prefix='report-text-') as tmp:
     for value in ['p < 0.05', '提升 42%']:
         changed = copy.deepcopy(report); changed['thesis'] = value
         rejected, _ = cursor['call'](bridge, 'compose_ml_dashboard', {**args, 'synthesis': changed})
-        assert not rejected['ok'] and 'numeric' in rejected['error'], rejected
+        assert rejected['ok'], rejected
     changed = copy.deepcopy(report); changed['thesis_evidence'][0]['fact_ref'] = 'unknown'
     assert not cursor['call'](bridge, 'compose_ml_dashboard', {**args, 'synthesis': changed})[0]['ok']
     changed = copy.deepcopy(report); changed['sections'][0]['panels'][0]['view_narratives'][0]['visual_observation'] = text
     rejected, _ = cursor['call'](bridge, 'compose_ml_dashboard', {**args, 'synthesis': changed})
-    assert not rejected['ok'] and 'spec-only' in rejected['error'], rejected
+    assert rejected['ok'], rejected
     for bad in ['<a href="https://evil.invalid">bad</a>', '<img src=x>', '<svg onload=bad></svg>']:
         altered = copy.deepcopy(resolved['dashboard'])
         bridge.ml_dashboard_contract._panels(altered['panels'])[0]['options']['content'] = bad
@@ -91,4 +91,4 @@ with tempfile.TemporaryDirectory(prefix='report-text-') as tmp:
         Path(output).write_text(json.dumps({'narrative_text': plot['options']}, ensure_ascii=False))
     if output := os.environ.get('REPORT_TEXT_HTML_OUT'):
         Path(output).write_text('\n'.join(html_panels))
-print('PASS public narrative/source/evidence text, immutable input, escaped HTML, markup/number/fact/vision guards')
+print('PASS public narrative/source text, numeric and author-controlled prose, immutable input, escaped HTML, markup and supplied-fact validation')

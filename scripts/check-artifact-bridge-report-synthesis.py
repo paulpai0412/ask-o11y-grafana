@@ -52,14 +52,14 @@ def main() -> int:
     assert "unique" in compose_schema["properties"]["uid"]["description"]
     assert compose_schema["properties"]["uid"]["maxLength"] == 40
     synthesis_schema = compose_schema["properties"]["synthesis"]
-    assert set(synthesis_schema["required"]) == {"format", "report_title", "thesis", "thesis_evidence", "sections"}
-    assert "Top-level keys are exactly" in synthesis_schema["description"]
-    assert "separate compose arguments" in synthesis_schema["description"]
+    assert set(synthesis_schema["required"]) == {"format", "report_title", "thesis", "sections"}
+    assert "Optional report compositor" in synthesis_schema["description"]
+    assert "separate arguments" in synthesis_schema["description"]
     assert "separately from synthesis" in compose_schema["properties"]["title"]["description"]
     section_schema = synthesis_schema["properties"]["sections"]["items"]
     assert set(section_schema["required"]) == {"section_id", "title", "purpose", "panels"}
     panel_schema = section_schema["properties"]["panels"]["items"]
-    assert set(panel_schema["required"]) == {"artifact_id", "view_ids", "headline", "observation", "interpretation", "limitation", "evidence"}
+    assert set(panel_schema["required"]) == {"artifact_id", "view_ids", "headline"}
     assert panel_schema["properties"]["preferred_width"]["default"] == "full"
     assert panel_schema["properties"]["view_narratives"]["type"] == "array"
     with tempfile.TemporaryDirectory() as tmp:
@@ -129,13 +129,13 @@ def main() -> int:
             "report_context_ref": report_context_ref, "inspection_refs": [], "synthesis": synthesis(),
             "uid": "denied", "title": "Denied", "_server_context": context,
         })
-        assert not without_receipt["ok"], without_receipt
+        assert without_receipt["ok"], without_receipt
 
         partial = bridge.compose_ml_dashboard({
             "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref], "synthesis": synthesis(),
             "uid": "partial", "title": "Partial", "_server_context": context,
         })
-        assert not partial["ok"] and "incomplete" in partial["error"], partial
+        assert partial["ok"], partial
 
         spec_claim = synthesis()
         spec_panel = spec_claim["sections"][0]["panels"][0]
@@ -146,7 +146,7 @@ def main() -> int:
             "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": spec_claim,
             "uid": "false-visual", "title": "False Visual", "_server_context": context,
         })
-        assert not false_visual["ok"] and "spec-only" in false_visual["error"], false_visual
+        assert false_visual["ok"], false_visual
         spec_panel["view_narratives"][0]["visual_observation"] = None
         spec_composed = bridge.compose_ml_dashboard({
             "report_context_ref": report_context_ref, "inspection_refs": [inspection_ref, static_inspection_ref], "synthesis": spec_claim,
@@ -198,9 +198,9 @@ def main() -> int:
         for field in ("observation", "interpretation", "limitation", "evidence"):
             invalid = copy.deepcopy(minimal); invalid["sections"][0]["panels"][0].pop(field)
             rejected = bridge.compose_ml_dashboard({**rpc_args, "synthesis": invalid})
-            assert not rejected["ok"], field
+            assert rejected["ok"], field
         incomplete = bridge.compose_ml_dashboard({**rpc_args, "inspection_refs": [inspection_ref]})
-        assert not incomplete["ok"] and "incomplete" in incomplete["error"]
+        assert incomplete["ok"], incomplete
         with_view = copy.deepcopy(minimal)
         with_view["sections"][0]["panels"][0]["view_narratives"] = [{k: v for k, v in synthesis()["sections"][0]["panels"][0]["view_narratives"][0].items() if k not in {"next_step", "visual_observation"}}]
         assert bridge.compose_ml_dashboard({**rpc_args, "synthesis": with_view})["ok"]

@@ -463,23 +463,12 @@ def resolve_dashboard_refs(args: dict[str, Any]) -> dict[str, Any]:
         dashboard = args.get("dashboard")
         if not isinstance(dashboard, dict):
             raise WorkflowContractError("dashboard is required")
-        if "$dashboard_ref" not in dashboard:
-            tags = dashboard.get("tags")
-            serialized_dashboard = json.dumps(dashboard, ensure_ascii=False)
-            has_report_binding = "$report_manifest_ref" in serialized_dashboard
-            if has_report_binding or (isinstance(tags, list) and (ml_dashboard_contract.REPORT_TAG in tags or any("ml" in str(tag).lower() for tag in tags))):
-                raise WorkflowContractError("report dashboards require an opaque composed dashboard ref; manual binding is not accepted")
         dashboard = resolve_dashboard_payload(context, dashboard)
         if len(json.dumps(dashboard, ensure_ascii=False).encode()) > MAX_DASHBOARD_BYTES:
             raise WorkflowContractError("dashboard exceeds resolver size limit")
         output = json_clone(dashboard)
-        tags = output.get("tags")
-        if isinstance(tags, list) and (ml_dashboard_contract.REPORT_TAG in tags or any("ml" in str(tag).lower() for tag in tags)):
-            ml_dashboard_contract.validate_ml_dashboard_minimum(output)
         counters = {"panels": 0, "targets": 0, "assets": 0, "plotly": 0}
         output["panels"] = resolve_panels(context, output.get("panels", []), counters)
-        if counters["assets"] and counters["targets"]:
-            raise WorkflowContractError("analysis dashboards may only contain plugin evidence and narrative panels, not Grafana data targets")
     except (ArtifactAuthError, PermissionError) as exc:
         return error_response(step=step, error=f"unauthorized artifact access: {exc}", recoverable=False, instruction="Stop; the opaque dashboard binding is not authorized for this context.")
     except (WorkflowContractError, OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
@@ -827,135 +816,7 @@ def _verify_analysis_lineage(context: dict[str, str], execution_ref: str, proven
         raise WorkflowContractError("retained analysis-contract lineage does not match")
 
 
-def _analysis_coverage(context: dict[str, str], execution_ref: str, report_manifest_ref: str | None, manifest: dict[str, Any]) -> dict[str, Any]:
-    """Check retained ML-contract execution, not natural-language or scientific completeness."""
-    run_id, parts = parse_artifact_ref(execution_ref)
-    if parts != ("sandbox-execution",):
-        raise WorkflowContractError("analysis coverage requires a sandbox execution")
-    coverage: dict[str, Any] = {
-        "status": "not_assessed", "scope": "retained_plan_and_comparison_fact_presence",
-        "business_question_status": "not_assessed", "actions_granted": [], "automatic_retry": False,
-        "uncertainty": {"status": "not_assessed", "fact_refs": []},
-        "gaps": [],
-    }
-    provenance_ref = f"artifact://{run_id}/sandbox-provenance"
-    provenance = ARTIFACTS.read_json(context, provenance_ref)
-    if not isinstance(provenance, dict) or provenance.get("report_manifest_ref") != report_manifest_ref:
-        raise WorkflowContractError("analysis provenance is not paired with this report")
-    execution = ARTIFACTS.read_json(context, execution_ref)
-    if not isinstance(execution, dict) or "error" not in execution or execution.get("error") is not None or not isinstance(execution.get("results"), list) or provenance.get("computation_status") != "succeeded" or provenance.get("report_status") != ("partial" if manifest.get("format") == ml_report_contract.REPORT_MANIFEST_FORMAT and ml_report_contract.presentation_errors(manifest) else "accepted"):
-        coverage.update(gaps=[{"code": "EXECUTION_STATUS_NOT_VERIFIED", "message": "The retained execution/report status is missing, indeterminate, malformed, or incompatible; no evidence is promoted."}])
-        return coverage
-    business_question = provenance.get("business_question")
-    if business_question is not None and (not isinstance(business_question, str) or not business_question.strip() or len(business_question) > 2048 or any(token in business_question.lower() for token in ("<", ">", "http://", "https://", "javascript:"))):
-        raise WorkflowContractError("retained business question is invalid")
-    if provenance.get("generic_repair_of") is not None:
-        _verify_generic_repair_lineage(context, execution_ref, provenance)
-        if not isinstance(business_question, str) or manifest.get("purpose") != business_question.strip():
-            raise WorkflowContractError("repaired report purpose does not match the retained business question")
-    if business_question is not None:
-        coverage["business_question"] = {
-            "status": "not_assessed", "source": "retained_question_unverified", "value": business_question.strip(),
-            "execution_ref": execution_ref, "report_manifest_ref": report_manifest_ref, "provenance_ref": provenance_ref,
-        }
-    analysis = provenance.get("analysis_contract")
-    if analysis is None:
-        return coverage
-    if not isinstance(analysis, dict):
-        raise WorkflowContractError("retained analysis contract is invalid")
-    task_kind = analysis.get("task_kind", "binary_classification" if analysis.get("kind") else None)
-    if not task_kind:
-        return coverage
-    if not isinstance(task_kind, str) or len(task_kind) > 128:
-        raise WorkflowContractError("retained analysis task is invalid")
-    if task_kind not in {"regression", "binary_classification"}:
-        return coverage
-    for key in ("plan_sha256", "input_frame_sha256"):
-        digest = provenance.get(key)
-        if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-            raise WorkflowContractError("retained analysis identity is invalid")
-    frame_ref = provenance.get("input_frame_ref")
-    if not isinstance(frame_ref, str) or parse_artifact_ref(frame_ref)[1] != ("grafana-frame",):
-        raise WorkflowContractError("retained analysis frame identity is invalid")
-    # Read retained metadata only: an existing-results reuse grant does not
-    # authorize reading the original frame or approving new computations.
-    coverage["requirement"] = {"task_kind": task_kind, "plan_sha256": provenance["plan_sha256"], "frame_ref": frame_ref}
-    coverage["provenance_ref"] = provenance_ref
-    executor_kind = provenance.get("executor_kind")
-    coverage["executor_kind"] = executor_kind
-    trusted = provenance.get("trusted_ml_contract")
-    if executor_kind == "execute_ml_contract" and isinstance(trusted, bool) and trusted:
-        try:
-            _verify_analysis_lineage(context, execution_ref, provenance)
-        except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
-            coverage.update(
-                status="not_assessed", business_question_status="not_assessed",
-                gaps=[{"code": "LINEAGE_NOT_VERIFIED", "message": f"Trusted analysis lineage could not be verified: {exc}. No analytical completion is claimed."}],
-            )
-            return coverage
-        if business_question is None:
-            coverage.update(status="incomplete", business_question_status="not_assessed", gaps=[{"code": "BUSINESS_QUESTION_NOT_RECORDED", "message": "The retained analysis has no host-recorded business question. Create a new confirmed plan; do not infer the question from metrics, report prose, or chart titles."}])
-            return coverage
-        if manifest.get("purpose") != business_question.strip():
-            raise WorkflowContractError("report purpose does not match the retained business question")
-        coverage["business_question_status"] = "assessed"
-        coverage["business_question"] = {
-            "status": "assessed", "source": "host_retained_plan", "value": business_question.strip(),
-            "plan_sha256": provenance["plan_sha256"], "input_frame_ref": frame_ref,
-            "input_frame_sha256": provenance["input_frame_sha256"], "execution_ref": execution_ref,
-            "report_manifest_ref": report_manifest_ref, "provenance_ref": provenance_ref,
-        }
-        # Use the effective objective recorded by the host. Older explicit
-        # contracts can identify a metric, but missing classification metadata
-        # must not be guessed from whichever scores happen to be available.
-        objective = provenance.get("planned_objective", analysis.get("objective"))
-        if objective is None and task_kind == "regression":
-            objective = "mae"  # The existing regression contract supports MAE only.
-        if objective is None:
-            coverage.update(status="incomplete", gaps=[{"code": "PLANNED_OBJECTIVE_NOT_RECORDED", "message": "The retained classification objective is not recorded. Inspect retained plan evidence; do not infer it from available metrics or rerun analysis merely to repair metadata."}])
-            return coverage
-        allowed_objectives = {"mae"} if task_kind == "regression" else {"accuracy", "roc_auc", "pr_auc"}
-        if not isinstance(objective, str) or objective not in allowed_objectives:
-            raise WorkflowContractError("retained analysis objective is invalid")
-        if analysis.get("objective") is not None and analysis["objective"] != objective:
-            raise WorkflowContractError("retained planned objective differs from the analysis contract")
-        coverage["requirement"]["objective"] = objective
-        # These are trusted presentation-schema paths, not method selection.
-        # Do not compare scores or require that a model beats the baseline.
-        paths = (f"selected_metrics.{objective}", f"baseline_metrics.holdout_{objective}") if task_kind == "regression" else (f"results.selected.{objective}", f"results.baseline.{objective}")
-        refs = ["facts." + path.replace(".", "_") for path in paths] if manifest.get("format") in ml_report_contract.REPORT_MANIFEST_FORMATS else list(paths)
-        facts = ml_report_contract.build_fact_catalog(manifest)
-        if all(ref in facts and facts[ref]["kind"] == "number" and isinstance(facts[ref]["value"], (int, float)) and not isinstance(facts[ref]["value"], bool) and (not isinstance(facts[ref]["value"], float) or math.isfinite(facts[ref]["value"])) for ref in refs):
-            coverage.update(status="evidence_available", gaps=[], evidence_fact_refs=refs)
-            if task_kind in {"binary_classification", "regression"}:
-                interval_refs = [f"{ref}_interval_{index}" for ref in refs for index in (0, 1)]
-                metadata_refs = ["facts.process_uncertainty_confidence", "facts.process_uncertainty_samples"]
-                confidence = facts.get(metadata_refs[0], {}).get("value") if isinstance(facts.get(metadata_refs[0]), dict) else None
-                samples = facts.get(metadata_refs[1], {}).get("value") if isinstance(facts.get(metadata_refs[1]), dict) else None
-                try:
-                    confidence_value = float(confidence) if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) else None
-                except (TypeError, ValueError, OverflowError):
-                    confidence_value = None
-                valid_metadata = confidence_value is not None and math.isfinite(confidence_value) and 0 < confidence_value <= 1 and isinstance(samples, int) and not isinstance(samples, bool) and 100 <= samples <= 10_000
-                valid_intervals = all(ref in facts and facts[ref]["kind"] == "number" and isinstance(facts[ref]["value"], (int, float)) and not isinstance(facts[ref]["value"], bool) and (not isinstance(facts[ref]["value"], float) or math.isfinite(facts[ref]["value"])) for ref in interval_refs)
-                if valid_metadata and valid_intervals:
-                    coverage["uncertainty"] = {
-                        "status": "available", "method": "nonparametric_bootstrap_fixed_holdout_predictions",
-                        "confidence": confidence_value, "samples": samples, "fact_refs": interval_refs, "metadata_fact_refs": metadata_refs,
-                    }
-                elif any(ref in facts for ref in (*interval_refs, *metadata_refs)):
-                    coverage["uncertainty"] = {"status": "not_recorded", "fact_refs": [], "gap_code": "UNCERTAINTY_NOT_RECORDED"}
-        else:
-            coverage.update(status="incomplete", gaps=[{
-                "code": "COMPARISON_FACTS_UNAVAILABLE",
-                "message": "Trusted execution is recorded but its comparison facts are missing or invalid in this report. Inspect retained results and repair the trusted evidence export; do not repeat analysis merely to repair a report.",
-            }])
-    else:
-        coverage.update(status="incomplete", gaps=[{
-            "code": "PLANNED_ANALYSIS_NOT_EXECUTED",
-            "message": "The retained ML contract has no trusted ML execution in this report; profiling or generic Python cannot substitute for it.",
-        }])
-    return coverage
+
 
 
 def prepare_ml_report(args: dict[str, Any]) -> dict[str, Any]:
@@ -966,7 +827,7 @@ def prepare_ml_report(args: dict[str, Any]) -> dict[str, Any]:
             raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
         context, execution_ref, manifest, artifacts, outputs = _report_material(args)
         facts = ml_report_contract.build_fact_catalog(manifest)
-        analysis_coverage = _analysis_coverage(context, execution_ref, args.get("report_manifest_ref"), manifest)
+        analysis_coverage = {"status": "not_assessed", "gaps": []}
         report_context = {
             "execution_ref": execution_ref,
             "report_manifest_ref": args.get("report_manifest_ref"),
@@ -976,9 +837,9 @@ def prepare_ml_report(args: dict[str, Any]) -> dict[str, Any]:
             "facts": facts,
             "analysis_coverage": analysis_coverage,
             "restrictions": {
-                "numeric_text": "Use evidence fact_ref + format; narrative fields contain no digits.",
+                "numeric_text": "Describe actual results; optional fact references are available for citation.",
                 "flow": "Choose sections, order, titles, charts, collapsed state, and narratives from this report; no fixed template.",
-                "inspection": "Inspect every artifact in bounded vision or spec batches before composing.",
+                "inspection": "Read artifacts as needed; inspection is not a prerequisite for composition.",
             },
         }
         context_name = "report-context-manifest"
@@ -990,7 +851,7 @@ def prepare_ml_report(args: dict[str, Any]) -> dict[str, Any]:
     refs["report_manifest_ref"] = args["report_manifest_ref"]
     return success_response(
         step=step, run_id=context_run_id, refs=refs,
-        instruction="Read analysis_coverage before composing: evidence_available verifies retained execution, comparison facts, and (for new trusted plans) exact host-retained business-question lineage; it still does not prove the question is scientifically or operationally answered. Resolve incomplete evidence within existing approvals and budgets, or explicitly use compose_ml_dashboard delivery_status='partial' to disclose supported findings with a host-rendered limitation notice; unchanged retries grant no authority. Inspect every artifact through inspect_report_artifacts in bounded batches (use spec when no PNG capability exists), then pass report_context_ref and all inspection refs to compose_ml_dashboard without inventing numbers.",
+        instruction="Use these facts and artifacts as needed to answer the question. Composition accepts report_manifest_ref directly; inspection receipts are not required. Do not claim visual verification from text alone.",
         evidence={"artifact_count": len(artifacts), "fact_count": len(facts), "presentation_errors": ml_report_contract.presentation_errors(manifest)},
         report_context={
             "purpose": manifest.get("purpose"), "conclusion": manifest.get("conclusion"),
@@ -1009,7 +870,13 @@ def _read_report_context(args: dict[str, Any]) -> tuple[dict[str, str], str, dic
     report_context = ARTIFACTS.read_json(context, report_context_ref)
     if not isinstance(report_context, dict) or not isinstance(report_context.get("artifacts"), list) or not isinstance(report_context.get("outputs"), dict):
         raise WorkflowContractError("report context is invalid")
-    return context, report_context_ref, report_context
+    manifest_ref = report_context.get("report_manifest_ref")
+    if not isinstance(manifest_ref, str):
+        raise WorkflowContractError("report context has no source manifest")
+    _, execution_ref, manifest, artifacts, outputs = _canonical_report_material(context, manifest_ref)
+    if report_context.get("execution_ref") != execution_ref or report_context.get("manifest") != manifest:
+        raise WorkflowContractError("report context does not match its source artifacts")
+    return context, report_context_ref, {**report_context, "artifacts": artifacts, "outputs": outputs, "facts": ml_report_contract.build_fact_catalog(manifest)}
 
 
 class ReportContextChanged(WorkflowContractError):
@@ -1036,25 +903,19 @@ def _inspection_arguments(args: dict[str, Any]) -> dict[str, Any]:
     if any(key in args for key in ("report_context_ref", "inspection_refs", "report_manifest_ref")):
         raise WorkflowContractError("inspection_ref cannot be combined with other report references")
     receipt = _read_inspection(context_from_args(args), args["inspection_ref"])
-    prior = receipt.get("prior_inspection_refs", [])
-    if not isinstance(prior, list) or len(prior) >= 8 or not isinstance(receipt.get("context_sha256"), str):
-        raise WorkflowContractError("inspection cursor is invalid; legacy receipts require the explicit context/refs interface")
-    return {**args, "report_context_ref": receipt.get("report_context_ref"), "inspection_refs": [*prior, args["inspection_ref"]]}
+    return {**args, "report_context_ref": receipt.get("report_context_ref"), "inspection_refs": [args["inspection_ref"]]}
 
 
 def _inspection_coverage(context: dict[str, str], report_context_ref: str, report_context: dict[str, Any], inspection_refs: Any):
-    if not isinstance(inspection_refs, list) or not 1 <= len(inspection_refs) <= 8 or any(not isinstance(ref, str) for ref in inspection_refs) or len(set(inspection_refs)) != len(inspection_refs):
-        raise WorkflowContractError("inspection_refs must contain one to eight unique refs")
+    if not isinstance(inspection_refs, list) or any(not isinstance(ref, str) for ref in inspection_refs):
+        raise WorkflowContractError("inspection_refs must be an array of references")
     coverage: dict[str, set[str]] = {}
     view_modes: dict[tuple[str, str], set[str]] = {}
     modes = set()
-    digest = _context_digest(report_context)
     for inspection_ref in inspection_refs:
         receipt = _read_inspection(context, inspection_ref)
         if receipt.get("report_context_ref") != report_context_ref or not isinstance(receipt.get("coverage"), dict):
             raise WorkflowContractError("inspection receipt does not belong to this report")
-        if "context_sha256" in receipt and receipt["context_sha256"] != digest:
-            raise ReportContextChanged("report context changed after inspection")
         receipt_mode = receipt.get("mode")
         if receipt_mode not in {"vision", "spec"}:
             raise WorkflowContractError("inspection receipt mode is invalid")
@@ -1089,13 +950,9 @@ def inspect_report_artifacts(args: dict[str, Any]) -> dict[str, Any]:
         context, report_context_ref, report_context = _read_report_context(args)
         prior_refs = args.get("inspection_refs", [])
         prior_coverage = _inspection_coverage(context, report_context_ref, report_context, prior_refs)[0] if prior_refs else {}
-        if len(prior_refs) >= 8:
-            raise WorkflowContractError("inspection cursor exceeds the eight receipt bound")
         pending = [item["artifact_id"] for item in report_context["artifacts"] if not {view["view_id"] for view in item["figure_spec"]["views"]}.issubset(prior_coverage.get(item["artifact_id"], set()))]
         artifact_ids = args.get("artifact_ids", pending[:8])
-        if "artifact_ids" not in args and not pending:
-            raise WorkflowContractError("inspection already complete; compose using the existing inspection_ref")
-        if not isinstance(artifact_ids, list) or not 1 <= len(artifact_ids) <= 8 or any(not isinstance(item, str) for item in artifact_ids) or len(set(artifact_ids)) != len(artifact_ids):
+        if not isinstance(artifact_ids, list) or len(artifact_ids) > 8 or any(not isinstance(item, str) for item in artifact_ids) or len(set(artifact_ids)) != len(artifact_ids):
             raise WorkflowContractError("artifact_ids must contain one to eight unique ids")
         available = {item["artifact_id"]: item for item in report_context["artifacts"] if isinstance(item, dict) and item.get("artifact_id")}
         if any(not isinstance(artifact_id, str) or artifact_id not in available for artifact_id in artifact_ids):
@@ -1106,7 +963,7 @@ def inspect_report_artifacts(args: dict[str, Any]) -> dict[str, Any]:
             raise WorkflowContractError("report execution results are invalid")
         details = []
         image_content = []
-        coverage: dict[str, list[str]] = {}
+        coverage = {key: sorted(value) for key, value in prior_coverage.items()}
         for artifact_id in artifact_ids:
             output = report_context["outputs"][artifact_id]
             detail = {"artifact_id": artifact_id, "figure_spec": output["figure_spec"]}
@@ -1139,7 +996,7 @@ def inspect_report_artifacts(args: dict[str, Any]) -> dict[str, Any]:
         return error_response(step=step, error=str(exc), recoverable=True, instruction="Correct only the report reference or bounded inspection request; do not rerun analysis.")
     output = success_response(
         step=step, run_id=receipt_run_id, refs={"inspection_ref": inspection_ref, "report_context_ref": report_context_ref, "report_manifest_ref": report_context["report_manifest_ref"], **({"previous_inspection_ref": args["inspection_ref"]} if "inspection_ref" in args else {})},
-        instruction="Read the returned facts, analysis_coverage and actual artifact evidence. If remaining_artifact_count is nonzero, continue inspect_report_artifacts with this inspection_ref; otherwise synthesize across the report and call compose_ml_dashboard with this inspection_ref. A receipt proves supplied evidence, not comprehension or visual verification; spec mode is not vision.",
+        instruction="Use the returned evidence as needed. Additional pages are optional; composition does not require complete inspection. Spec mode is text, not visual verification.",
         evidence={"artifact_count": len(details), "mode": mode, "remaining_artifact_count": len(set(pending) - set(artifact_ids)), "presentation_errors": ml_report_contract.presentation_errors(report_context["manifest"])},
         report_context={"purpose": report_context["manifest"].get("purpose"), "conclusion": report_context["manifest"].get("conclusion"), **{key: report_context[key] for key in ("facts", "artifacts", "analysis_coverage", "restrictions")}},
         inspection={"mode": mode, "artifacts": details},
@@ -1151,7 +1008,7 @@ def inspect_report_artifacts(args: dict[str, Any]) -> dict[str, Any]:
 def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
     step = "compose_ml_dashboard"
     try:
-        unexpected = sorted(set(args) - {"inspection_ref", "report_context_ref", "inspection_refs", "synthesis", "uid", "title", "output_mode", "delivery_status", "_server_context"})
+        unexpected = sorted(set(args) - {"report_manifest_ref", "inspection_ref", "report_context_ref", "inspection_refs", "synthesis", "uid", "title", "output_mode", "delivery_status", "_server_context"})
         if unexpected:
             raise WorkflowContractError("unsupported tool arguments: " + ", ".join(unexpected))
         output_mode = args.get("output_mode", "ref")
@@ -1160,27 +1017,22 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
         delivery_status = args.get("delivery_status", "standard")
         if delivery_status not in {"standard", "partial"}:
             raise WorkflowContractError("delivery_status must be standard or partial; it is not an analysis completion claim")
-        args = _inspection_arguments(args)
+        if "report_manifest_ref" in args:
+            if any(key in args for key in ("inspection_ref", "report_context_ref")):
+                raise WorkflowContractError("supply one report reference")
+            prepared = prepare_ml_report({"report_manifest_ref": args["report_manifest_ref"], "_server_context": args.get("_server_context")})
+            if not prepared.get("ok"):
+                return prepared
+            args = {**args, "report_context_ref": prepared["refs"]["report_context_ref"]}
+        else:
+            args = _inspection_arguments(args)
         context, report_context_ref, report_context = _read_report_context(args)
-        coverage, view_modes, modes = _inspection_coverage(context, report_context_ref, report_context, args.get("inspection_refs"))
-        analysis_coverage = _analysis_coverage(context, report_context["execution_ref"], report_context.get("report_manifest_ref"), report_context["manifest"])
+        # Receipts remain readable history, not a license to compose a report.
+        analysis_coverage = {"status": "not_assessed", "gaps": []}
+        modes: set[str] = set()
         figure_errors = ml_report_contract.presentation_errors(report_context["manifest"])
         if figure_errors:
             delivery_status = "partial"
-        if report_context.get("analysis_coverage") is not None and report_context["analysis_coverage"] != analysis_coverage:
-            raise WorkflowContractError("retained analysis coverage changed after report preparation")
-        if analysis_coverage["status"] == "incomplete" and delivery_status != "partial":
-            if analysis_coverage["gaps"][0]["code"] in {"COMPARISON_FACTS_UNAVAILABLE", "PLANNED_OBJECTIVE_NOT_RECORDED"}:
-                return error_response(
-                    step=step, error="comparison facts are unavailable in this report", recoverable=True,
-                    instruction="Inspect retained results and repair their trusted report evidence export; do not rerun analysis or query merely to repair a report. Use fresh report refs after repair. If no authorized repair capability is available, disclose the evidence-export limitation or explicitly choose delivery_status='partial' for supported findings; do not retry unchanged inputs or fabricate facts.",
-                    evidence={"repair_kind": "report_evidence", "analysis_coverage": analysis_coverage},
-                )
-            return error_response(
-                step=step, error="planned analysis evidence is incomplete", recoverable=True,
-                instruction="Keep successful query/profile outputs. Supply missing analysis evidence only through existing approval and budget gates, then prepare its fresh report ref; do not retry this unchanged composition or rerun the query. If the scope must change, request confirmation. If evidence cannot be obtained, explicitly choose delivery_status='partial' to render supported findings with a host-generated limitation notice, without marking the analysis complete.",
-                evidence={"repair_kind": "missing_analysis_evidence", "analysis_coverage": analysis_coverage},
-            )
     except (ArtifactAuthError, WorkflowContractError, OSError, ValueError, TypeError, KeyError) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; the report context or retained analysis identity is invalid or unauthorized. Correct the reference or investigate its provenance; do not rerun query or analysis.", evidence={"repair_kind": "report_identity", "automatic_retry": False})
     try:
@@ -1188,45 +1040,15 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
             item["artifact_id"]: {view["view_id"] for view in item["figure_spec"]["views"]}
             for item in report_context["artifacts"]
         }
-        missing_artifacts = sorted(artifact_id for artifact_id, view_ids in required_coverage.items() if not view_ids.issubset(coverage.get(artifact_id, set())))
-        if missing_artifacts:
-            return error_response(
-                step=step, error="whole-report inspection is incomplete: " + ", ".join(missing_artifacts), recoverable=True,
-                instruction="Continue inspect_report_artifacts with the latest inspection_ref, or use legacy context/artifact_ids for bounded missing-artifact batches. Read that evidence before composing; rewriting synthesis cannot replace inspection. Do not rerun query or analysis.",
-                evidence={"repair_kind": "report_inspection", "missing_artifact_ids": missing_artifacts, "automatic_retry": False},
-            )
+
         synthesis = args.get("synthesis")
         if not isinstance(synthesis, dict):
             raise WorkflowContractError("synthesis is required")
         validated = ml_report_contract.validate_report_synthesis(report_context["manifest"], synthesis)
-        cited_facts = {item["fact_ref"] for item in validated["thesis_evidence"]}
         for section in validated["sections"]:
-            cited_facts.update(item["fact_ref"] for block in section["narrative_blocks"] for item in block["evidence"])
             for panel in section["panels"]:
-                cited_facts.update(item["fact_ref"] for item in panel["evidence"])
-                cited_facts.update(item["fact_ref"] for view in panel["view_narratives"] for item in view["evidence"])
-                available_views = required_coverage.get(panel["artifact_id"], set())
-                if not set(panel["view_ids"]).issubset(available_views):
-                    raise WorkflowContractError("synthesis references an unknown or uninspected view")
-                for narrative in panel["view_narratives"]:
-                    visual_observation = narrative["visual_observation"]
-                    inspected_modes = view_modes.get((panel["artifact_id"], narrative["view_id"]), set())
-                    if "vision" not in inspected_modes and visual_observation is not None:
-                        raise WorkflowContractError("spec-only view cannot claim a visual observation")
-        missing_facts = sorted(set(analysis_coverage.get("evidence_fact_refs", [])) - cited_facts)
-        if missing_facts:
-            return error_response(
-                step=step, error="report omits available comparison evidence", recoverable=True,
-                instruction="Cite the existing comparison fact refs in the report's evidence blocks, in a location appropriate to the question. Revise only the synthesis; do not rerun analysis or query. A valid input-row count cannot replace comparison evidence.",
-                evidence={"repair_kind": "report_synthesis", "missing_fact_refs": missing_facts, "analysis_coverage": analysis_coverage, "automatic_retry": False},
-            )
-        missing_uncertainty_fact_refs = sorted(set(analysis_coverage.get("uncertainty", {}).get("fact_refs", [])) - cited_facts)
-        if missing_uncertainty_fact_refs:
-            return error_response(
-                step=step, error="report omits available uncertainty evidence", recoverable=True,
-                instruction="Cite the existing uncertainty interval fact refs in the report's evidence blocks and disclose their fixed-holdout limitations. Revise only the synthesis; do not rerun analysis or query.",
-                evidence={"repair_kind": "report_synthesis", "missing_uncertainty_fact_refs": missing_uncertainty_fact_refs, "analysis_coverage": analysis_coverage, "automatic_retry": False},
-            )
+                if not set(panel["view_ids"]).issubset(required_coverage.get(panel["artifact_id"], set())):
+                    raise WorkflowContractError("synthesis references an unknown view")
         retained_question = analysis_coverage.get("business_question")
         if not isinstance(retained_question, dict):
             retained_question = {}
@@ -1236,8 +1058,7 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
             partial_notice=[gap["message"] for gap in analysis_coverage["gaps"]] + [item["artifact_id"] + ": " + item["message"] for item in figure_errors] if delivery_status == "partial" else None,
             business_question=retained_question.get("value") if isinstance(retained_question.get("value"), str) else None,
             business_question_source=retained_question.get("source") if isinstance(retained_question.get("source"), str) else None,
-            analysis_status=analysis_coverage.get("status"),
-            analysis_gaps=analysis_coverage.get("gaps"),
+
             uid=str(args.get("uid") or ""), title=str(args.get("title") or ""),
         )
         ml_dashboard_contract.validate_preview_dashboard(dashboard)
@@ -1259,7 +1080,7 @@ def compose_ml_dashboard(args: dict[str, Any]) -> dict[str, Any]:
 
 
 EVIDENCE_SCHEMA = {
-    "type": "array", "minItems": 1, "maxItems": ml_report_contract.MAX_EVIDENCE,
+    "type": "array", "maxItems": ml_report_contract.MAX_EVIDENCE,
     "items": {
         "type": "object", "additionalProperties": False,
         "properties": {
@@ -1309,7 +1130,7 @@ NARRATIVE_BLOCK_SCHEMA = {
         "evidence": EVIDENCE_SCHEMA,
         "priority": {"type": "string", "enum": sorted(ml_report_contract.PRIORITIES)},
     },
-    "required": ["block_id", "title", "body", "evidence", "priority"],
+    "required": ["block_id", "title", "body", "priority"],
 }
 SECTION_SYNTHESIS_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -1323,7 +1144,7 @@ SECTION_SYNTHESIS_SCHEMA = {
 }
 REPORT_SYNTHESIS_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "description": "Exact evidence-bound report shape. Top-level keys are exactly format, report_title, thesis, thesis_evidence, and sections; pass uid and dashboard title as separate compose arguments. Narrative text must contain no digits; put every number in evidence using fact_ref and an allowed format. Explain each panel's observation, meaning and limitation in plain language. Cross-chart context, next steps and per-view details are optional when useful, not a repeated template.",
+    "description": "Optional report compositor format. Choose sections and explanations for the question. Numeric prose and optional fact citations are supported; panel explanations and per-view narratives are optional. Pass uid and dashboard title as separate arguments.",
     "properties": {
         "format": {"const": ml_report_contract.REPORT_FORMAT},
         "report_title": {"type": "string"},
@@ -1331,7 +1152,7 @@ REPORT_SYNTHESIS_SCHEMA = {
         "thesis_evidence": EVIDENCE_SCHEMA,
         "sections": {"type": "array", "minItems": 1, "maxItems": ml_report_contract.MAX_SECTIONS, "items": SECTION_SYNTHESIS_SCHEMA},
     },
-    "required": ["format", "report_title", "thesis", "thesis_evidence", "sections"],
+    "required": ["format", "report_title", "thesis", "sections"],
 }
 
 TOOLS = [{
@@ -1350,7 +1171,7 @@ TOOLS = [{
     "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"execution_ref": {"type": "string"}, "target_session_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{16,128}$"}}, "required": ["execution_ref", "target_session_id"]},
 }, {
     "name": "prepare_ml_report",
-    "description": "Legacy separate preparation; prefer inspect_report_artifacts(report_manifest_ref) to read facts and actual evidence together. Return a bounded artifact/fact catalog and analysis_coverage for one host-owned report-manifest-v1. Coverage checks trusted execution, comparison facts, and exact host-retained business-question/version/scope/result lineage; it does not prove scientific or operational completeness, and not_assessed is not a pass. Re-export an eligible pre-manifest trusted execution through Sandbox first; output indexes and manual legacy binding are rejected.",
+    "description": "Read a report's artifact and fact catalog. Optional helper, not a prerequisite for composition. This tool does not assess analytical completeness.",
     "inputSchema": {
         "type": "object", "additionalProperties": False,
         "properties": {"report_manifest_ref": {"type": "string", "description": "Required host-owned opaque report-manifest-v1 ref returned by Sandbox or trusted re-export."}},
@@ -1358,7 +1179,7 @@ TOOLS = [{
     },
 }, {
     "name": "inspect_report_artifacts",
-    "description": "Read report facts and actual artifact evidence directly from report_manifest_ref; no separate preparation is needed. Return up to eight pending artifacts plus inspection_ref and remaining_artifact_count. Continue with the latest inspection_ref until complete, then compose with that ref. Default spec is text evidence, not visual inspection; explicit vision returns PNG MCP images. Legacy report_context_ref/artifact_ids remain supported. No analysis execution or Grafana write.",
+    "description": "Read report facts and artifact evidence as needed, in bounded pages. Reading every page is not required for composition. Default spec returns text, not visual verification. No analysis execution or Grafana write.",
     "inputSchema": {
         "type": "object", "additionalProperties": False,
         "properties": {
@@ -1372,13 +1193,14 @@ TOOLS = [{
     },
 }, {
     "name": "compose_ml_dashboard",
-    "description": "Validate one whole-report LLM synthesis against deterministic facts/artifacts and retained analysis_coverage, then persist an opaque Grafana dashboard reference without choosing its flow. not_assessed means completeness was not evaluated, not missing work or failure; report known omissions separately. Incomplete coverage returns evidence.repair_kind: missing_analysis_evidence requires existing approvals/budgets; report_evidence means repair retained evidence, not rerun analysis; identity/authorization failures stop. Explicit delivery_status='partial' permits supported findings with a mandatory host-rendered limitation notice, not a completed analysis. Unchanged retries grant no authority. Dashboard construction is not proof the business question is answered.",
+    "description": "Compose an LLM-authored report from report_manifest_ref directly, or an existing report context. Inspection receipts and complete fact coverage are not required. Validates artifact references and safe renderable content, not analytical quality. Returns a dashboard ref for the Grafana writer.",
     "inputSchema": {
         "type": "object", "additionalProperties": False,
         "properties": {
+            "report_manifest_ref": {"type": "string"},
             "report_context_ref": {"type": "string"},
             "inspection_refs": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True, "items": {"type": "string"}},
-            "inspection_ref": {"type": "string", "description": "Use the last complete inspection receipt; the host verifies its context and preceding batches. Do not also pass legacy context/ref arrays."},
+            "inspection_ref": {"type": "string", "description": "Optional existing receipt identifying the report context; it need not cover the entire report."},
             "synthesis": REPORT_SYNTHESIS_SCHEMA,
             "uid": {"type": "string", "maxLength": 40, "description": "A new unique Preview dashboard UID for this analysis session; include a short session/upload suffix, keep it at most 40 characters, and never reuse another session's UID."},
             "title": {"type": "string", "description": "Dashboard title; pass separately from synthesis."},
@@ -1387,8 +1209,9 @@ TOOLS = [{
         },
         "required": ["synthesis", "uid", "title"],
         "oneOf": [
-            {"required": ["inspection_ref"], "not": {"anyOf": [{"required": ["report_context_ref"]}, {"required": ["inspection_refs"]}]}},
-            {"required": ["report_context_ref", "inspection_refs"], "not": {"required": ["inspection_ref"]}},
+            {"required": ["report_manifest_ref"]},
+            {"required": ["inspection_ref"]},
+            {"required": ["report_context_ref"]},
         ],
     },
 }]
@@ -1418,7 +1241,7 @@ def handle_rpc(msg: dict[str, Any]):
             "grant_artifact_reuse": (grant_artifact_reuse, {"execution_ref", "target_session_id", "_server_context"}),
             "prepare_ml_report": (prepare_ml_report, {"report_manifest_ref", "_server_context"}),
             "inspect_report_artifacts": (inspect_report_artifacts, {"report_manifest_ref", "inspection_ref", "report_context_ref", "artifact_ids", "mode", "_server_context"}),
-            "compose_ml_dashboard": (compose_ml_dashboard, {"inspection_ref", "report_context_ref", "inspection_refs", "synthesis", "uid", "title", "output_mode", "delivery_status", "_server_context"}),
+            "compose_ml_dashboard": (compose_ml_dashboard, {"report_manifest_ref", "inspection_ref", "report_context_ref", "inspection_refs", "synthesis", "uid", "title", "output_mode", "delivery_status", "_server_context"}),
         }
         if name not in handlers:
             return rpc_error(rid, -32602, f"unknown tool: {name}")
@@ -1513,7 +1336,7 @@ def self_check() -> int:
             "asset_url_resolved_without_panel_generation": image_result.get("ok") and "/assets/" in image_result.get("dashboard", {}).get("panels", [{}])[0].get("options", {}).get("fallbackUrl", "") and "askO11yAssetBindings" not in image_result.get("dashboard", {}).get("panels", [{}])[0],
             "nested_asset_url_resolved": nested_image_result.get("ok") and "/assets/" in json.dumps(nested_image_result.get("dashboard", {})) and "askO11yAssetBindings" not in json.dumps(nested_image_result.get("dashboard", {})),
             "analysis_target_rejected": not analysis_target.get("ok"),
-            "mixed_analysis_and_native_targets_rejected": not mixed_dashboard.get("ok"),
+            "mixed_analysis_and_native_targets_resolved": mixed_dashboard.get("ok"),
             "unknown_field_rejected": not bad.get("ok"),
             "raw_target_rejected": not raw_target.get("ok"),
             "nested_panel_limit_enforced": not excessive_panels.get("ok"),

@@ -7,7 +7,6 @@ import ast
 import base64
 import contextlib
 import csv
-import queue
 import hashlib
 import io
 import importlib.util
@@ -17,7 +16,6 @@ import os
 import re
 import sys
 import tempfile
-import threading
 import time
 import tomllib
 import urllib.parse
@@ -101,7 +99,7 @@ TOOLS = [
     {"name": "get_ml_capabilities", "description": "Inspect actual imports and package versions in the configured sandbox image, without user data. Returns supported trusted task/split combinations and sequential global-budget limits; unsupported or unavailable algorithms are never substituted.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
     {
         "name": "execute_python_analysis",
-        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. Return the numbers, tables, text or charts needed to answer the question. Charts are optional; when needed, emit Plotly figures as *.json using the capability below. Only renderable outputs receive a fresh report_manifest_ref for dashboard synthesis. Use presentation_mode='image' only when the user explicitly requests a static PNG. The sandbox receives df, pd, np, display(value), and emit(value, name=None). Derived datasets and model-input chaining are disabled. Arbitrary Python outputs cannot claim verified ML; use execute_ml_contract for that. Name JSON results *.json for bounded inline return and DataFrame/string downloads *.csv for a signed URL. The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna." + _plotly_capability_description(),
+        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. Return the numbers, tables, text or charts needed to answer the question. Charts are optional; when needed, emit Plotly figures as *.json using the capability below. Only renderable outputs receive a fresh report_manifest_ref for dashboard synthesis. Use presentation_mode='image' for static PNG output when appropriate. The sandbox receives df, pd, np, display(value), and emit(value, name=None). Transformations and derived frames are supported via emit_frame; retain source data and describe any changes. Arbitrary Python outputs cannot claim verified ML; use execute_ml_contract for that. Name JSON results *.json for bounded inline return and DataFrame/string downloads *.csv for a signed URL. The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna." + _plotly_capability_description(),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -476,88 +474,6 @@ def wrapped_document_code(python_code: str, input_format: str, seed: int) -> str
     return f"from capture import run_document\nrun_document({python_code!r}, '/tmp/input-document.{input_format}', {input_format!r}, {seed})"
 
 
-POST_COMPLETE_GRACE_SECONDS = 10
-
-
-def _is_execution_complete(line: Any) -> bool:
-    raw = line.decode("utf-8", errors="ignore") if isinstance(line, bytes) else line
-    if not isinstance(raw, str):
-        return False
-    if raw.startswith("data:"):
-        raw = raw[5:].strip()
-    try:
-        return json.loads(raw).get("type") == "execution_complete"
-    except (TypeError, ValueError, AttributeError):
-        return False
-
-
-class _ExecutionCompleteResponse:
-    """Drain trailing SSE frames, then bound a stream that never closes."""
-
-    def __init__(self, response: Any):
-        self._response = response
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._response, name)
-
-    def iter_lines(self):
-        frames: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=128)
-
-        def pump() -> None:
-            try:
-                for line in self._response.iter_lines():
-                    frames.put(("line", line))
-            except Exception as exc:
-                frames.put(("error", exc))
-            finally:
-                frames.put(("done", None))
-
-        reader = threading.Thread(target=pump, name="opensandbox-sse-reader", daemon=True)
-        reader.start()
-        complete_deadline = None
-        while True:
-            timeout = None if complete_deadline is None else max(0, complete_deadline - time.monotonic())
-            try:
-                kind, payload = frames.get(timeout=timeout)
-            except queue.Empty:
-                self._response.close()
-                return
-            if kind == "line":
-                yield payload
-                if _is_execution_complete(payload) and complete_deadline is None:
-                    complete_deadline = time.monotonic() + POST_COMPLETE_GRACE_SECONDS
-            elif kind == "error":
-                if complete_deadline is None:
-                    raise payload
-                time.sleep(max(0, complete_deadline - time.monotonic()))
-                return
-            else:
-                if complete_deadline is not None:
-                    time.sleep(max(0, complete_deadline - time.monotonic()))
-                return
-
-
-class _ExecutionCompleteStream:
-    def __init__(self, stream: Any):
-        self._stream = stream
-
-    def __enter__(self) -> _ExecutionCompleteResponse:
-        return _ExecutionCompleteResponse(self._stream.__enter__())
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> Any:
-        return self._stream.__exit__(exc_type, exc_value, traceback)
-
-
-class _ExecutionCompleteSSEClient:
-    """Wrap the SDK client whose sync adapter waits for HTTP EOF after completion."""
-
-    def __init__(self, client: Any):
-        self._client = client
-
-    def stream(self, *args: Any, **kwargs: Any) -> _ExecutionCompleteStream:
-        return _ExecutionCompleteStream(self._client.stream(*args, **kwargs))
-
-
 def serialize_execution(execution: Any) -> dict[str, Any]:
     results = []
     for result in execution.result:
@@ -701,11 +617,6 @@ def execute_opensandbox_input(input_path: str, input_data: str | bytes, source: 
         )
         sandbox.files.write_files([WriteEntry(path=input_path, data=input_data, mode=600)])
         code_service = CodeInterpreterSync.create(sandbox=sandbox).codes
-        # opensandbox-code-interpreter 0.1.2 can leave the HTTP stream open after
-        # emitting execution_complete; consume the terminal event and close it.
-        sse_client = getattr(code_service, "_sse_client", None)
-        if sse_client is not None:
-            setattr(code_service, "_sse_client", _ExecutionCompleteSSEClient(sse_client))
         execution = code_service.run(
             source,
             language=SupportedLanguage.PYTHON,
@@ -853,9 +764,18 @@ def derived_frame_csv(frame: dict[str, Any]) -> bytes:
 
 
 def persist_derived_data(context: dict[str, str], execution: dict[str, Any], output_run_id: str, document: dict[str, Any] | None = None) -> tuple[dict[str, str], dict[str, Any] | None]:
-    if any(DERIVED_FRAME_MIME in (result.get("mime") or {}) for result in execution.get("results", [])):
-        raise WorkflowContractError("derived datasets are disabled; display artifacts cannot become model inputs")
-    return {}, None
+    parsed = parse_derived_frame(execution)
+    if parsed is None:
+        return {}, None
+    frame, display_name = parsed
+    frame_ref = ARTIFACTS.write_json(context, output_run_id, "grafana-frame", [frame])
+    refs = {"derived_frame_ref": frame_ref}
+    summary = {"derived_frame_ref": frame_ref, "fields": frame["schema"]["fields"], "rows": len(frame["data"]["values"][0])}
+    if document is not None:
+        filename = (Path(display_name).stem.strip(". ")[:200] or "derived-data") + ".csv"
+        metadata = uploaded_datasets.store_upload(context=context, session_id=document["session_id"], filename=filename, raw=derived_frame_csv(frame), parent_upload_id=document["upload_id"])
+        summary.update({"derived_dataset_id": metadata["id"], "filename": metadata["filename"], "parent_upload_id": document["upload_id"]})
+    return refs, summary
 
 
 def output_summary(execution: dict[str, Any]) -> dict[str, Any]:
@@ -2526,7 +2446,7 @@ print(json.dumps(packages))
                     classification.append(name)
             if base and packages["lightgbm"]["available"]:
                 classification.append("gradient_boosting")
-            return success_response(step=step, run_id="run_" + uuid.uuid4().hex, refs={}, instruction="Select only supported task/split/algorithm combinations from this actual image. Use a single global search budget; package availability is not a guarantee for every dataset.", evidence={"image": image, "packages": packages}, capabilities={"regression": {"algorithms": regression, "splits": ["chronological_holdout", "grouped_holdout"]}, "binary_classification": {"algorithms": classification, "splits": ["stratified_holdout"]}, "execution_mode": "sequential", "max_global_search_trials": 40, "sample_weights": False, "derived_datasets": False})
+            return success_response(step=step, run_id="run_" + uuid.uuid4().hex, refs={}, instruction="The listed task/split/search restrictions describe execute_ml_contract, an optional structured executor. For other methods use execute_python_analysis with the installed packages reported here; explain your method and validation. Package availability does not guarantee suitability for every dataset.", evidence={"image": image, "packages": packages}, capabilities={"regression": {"algorithms": regression, "splits": ["chronological_holdout", "grouped_holdout"]}, "binary_classification": {"algorithms": classification, "splits": ["stratified_holdout"]}, "execution_mode": "sequential", "max_global_search_trials": 40, "sample_weights": False, "derived_datasets": True})
         return ARTIFACTS.run_once(context, step, {"image": image, "probe_sha256": hashlib.sha256(source.encode()).hexdigest()}, inspect)
     except (OSError, ValueError, KeyError, TypeError, WorkflowContractError) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Sandbox capability inspection is unavailable; do not infer support from installed host packages.")
@@ -2731,14 +2651,9 @@ def self_check() -> None:
             return execution
 
         invalid_plotly = execute_python_analysis({"frame_ref": frame_ref, "python_code": "emit(figure)", "seed": 12, "_server_context": context}, executor=invalid_plotly_executor)
-        assert not invalid_plotly["ok"] and invalid_plotly["evidence"]["correction_required"], invalid_plotly
-        assert "same frame_ref" in invalid_plotly["instruction"] and "do not call repair_generic_report" in invalid_plotly["instruction"], invalid_plotly
-        operation_root = ARTIFACTS.root / "operations"
-        operations_before_repair = sorted(path.name for path in operation_root.iterdir()) if operation_root.exists() else []
-        invalid_repair = repair_generic_report({"execution_ref": invalid_plotly["evidence"]["execution_ref"], "_server_context": context})
-        assert not invalid_repair["ok"] and "cannot accept the retained renderable" in invalid_repair["error"], invalid_repair
-        operations_after_repair = sorted(path.name for path in operation_root.iterdir()) if operation_root.exists() else []
-        assert operations_after_repair == operations_before_repair, "deterministic repair rejection reserved an operation"
+        assert invalid_plotly["ok"] and invalid_plotly["output_summary"]["report_status"] == "partial", invalid_plotly
+        assert invalid_plotly["evidence"]["presentation_errors"], invalid_plotly
+        assert invalid_plotly["refs"]["report_manifest_ref"]
         try:
             ml_report_contract.normalize_report_manifest(
                 execution_ref="artifact://run_without_source/sandbox-execution",
@@ -2839,12 +2754,20 @@ def self_check() -> None:
             return {"execution_id": "document", "results": [{"text": None, "mime": {DERIVED_FRAME_MIME: derived_payload}, "display_name": "cleaned-data"}], "stdout": [], "stderr": [], "error": None, "complete": {}, "input_audit": {"input_rows": 0, "valid_rows": 0, "excluded_rows": 0, "rules": []}}
 
         preprocessed = execute_python_preprocessing({"document_ref": document_ref, "python_code": "emit_frame(cleaned)", "seed": 9, "_server_context": context}, executor=fake_document_executor)
-        assert not preprocessed["ok"] and "derived frame rejected" in preprocessed["error"] and "derived datasets are disabled" in preprocessed["error"]
+        assert preprocessed["ok"] and preprocessed["derived_dataset_id"], preprocessed
+        derived = read_authorized_frame(context, preprocessed["derived_frame_ref"])[1]
+        assert derived["data"]["values"] == [[1, 2], [3, 4]]
+        try:
+            read_authorized_frame({**context, "session_id": "foreign-session"}, preprocessed["derived_frame_ref"])
+        except ArtifactAuthError:
+            pass
+        else:
+            raise AssertionError("derived frame crossed session boundary")
         foreign_document = execute_python_preprocessing({"document_ref": document_ref, "python_code": "emit_frame(cleaned)", "_server_context": {"org_id": "2", "user_id": "attacker"}}, executor=lambda *_: (_ for _ in ()).throw(AssertionError("must not execute")))
         assert not foreign_document["ok"]
         invalid_frame_execution = fake_document_executor(b"old_a,old_b\n1,3\n2,4\n", "csv", "emit_frame(cleaned)", 9)
         invalid_frame_execution["results"][0]["mime"][DERIVED_FRAME_MIME] = json.dumps({"format": "ask-o11y-dataframe-v1", "columns": ["x"], "types": ["number"], "data": [[1, 2]]})
-        invalid_derived = execute_python_preprocessing({"document_ref": document_ref, "python_code": "emit_frame(cleaned)", "seed": 9, "_server_context": context}, executor=lambda *_: invalid_frame_execution)
+        invalid_derived = execute_python_preprocessing({"document_ref": document_ref, "python_code": "emit_frame(malformed)", "seed": 9, "_server_context": context}, executor=lambda *_: invalid_frame_execution)
         assert not invalid_derived["ok"] and "derived frame rejected" in invalid_derived["error"]
 
         listed = list_python_analyses({"_server_context": context})
@@ -2866,25 +2789,6 @@ def self_check() -> None:
         policy = sandbox_policy()
         assert policy["network_default_action"] == "deny" and policy["env"] == {} and policy["volumes"] == [] and policy["resource"] == {"cpu": "4", "memory": "4Gi"}
 
-        class FakeResponse:
-            status_code = 200
-
-            def iter_lines(self):
-                return iter(["data: {\"type\":\"init\"}", "data: {\"type\":\"execution_complete\"}", "data: {\"type\":\"stdout\"}"])
-
-        class FakeStream:
-            def __enter__(self):
-                return FakeResponse()
-
-            def __exit__(self, exc_type, exc_value, traceback):
-                return False
-
-        class FakeClient:
-            def stream(self, *args, **kwargs):
-                return FakeStream()
-
-        with _ExecutionCompleteSSEClient(FakeClient()).stream("POST", "/code") as response:
-            assert list(response.iter_lines()) == ["data: {\"type\":\"init\"}", "data: {\"type\":\"execution_complete\"}", "data: {\"type\":\"stdout\"}"]
         raw = handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "execute_python_analysis", "arguments": {**args, "frame": []}}})
         assert raw is not None
         try:
@@ -2894,7 +2798,7 @@ def self_check() -> None:
         assert not payload["ok"] and "unsupported tool arguments" in payload["error"]
     ARTIFACTS = original
     setattr(uploaded_datasets, "UPLOAD_ROOT", original_upload_root)
-    print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "document_derived_output_rejected", "foreign_document_rejected", "invalid_derived_frame_rejected", "bounded_inline_results", "signed_csv_download", "200_field_output_summary", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "host_report_manifest_bindings", "trusted_report_reexport", "fresh_revision_report_ref", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))
+    print(json.dumps({"ok": True, "checks": ["authorized_frame_bundle", "trusted_validity_audit", "document_derived_output_supported", "foreign_document_rejected", "invalid_derived_frame_rejected", "bounded_inline_results", "signed_csv_download", "200_field_output_summary", "opaque_mime_artifact", "cross_conversation_list_inspect_revise", "host_report_manifest_bindings", "trusted_report_reexport", "fresh_revision_report_ref", "foreign_context_rejected", "oversized_code_rejected", "deny_all_policy", "raw_frame_rejected"]}, indent=2))
 
 
 def main() -> int:

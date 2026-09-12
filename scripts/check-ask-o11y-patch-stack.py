@@ -41,7 +41,7 @@ def main():
             Path("pkg/agent/delivery_state.go"),
             Path("pkg/agent/llm_turn_control_test.go"),
             Path("pkg/agent/analysis_autonomy.go"),
-            Path("pkg/agent/analysis_autonomy_test.go"),
+            Path("pkg/agent/llm_flow_test.go"),
             Path("pkg/agent/delivery_evidence_test.go"),
             Path("pkg/agent/plotly_recovery_test.go"),
             Path("pkg/agent/native_presentation_test.go"),
@@ -51,6 +51,9 @@ def main():
             Path("pkg/agent/report_cursor_test.go"),
             Path("pkg/plugin/report_cursor_test.go"),
         ])
+        for removed in ("analysis_autonomy_test.go", "analysis_autonomy_safety_test.go"):
+            if (Path(folder) / "pkg/agent" / removed).exists():
+                raise SystemExit(f"FAIL: retired workflow test {removed} was restored")
         for relative in expected_files:
             if (Path(folder) / relative).read_bytes() != (SOURCE / relative).read_bytes():
                 raise SystemExit(f"FAIL: reconstructed {relative} differs from tested source")

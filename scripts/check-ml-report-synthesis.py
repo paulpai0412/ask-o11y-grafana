@@ -120,9 +120,12 @@ def main() -> int:
     collapsed = normalized["sections"][0]["collapsed"]
     assert isinstance(collapsed, bool) and not collapsed
     assert normalized["sections"][0]["narrative_blocks"] == []
-    for field in ("headline", "observation", "interpretation", "limitation", "evidence"):
+    for field in ("artifact_id", "view_ids", "headline"):
         invalid = copy.deepcopy(minimal); invalid["sections"][0]["panels"][0].pop(field)
         expect_reject(contract, base_manifest, invalid, "shape")
+    for field in ("observation", "interpretation", "limitation", "evidence"):
+        optional = copy.deepcopy(minimal); optional["sections"][0]["panels"][0].pop(field)
+        contract.validate_report_synthesis(base_manifest, optional)
     for field in ("cross_chart_context", "next_step"):
         invalid = copy.deepcopy(minimal); invalid["sections"][0]["panels"][0][field] = ""
         expect_reject(contract, base_manifest, invalid, field)
@@ -149,9 +152,9 @@ def main() -> int:
     duplicated_view = copy.deepcopy(base); duplicated_view["sections"][0]["panels"][0]["view_narratives"].append(copy.deepcopy(duplicated_view["sections"][0]["panels"][0]["view_narratives"][0]))
     expect_reject(contract, base_manifest, duplicated_view, "view_narratives")
     hallucinated_number = copy.deepcopy(base); hallucinated_number["sections"][0]["panels"][0]["observation"] = "提升了 42%。"
-    expect_reject(contract, base_manifest, hallucinated_number, "numeric")
+    contract.validate_report_synthesis(base_manifest, hallucinated_number)  # The LLM, not a digit ban, owns factual prose.
     visual_number = copy.deepcopy(base); visual_number["sections"][0]["panels"][0]["view_narratives"][0]["visual_observation"] = "图中出现 42 个点。"
-    expect_reject(contract, base_manifest, visual_number, "numeric")
+    contract.validate_report_synthesis(base_manifest, visual_number)
     unsafe_html = copy.deepcopy(base); unsafe_html["sections"][0]["panels"][0]["next_step"] = "<script>alert(1)</script>"
     expect_reject(contract, base_manifest, unsafe_html, "unsafe")
     duplicate = copy.deepcopy(base); duplicate["sections"].append(copy.deepcopy(duplicate["sections"][0]))

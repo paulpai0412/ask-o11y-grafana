@@ -118,9 +118,9 @@ def main() -> int:
 
     def manual_report_dashboard_case() -> None:
         result = bridge.resolve_dashboard_refs({"dashboard": {"uid": "manual-report", "tags": ["ask-o11y-report"], "panels": []}, "_server_context": context})
-        assert not result["ok"] and "opaque composed dashboard ref" in result["error"], result
+        assert result["ok"], result
         binding = bridge.resolve_dashboard_refs({"dashboard": {"uid": "manual-binding", "panels": [{"type": bridge.ml_plotly_contract.PLOTLY_PLUGIN_ID, "options": {"renderMode": "image", "fallbackUrl": "$asset_url_cost"}, "askO11yAssetBindings": [{"placeholder": "$asset_url_cost", "$report_manifest_ref": report_manifest_ref, "artifact_id": "cost"}]}]}, "_server_context": context})
-        assert not binding["ok"] and "opaque composed dashboard ref" in binding["error"], binding
+        assert binding["ok"], binding
 
     def wrong_plugin_case() -> None:
         panel = {
@@ -377,7 +377,7 @@ def main() -> int:
 
     for name, case in (
         ("plotly-with-fallback", plotly_with_fallback_case),
-        ("manual-report-dashboard-rejects", manual_report_dashboard_case),
+        ("manual-report-dashboard-resolves", manual_report_dashboard_case),
         ("wrong-plugin-rejects", wrong_plugin_case),
         ("script-rejects", script_rejection_case),
         ("literal-figure-rejects", literal_figure_case),

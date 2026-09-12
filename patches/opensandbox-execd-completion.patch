@@ -1,0 +1,601 @@
+--- a/components/execd/pkg/jupyter/execute/execute.go
++++ b/components/execd/pkg/jupyter/execute/execute.go
+@@ -26,8 +26,6 @@
+ 	"github.com/alibaba/opensandbox/internal/safego"
+ 	"github.com/google/uuid"
+ 	"github.com/gorilla/websocket"
+-
+-	execdflag "github.com/alibaba/opensandbox/execd/pkg/flag"
+ )
+ 
+ // HTTPClient defines the HTTP client interface
+@@ -115,11 +113,12 @@
+ }
+ 
+ type streamExecutionState struct {
+-	startTime    time.Time
+-	result       *ExecutionResult
+-	executeDone  bool
+-	executeMutex sync.Mutex
+-	resultMutex  sync.Mutex
++	startTime     time.Time
++	result        *ExecutionResult
++	executeDone   bool
++	idleReceived  bool
++	replyReceived bool
++	resultMutex   sync.Mutex
+ }
+ 
+ func newStreamExecutionState(startTime time.Time) *streamExecutionState {
+@@ -148,7 +147,7 @@
+ 
+ 	// Clear temporary handlers
+ 	c.clearTemporaryHandlers()
+-	c.registerExecuteCodeStreamHandlers(state, resultChan)
++	c.registerExecuteCodeStreamHandlers(msg.Header.MessageID, state, resultChan)
+ 
+ 	if err := c.writeMessage(msg); err != nil {
+ 		return fmt.Errorf("failed to send execution request: %w", err)
+@@ -191,20 +190,34 @@
+ 	return msg, nil
+ }
+ 
+-func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, resultChan chan *ExecutionResult) {
+-	c.registerHandler(MsgExecuteReply, func(msg *Message) {
++func (c *Client) registerExecuteCodeStreamHandlers(requestID string, state *streamExecutionState, resultChan chan *ExecutionResult) {
++	register := func(kind MessageType, channel string, handler func(*Message)) {
++		c.registerHandler(kind, func(msg *Message) {
++			if msg.ParentHeader.MessageID != requestID || msg.Channel != channel {
++				return
++			}
++			state.resultMutex.Lock()
++			done := state.executeDone
++			state.resultMutex.Unlock()
++			if !done {
++				handler(msg)
++			}
++		})
++	}
++	register(MsgExecuteReply, "shell", func(msg *Message) {
+ 		c.handleExecuteReply(msg, state)
++		c.finalizeExecution(state, resultChan)
+ 	})
+-	c.registerHandler(MsgExecuteResult, func(msg *Message) {
++	register(MsgExecuteResult, "iopub", func(msg *Message) {
+ 		c.handleExecuteResult(msg, state, resultChan)
+ 	})
+-	c.registerHandler(MsgStream, func(msg *Message) {
++	register(MsgStream, "iopub", func(msg *Message) {
+ 		c.handleStreamOutput(msg, state, resultChan)
+ 	})
+-	c.registerHandler(MsgError, func(msg *Message) {
++	register(MsgError, "iopub", func(msg *Message) {
+ 		c.handleExecutionError(msg, state, resultChan)
+ 	})
+-	c.registerHandler(MsgStatus, func(msg *Message) {
++	register(MsgStatus, "iopub", func(msg *Message) {
+ 		c.handleExecutionStatus(msg, state, resultChan)
+ 	})
+ }
+@@ -217,9 +230,12 @@
+ 
+ 	state.resultMutex.Lock()
+ 	defer state.resultMutex.Unlock()
++	state.replyReceived = true
+ 	state.result.ExecutionCount = execReply.ExecutionCount
+ 	if execReply.EName != "" {
+ 		state.result.Error = &execReply.ErrorOutput
++	} else if execReply.Status != "" && execReply.Status != "ok" {
++		state.result.Error = &ErrorOutput{EName: "ExecutionFailed", EValue: execReply.Status}
+ 	}
+ }
+ 
+@@ -281,39 +297,26 @@
+ 		return
+ 	}
+ 
+-	state.executeMutex.Lock()
+-	defer state.executeMutex.Unlock()
+-	if state.executeDone {
+-		return
+-	}
+-	state.executeDone = true
+-	safego.Go(func() { c.finalizeExecution(state, resultChan) })
++	state.resultMutex.Lock()
++	state.idleReceived = true
++	state.resultMutex.Unlock()
++	c.finalizeExecution(state, resultChan)
+ }
+ 
+ func (c *Client) finalizeExecution(state *streamExecutionState, resultChan chan *ExecutionResult) {
+ 	state.resultMutex.Lock()
+-	state.result.ExecutionTime = time.Since(state.startTime)
+-	notify := &ExecutionResult{
+-		ExecutionTime: state.result.ExecutionTime,
+-	}
+-	resultChan <- notify
+-	state.resultMutex.Unlock()
+-
+-	pollInterval := execdflag.JupyterIdlePollInterval
+-	if pollInterval <= 0 {
+-		pollInterval = 100 * time.Millisecond
+-	}
+-
+-	for {
+-		state.resultMutex.Lock()
+-		done := state.result.ExecutionCount > 0 || state.result.Error != nil
+-		state.resultMutex.Unlock()
+-		if done {
+-			break
+-		}
+-		time.Sleep(pollInterval)
+-	}
+-
++	defer state.resultMutex.Unlock()
++	// Shell reply and IOPub idle may arrive in either order. Neither alone
++	// establishes completion of this request and its synchronous outputs.
++	if state.executeDone || !state.idleReceived || !state.replyReceived {
++		return
++	}
++	state.executeDone = true
++	resultChan <- &ExecutionResult{
++		ExecutionTime:  time.Since(state.startTime),
++		ExecutionCount: state.result.ExecutionCount,
++		Error:          state.result.Error,
++	}
+ 	close(resultChan)
+ }
+ 
+--- a/components/execd/pkg/jupyter/execute/execute_test.go
++++ b/components/execd/pkg/jupyter/execute/execute_test.go
+@@ -1,11 +1,7 @@
+ // Copyright 2025 Alibaba Group Holding Ltd.
+-//
+ // Licensed under the Apache License, Version 2.0 (the "License");
+ // you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
++// You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ // Unless required by applicable law or agreed to in writing, software
+ // distributed under the License is distributed on an "AS IS" BASIS,
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@@ -24,277 +20,68 @@
+ 
+ 	"github.com/gorilla/websocket"
+ 	"github.com/stretchr/testify/require"
+-
+-	execdflag "github.com/alibaba/opensandbox/execd/pkg/flag"
+ )
+ 
+-// Create WebSocket test server
+ func createTestServer(t *testing.T, handleFunc func(conn *websocket.Conn)) *httptest.Server {
+-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+-		// Validate request path
+-		if !strings.HasPrefix(r.URL.Path, "/api/kernels/") {
+-			t.Errorf("expected path to start with '/api/kernels/', got '%s'", r.URL.Path)
+-		}
+-		if !strings.HasSuffix(r.URL.Path, "/channels") {
+-			t.Errorf("expected path to end with '/channels', got '%s'", r.URL.Path)
+-		}
+-
+-		// Upgrade HTTP connection to WebSocket
+-		upgrader := websocket.Upgrader{
+-			CheckOrigin: func(r *http.Request) bool { return true },
+-		}
++	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		require.True(t, strings.HasPrefix(r.URL.Path, "/api/kernels/"))
++		require.True(t, strings.HasSuffix(r.URL.Path, "/channels"))
++		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+ 		conn, err := upgrader.Upgrade(w, r, nil)
+ 		if err != nil {
+-			t.Fatalf("failed to upgrade to WebSocket: %v", err)
++			t.Error(err)
++			return
+ 		}
+ 		defer conn.Close()
+-
+-		// Handle WebSocket connection
+ 		handleFunc(conn)
+ 	}))
+-
+-	return server
+ }
+ 
+-// Test streaming code execution
+ func TestExecuteCodeStream(t *testing.T) {
+-	// Spin up mock WebSocket server
+ 	server := createTestServer(t, func(conn *websocket.Conn) {
+-		// Read execution request
+-		var executeRequest Message
+-		err := conn.ReadJSON(&executeRequest)
+-		if err != nil {
+-			t.Fatalf("failed to read execution request: %v", err)
++		var request Message
++		if err := conn.ReadJSON(&request); err != nil {
++			t.Error(err)
++			return
+ 		}
+-
+-		// Send multiple stream messages
++		send := func(kind MessageType, channel string, content any) {
++			payload, _ := json.Marshal(content)
++			if err := conn.WriteJSON(Message{Header: Header{MessageType: string(kind)}, ParentHeader: request.Header, Channel: channel, Content: payload}); err != nil {
++				t.Error(err)
++			}
++		}
+ 		for i := 0; i < 3; i++ {
+-			streamContent, _ := json.Marshal(StreamOutput{
+-				Name: StreamStdout,
+-				Text: "Line " + string(rune('0'+i)) + "\n",
+-			})
+-
+-			streamMsg := Message{
+-				Header: Header{
+-					MessageID:   "stream-msg-id-" + string(rune('0'+i)),
+-					Session:     executeRequest.Header.Session,
+-					MessageType: string(MsgStream),
+-				},
+-				ParentHeader: executeRequest.Header,
+-				Content:      json.RawMessage(streamContent),
+-			}
+-			conn.WriteJSON(streamMsg)
+-			time.Sleep(100 * time.Millisecond)
++			send(MsgStream, "iopub", StreamOutput{Name: StreamStdout, Text: "line\n"})
+ 		}
+-
+-		// Send execution result
+-		resultContent, _ := json.Marshal(ExecuteResult{
+-			ExecutionCount: 1,
+-			Data: map[string]interface{}{
+-				"text/plain": "Completed",
+-			},
+-			Metadata: map[string]interface{}{},
+-		})
+-
+-		executeResultMsg := Message{
+-			Header: Header{
+-				MessageID:   "result-msg-id",
+-				Session:     executeRequest.Header.Session,
+-				MessageType: string(MsgExecuteResult),
+-			},
+-			ParentHeader: executeRequest.Header,
+-			Content:      json.RawMessage(resultContent),
+-		}
+-		conn.WriteJSON(executeResultMsg)
+-
+-		// Send status message
+-		statusContent, _ := json.Marshal(StatusUpdate{
+-			ExecutionState: StateIdle,
+-		})
+-
+-		statusMsg := Message{
+-			Header: Header{
+-				MessageID:   "status-msg-id",
+-				Session:     executeRequest.Header.Session,
+-				MessageType: string(MsgStatus),
+-			},
+-			ParentHeader: executeRequest.Header,
+-			Content:      json.RawMessage(statusContent),
+-		}
+-		conn.WriteJSON(statusMsg)
++		send(MsgExecuteResult, "iopub", ExecuteResult{ExecutionCount: 1, Data: map[string]interface{}{"text/plain": "Completed"}})
++		send(MsgExecuteReply, "shell", ExecuteReply{ExecutionCount: 1, Status: "ok"})
++		send(MsgStatus, "iopub", StatusUpdate{ExecutionState: StateIdle})
+ 	})
+ 	defer server.Close()
+-
+-	// Convert HTTP URL to WebSocket URL
+-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/test-kernel-id/channels"
+-
+-	// Create executor client
+-	executor := NewExecutor(wsURL, nil)
+-
+-	// Connect to WebSocket
+-	err := executor.Connect()
+-	if err != nil {
+-		t.Fatalf("failed to connect to WebSocket: %v", err)
+-	}
++	executor := NewExecutor("ws"+strings.TrimPrefix(server.URL, "http")+"/api/kernels/test/channels", nil)
++	require.NoError(t, executor.Connect())
+ 	defer executor.Disconnect()
+-
+-	// Execute code in streaming mode
+-	resultChan := make(chan *ExecutionResult, 10)
+-	err = executor.ExecuteCodeStream("for i in range(3):\n    print(f'Line {i}')", resultChan)
+-	if err != nil {
+-		t.Fatalf("failed to start streaming execution: %v", err)
+-	}
+-
+-	// Receive and verify stream results
+-	resultCount := 0
+-	for result := range resultChan {
+-		if result == nil {
+-			break
++	results := make(chan *ExecutionResult, 10)
++	require.NoError(t, executor.ExecuteCodeStream("print('line')", results))
++	streams, values, complete := 0, 0, 0
++	for {
++		select {
++		case result, ok := <-results:
++			if !ok {
++				require.Equal(t, 3, streams)
++				require.Equal(t, 1, values)
++				require.Equal(t, 1, complete)
++				return
++			}
++			streams += len(result.Stream)
++			if len(result.ExecutionData) > 0 {
++				values++
++			}
++			if result.ExecutionTime > 0 {
++				complete++
++			}
++		case <-time.After(time.Second):
++			t.Fatal("stream did not close")
+ 		}
+-		resultCount++
+-	}
+-
+-	// Should receive at least 4 results (3 stream outputs + 1 final result)
+-	if resultCount < 4 {
+-		t.Errorf("expected at least 4 results, got %d", resultCount)
+ 	}
+ }
+-
+-func TestExecuteCodeStreamWaitsForLateExecuteResultUsingConfiguredPollInterval(t *testing.T) {
+-	previousPollInterval := execdflag.JupyterIdlePollInterval
+-	execdflag.JupyterIdlePollInterval = time.Millisecond
+-	t.Cleanup(func() {
+-		execdflag.JupyterIdlePollInterval = previousPollInterval
+-	})
+-
+-	server := createTestServer(t, func(conn *websocket.Conn) {
+-		var executeRequest Message
+-		err := conn.ReadJSON(&executeRequest)
+-		if err != nil {
+-			t.Fatalf("failed to read execution request: %v", err)
+-		}
+-
+-		statusContent, _ := json.Marshal(StatusUpdate{ExecutionState: StateIdle})
+-		statusMsg := Message{
+-			Header: Header{
+-				MessageID:   "status-msg-id",
+-				Session:     executeRequest.Header.Session,
+-				MessageType: string(MsgStatus),
+-			},
+-			ParentHeader: executeRequest.Header,
+-			Content:      json.RawMessage(statusContent),
+-		}
+-		require.NoError(t, conn.WriteJSON(statusMsg))
+-
+-		time.Sleep(15 * time.Millisecond)
+-
+-		resultContent, _ := json.Marshal(ExecuteResult{
+-			ExecutionCount: 1,
+-			Data: map[string]interface{}{
+-				"text/plain": "Completed late",
+-			},
+-			Metadata: map[string]interface{}{},
+-		})
+-		executeResultMsg := Message{
+-			Header: Header{
+-				MessageID:   "result-msg-id",
+-				Session:     executeRequest.Header.Session,
+-				MessageType: string(MsgExecuteResult),
+-			},
+-			ParentHeader: executeRequest.Header,
+-			Content:      json.RawMessage(resultContent),
+-		}
+-		require.NoError(t, conn.WriteJSON(executeResultMsg))
+-	})
+-	defer server.Close()
+-
+-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/test-kernel-id/channels"
+-	executor := NewExecutor(wsURL, nil)
+-	require.NoError(t, executor.Connect())
+-	defer executor.Disconnect()
+-
+-	resultChan := make(chan *ExecutionResult, 10)
+-	require.NoError(t, executor.ExecuteCodeStream("print('late result')", resultChan))
+-
+-	start := time.Now()
+-	var gotLateResult bool
+-	for result := range resultChan {
+-		if result != nil && result.ExecutionCount == 1 {
+-			gotLateResult = true
+-		}
+-	}
+-	elapsed := time.Since(start)
+-
+-	require.True(t, gotLateResult, "expected late execute_result to be delivered before stream close")
+-	require.Less(t, elapsed, 100*time.Millisecond, "expected stream to close promptly after late execute_result")
+-}
+-
+-func TestExecuteCodeStreamFallsBackWhenPollIntervalIsNonPositive(t *testing.T) {
+-	previousPollInterval := execdflag.JupyterIdlePollInterval
+-	execdflag.JupyterIdlePollInterval = 0
+-	t.Cleanup(func() {
+-		execdflag.JupyterIdlePollInterval = previousPollInterval
+-	})
+-
+-	server := createTestServer(t, func(conn *websocket.Conn) {
+-		var executeRequest Message
+-		err := conn.ReadJSON(&executeRequest)
+-		if err != nil {
+-			t.Fatalf("failed to read execution request: %v", err)
+-		}
+-
+-		statusContent, _ := json.Marshal(StatusUpdate{ExecutionState: StateIdle})
+-		statusMsg := Message{
+-			Header: Header{
+-				MessageID:   "status-msg-id",
+-				Session:     executeRequest.Header.Session,
+-				MessageType: string(MsgStatus),
+-			},
+-			ParentHeader: executeRequest.Header,
+-			Content:      json.RawMessage(statusContent),
+-		}
+-		require.NoError(t, conn.WriteJSON(statusMsg))
+-
+-		time.Sleep(15 * time.Millisecond)
+-
+-		resultContent, _ := json.Marshal(ExecuteResult{
+-			ExecutionCount: 1,
+-			Data: map[string]interface{}{
+-				"text/plain": "Completed with fallback",
+-			},
+-			Metadata: map[string]interface{}{},
+-		})
+-		executeResultMsg := Message{
+-			Header: Header{
+-				MessageID:   "result-msg-id",
+-				Session:     executeRequest.Header.Session,
+-				MessageType: string(MsgExecuteResult),
+-			},
+-			ParentHeader: executeRequest.Header,
+-			Content:      json.RawMessage(resultContent),
+-		}
+-		require.NoError(t, conn.WriteJSON(executeResultMsg))
+-	})
+-	defer server.Close()
+-
+-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/test-kernel-id/channels"
+-	executor := NewExecutor(wsURL, nil)
+-	require.NoError(t, executor.Connect())
+-	defer executor.Disconnect()
+-
+-	resultChan := make(chan *ExecutionResult, 10)
+-	require.NoError(t, executor.ExecuteCodeStream("print('fallback')", resultChan))
+-
+-	start := time.Now()
+-	var gotLateResult bool
+-	for result := range resultChan {
+-		if result != nil && result.ExecutionCount == 1 {
+-			gotLateResult = true
+-		}
+-	}
+-	elapsed := time.Since(start)
+-
+-	require.True(t, gotLateResult, "expected late execute_result to be delivered before stream close")
+-	require.GreaterOrEqual(t, elapsed, 90*time.Millisecond, "expected non-positive poll interval to fall back to runtime default (100ms)")
+-	require.Less(t, elapsed, 300*time.Millisecond, "expected fallback poll interval to still close stream promptly")
+-}
+--- /dev/null
++++ b/components/execd/pkg/jupyter/execute/completion_test.go
+@@ -0,0 +1,114 @@
++package execute
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gorilla/websocket"
++	"github.com/stretchr/testify/require"
++)
++
++// Kernel status is request-scoped, not a global execution-complete signal.
++func TestCompletionBelongsToRequest(t *testing.T) {
++	for _, tc := range []struct {
++		name              string
++		idleFirst, failed bool
++	}{
++		{"reply-first", false, false}, {"idle-first", true, false}, {"error", true, true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			release := make(chan struct{})
++			server := createTestServer(t, func(conn *websocket.Conn) {
++				var request Message
++				if err := conn.ReadJSON(&request); err != nil {
++					t.Error(err)
++					return
++				}
++				send := func(kind MessageType, parent, channel string, content any) {
++					payload, _ := json.Marshal(content)
++					err := conn.WriteJSON(Message{Header: Header{MessageType: string(kind)}, ParentHeader: Header{MessageID: parent}, Channel: channel, Content: payload})
++					if err != nil {
++						t.Error(err)
++					}
++				}
++				id := request.Header.MessageID
++				// Foreign idle/reply/error and wrong-channel idle must not complete or contaminate this request.
++				send(MsgExecuteReply, "kernel-info", "shell", ExecuteReply{ExecutionCount: 99})
++				send(MsgStatus, "kernel-info", "iopub", StatusUpdate{ExecutionState: StateIdle})
++				send(MsgError, "kernel-info", "iopub", ErrorOutput{EName: "ForeignError"})
++				send(MsgStatus, id, "shell", StatusUpdate{ExecutionState: StateIdle})
++				reply := ExecuteReply{ExecutionCount: 1}
++				if tc.failed {
++					reply.ErrorOutput = ErrorOutput{EName: "ValueError", EValue: "probe"}
++				}
++				if tc.idleFirst {
++					if tc.failed {
++						send(MsgError, id, "iopub", reply.ErrorOutput)
++					}
++					send(MsgStatus, id, "iopub", StatusUpdate{ExecutionState: StateIdle})
++				} else {
++					send(MsgExecuteReply, id, "shell", reply)
++				}
++				send(MsgStream, id, "iopub", StreamOutput{Name: StreamStdout, Text: "waiting"})
++				<-release
++				if tc.idleFirst {
++					send(MsgExecuteReply, id, "shell", reply)
++				} else {
++					send(MsgStatus, id, "iopub", StatusUpdate{ExecutionState: StateIdle})
++				}
++			})
++			defer server.Close()
++			executor := NewExecutor("ws"+strings.TrimPrefix(server.URL, "http")+"/api/kernels/test/channels", nil)
++			require.NoError(t, executor.Connect())
++			defer executor.Disconnect()
++			results := make(chan *ExecutionResult, 10)
++			require.NoError(t, executor.ExecuteCodeStream("print('waiting')", results))
++			premature := false
++			waiting := false
++			for !waiting {
++				select {
++				case result, ok := <-results:
++					if !ok {
++						premature = true
++						waiting = true
++						break
++					}
++					if result.ExecutionTime > 0 {
++						premature = true
++					}
++					if result.Error != nil && result.Error.EName == "ForeignError" {
++						t.Error("foreign error leaked")
++					}
++					for _, stream := range result.Stream {
++						if stream.Text == "waiting" {
++							waiting = true
++						}
++					}
++				case <-time.After(time.Second):
++					t.Error("missing stream marker")
++					waiting = true
++				}
++			}
++			close(release)
++			require.False(t, premature, "completed before matching reply AND idle")
++			terminals := 0
++			for {
++				select {
++				case result, ok := <-results:
++					if !ok {
++						require.Equal(t, 1, terminals)
++						return
++					}
++					if result.ExecutionTime > 0 {
++						terminals++
++						require.Equal(t, tc.failed, result.Error != nil)
++					}
++				case <-time.After(time.Second):
++					t.Fatal("did not finish after matching reply and idle")
++				}
++			}
++		})
++	}
++}

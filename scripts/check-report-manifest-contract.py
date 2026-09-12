@@ -140,7 +140,7 @@ def main() -> int:
                 plotly_result("trend.plotly", figure),
             ))
             plotly_render = plotly_only["artifacts"][0]["render"]
-            assert plotly_only["format"] == "ask-o11y-report-manifest-v1", plotly_only
+            assert plotly_only["format"] == "ask-o11y-report-manifest-v2", plotly_only
             assert plotly_only["execution_ref"] == EXECUTION_REF, plotly_only
             assert plotly_render["mode"] == "plotly" and plotly_render["output_index"] == 1, plotly_render
             assert plotly_render["mime_type"] == "application/vnd.plotly.v1+json", plotly_render
@@ -164,15 +164,14 @@ def main() -> int:
             assert "png_output_index" not in both_artifact and "fallback" not in json.dumps(both_artifact), both_artifact
 
         def invalid_figure_case() -> None:
-            invalid_figure = {"data": [{"type": "scatter", "x": [1], "y": [1], "customdata": ["row"]}], "layout": {}}
-            expect_reject(
-                lambda: normalize(contract, results(
-                    report_source([artifact("trend", plotly="trend.plotly", png="trend.png")]),
-                    plotly_result("trend.plotly", invalid_figure),
-                    png_result("trend.png"),
-                )),
-                "customdata",
-            )
+            invalid_figure = {"data": "not-an-array", "layout": {}}
+            normalized = normalize(contract, results(
+                report_source([artifact("trend", plotly="trend.plotly", png="trend.png")]),
+                plotly_result("trend.plotly", invalid_figure),
+                png_result("trend.png"),
+            ))
+            item = normalized["artifacts"][0]
+            assert item["render"]["mode"] == "error" and item["render"]["error_code"], item
 
         def invalid_png_case() -> None:
             expect_reject(
@@ -250,7 +249,7 @@ def main() -> int:
                 {"display_name": "data-profile.json", "mime": {"application/json": json.dumps(ordinary)}},
                 png_result("trend.png"),
             ))
-            assert normalized["format"] == "ask-o11y-report-manifest-v1", normalized
+            assert normalized["format"] == "ask-o11y-report-manifest-v2", normalized
 
         def safe_fact_catalog_case() -> None:
             plotly_only = normalize(contract, results(

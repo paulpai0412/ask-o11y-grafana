@@ -330,12 +330,12 @@ def verify_authorized_plan(context: dict[str, str], plan: dict[str, Any]) -> Non
         raise ValueError("CONTRACT_HASH_MISMATCH")
 
 
-_RELATIVE_TIME_RANGE = re.compile(r"^now-(?P<amount>[1-9]\\d*)(?P<unit>[smhdw])$")
+_RELATIVE_TIME_RANGE = re.compile(r"^now-(?P<amount>[1-9]\d*)(?P<unit>[smhdw])$")
 
 
-def parse_time_bound(value: str) -> datetime:
+def parse_time_bound(value: str, reference_time: datetime) -> datetime:
     if value == "now":
-        return datetime.now(timezone.utc)
+        return reference_time
     match = _RELATIVE_TIME_RANGE.fullmatch(value)
     if not match:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -343,8 +343,8 @@ def parse_time_bound(value: str) -> datetime:
         amount = int(match.group("amount"))
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("relative time range amount is invalid") from exc
-    delta = {"s": timedelta(seconds=amount), "m": timedelta(minutes=amount), "h": timedelta(hours=amount), "d": timedelta(days=amount), "w": timedelta(weeks=amount)}[match.group("unit")]
-    return datetime.now(timezone.utc) - delta
+    unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days", "w": "weeks"}[match.group("unit")]
+    return reference_time - timedelta(**{unit: amount})
 
 
 def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
@@ -378,10 +378,11 @@ def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(time_range, dict) or not isinstance(time_range.get("from"), str) or not isinstance(time_range.get("to"), str):
         return error_response(step="execute_planned_query", error="plan artifact must contain a bounded time_range", recoverable=False, instruction="Stop; invalid plan artifact.")
     try:
-        start = parse_time_bound(time_range["from"])
-        end = parse_time_bound(time_range["to"])
+        reference_time = datetime.now(timezone.utc)
+        start = parse_time_bound(time_range["from"], reference_time)
+        end = parse_time_bound(time_range["to"], reference_time)
         maximum_bytes = int(contract.get("maximum_response_bytes", MAX_RESPONSE_BYTES))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return error_response(step="execute_planned_query", error="plan bounds are invalid", recoverable=False, instruction="Stop; invalid plan artifact.")
     if end < start or (end - start).total_seconds() > MAX_TIME_RANGE_SECONDS or not 1 <= maximum_bytes <= MAX_RESPONSE_BYTES:
         return error_response(step="execute_planned_query", error="plan bounds exceed executor limits", recoverable=False, instruction="Stop; invalid plan artifact.")

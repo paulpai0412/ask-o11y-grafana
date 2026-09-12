@@ -74,8 +74,10 @@ def _safe_text(value: Any, where: str) -> None:
 
 
 def _validate_display_evidence(evidence: Any, where: str) -> None:
-    if not isinstance(evidence, list) or not evidence:
-        raise ValueError(f"{where} evidence is required")
+    if evidence is None:
+        return
+    if not isinstance(evidence, list):
+        raise ValueError(f"{where} evidence must be an array")
     for item in evidence:
         if not isinstance(item, dict) or set(item) != {"fact_ref", "label", "display"}:
             raise ValueError(f"{where} evidence shape is invalid")
@@ -85,13 +87,14 @@ def _validate_display_evidence(evidence: Any, where: str) -> None:
 
 def _validate_narrative(panel: dict[str, Any]) -> None:
     narrative = panel.get("askO11yNarrative")
-    required = NARRATIVE_FIELDS - {"cross_chart_context", "next_step"}
-    if not isinstance(narrative, dict) or not required <= set(narrative) <= NARRATIVE_FIELDS:
+    if narrative is None:
+        return
+    if not isinstance(narrative, dict) or not set(narrative) <= NARRATIVE_FIELDS:
         raise ValueError("evidence panel requires an evidence-bound askO11yNarrative")
     for key in set(narrative) - {"evidence"}:
         _safe_text(narrative.get(key), f"narrative.{key}")
-    evidence = narrative.get("evidence")
-    if not isinstance(evidence, list) or not 1 <= len(evidence) <= 8:
+    evidence = narrative.get("evidence", [])
+    if not isinstance(evidence, list) or len(evidence) > 8:
         raise ValueError("panel narrative evidence is outside bounds")
     for item in evidence:
         if not isinstance(item, dict) or set(item) != {"fact_ref", "label", "display"}:
@@ -101,22 +104,20 @@ def _validate_narrative(panel: dict[str, Any]) -> None:
 
 
 def _validate_view_narratives(panel: dict[str, Any], view_ids: list[str]) -> None:
-    narratives = panel.get("askO11yViewNarratives")
+    narratives = panel.get("askO11yViewNarratives", [])
     if not isinstance(narratives, list) or len(narratives) > len(view_ids):
         raise ValueError("view narratives exceed selected views")
     narrative_ids = []
     required = {"view_id", "headline", "data_observation", "visual_observation", "interpretation", "limitation", "evidence"}
     for narrative in narratives:
-        if not isinstance(narrative, dict) or not required <= set(narrative) <= required | {"next_step"}:
+        if not isinstance(narrative, dict) or not {"view_id"} <= set(narrative) <= required | {"next_step"}:
             raise ValueError("view narrative shape is invalid")
         narrative_ids.append(narrative.get("view_id"))
         for key in set(narrative) - {"view_id", "visual_observation", "evidence"}:
             _safe_text(narrative.get(key), f"view narrative {key}")
         if narrative.get("visual_observation") is not None:
             _safe_text(narrative["visual_observation"], "view narrative visual observation")
-        evidence = narrative.get("evidence")
-        if not isinstance(evidence, list) or not evidence:
-            raise ValueError("view narrative evidence is required")
+        _validate_display_evidence(narrative.get("evidence"), "view narrative")
     if not set(narrative_ids).issubset(view_ids) or len(set(narrative_ids)) != len(narrative_ids):
         raise ValueError("view narratives do not match selected view ids")
 
@@ -138,28 +139,15 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
     if require_uid and (not isinstance(dashboard.get("uid"), str) or not dashboard["uid"].strip()):
         raise ValueError("dashboard requires a stable UID")
     tags = dashboard.get("tags")
-    if not isinstance(tags, list) or PREVIEW_TAG not in tags or REPORT_TAG not in tags:
+    if not isinstance(tags, list) or PREVIEW_TAG not in tags:
         raise ValueError("report dashboard must remain a tagged Preview")
     top_level = dashboard.get("panels")
     if not isinstance(top_level, list) or not top_level:
         raise ValueError("dashboard panels are required")
-    _story_rows([item for item in top_level if isinstance(item, dict)])
-    thesis_panels = [item for item in top_level if isinstance(item, dict) and item.get("askO11yReportThesis") is not None]
-    if len(thesis_panels) != 1 or thesis_panels[0].get("type") != "text":
-        raise ValueError("report dashboard requires one LLM-authored thesis panel")
-    question_panel = thesis_panels[0]
-    if question_panel.get("askO11yBusinessQuestionSource") not in {"host_retained_plan", "retained_question_unverified"}:
-        raise ValueError("report dashboard requires a recognized retained-question source")
-    _safe_text(question_panel.get("askO11yBusinessQuestion"), "business question")
-    _safe_text(thesis_panels[0].get("askO11yReportThesis"), "report thesis")
-    _validate_display_evidence(thesis_panels[0].get("askO11yThesisEvidence"), "report thesis")
+    # Report layout, thesis and evidence selection belong to the author.
     flattened = _panels([item for item in top_level if isinstance(item, dict)])
     if len(flattened) > MAX_PANELS:
         raise ValueError("dashboard panel count exceeds bound")
-    if any(panel.get("targets") for panel in flattened):
-        raise ValueError("analysis dashboard may contain evidence/text panels only")
-    if any(panel.get("type") not in {"row", "text", PLOTLY_PLUGIN_ID} for panel in flattened):
-        raise ValueError("report dashboard contains an unsupported panel type")
 
     narrative_blocks = [panel for panel in flattened if panel.get("askO11yNarrativeBlock") is not None]
     for panel in narrative_blocks:
@@ -173,8 +161,6 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
         if panel.get("type") == "text":
             validate_narrative_content((panel.get("options") or {}).get("content", ""))
     evidence_panels = [panel for panel in flattened if panel.get("askO11yArtifactId") is not None]
-    if not evidence_panels:
-        raise ValueError("report dashboard requires at least one evidence panel")
     for panel in evidence_panels:
         if panel.get("type") != PLOTLY_PLUGIN_ID:
             raise ValueError("all image evidence must use the Plotly plugin")
@@ -214,8 +200,8 @@ def _validate_dashboard(dashboard: dict[str, Any], *, require_uid: bool) -> None
             if not isinstance(plotly_bindings, list):
                 raise ValueError("Plotly bindings must be an array")
             mode = options.get("renderMode")
-            if mode not in {"image", "plotly"} or "narrative" not in options:
-                raise ValueError("image evidence requires an explicit mode and narrative")
+            if mode not in {"image", "plotly"}:
+                raise ValueError("image evidence requires an explicit mode")
             if mode == "image" and (not panel_placeholders or options.get("fallbackUrl") not in panel_placeholders or plotly_bindings or "figure" in options):
                 raise ValueError("image mode requires an opaque PNG binding")
             if mode == "plotly" and not plotly_bindings:

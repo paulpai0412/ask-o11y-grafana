@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -28,7 +29,7 @@ def main() -> int:
 
     render_mode = PANEL / "src/renderMode.mjs"
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", f"import{{resolveRenderMode as r,shouldShowPanelNarrative as n}}from'{render_mode.as_uri()}';if(r({{figure:{{data:[],layout:{{}}}}}})!=='plotly'||r({{renderMode:'image',fallbackUrl:'x'}})!=='image'||r({{fallbackUrl:'x'}})!=='error'||r({{renderMode:'plotly',figure:{{data:null}},fallbackUrl:'x'}})!=='error'||r({{renderMode:'image',figure:{{data:[]}},fallbackUrl:'x'}})!=='error'||n(1)!==false||n(2)!==true)process.exit(2)"],
+        ["node", "--input-type=module", "-e", f"import{{resolveRenderMode as r,shouldShowPanelNarrative as n}}from'{render_mode.as_uri()}';if(r({{figure:{{data:[{{type:'scatter',x:[1],y:[2]}}],layout:{{}}}}}})!=='plotly'||r({{renderMode:'image',fallbackUrl:'x'}})!=='image'||r({{fallbackUrl:'x'}})!=='error'||r({{renderMode:'plotly',figure:{{data:null}},fallbackUrl:'x'}})!=='error'||r({{renderMode:'image',figure:{{data:[]}},fallbackUrl:'x'}})!=='error'||n(1)!==false||n(2)!==true)process.exit(2)"],
         check=False, capture_output=True, text=True,
     )
     if result.returncode:
@@ -59,7 +60,7 @@ def main() -> int:
         for name in ("package.json", "tsconfig.json", "webpack.config.cjs"):
             shutil.copyfile(PANEL / name, build / name)
         (build / "node_modules").symlink_to(PANEL / "node_modules", target_is_directory=True)
-        subprocess.run(["npm", "run", "build"], cwd=build, check=True, timeout=180)
+        subprocess.run(["npm", "run", "build"], cwd=build, check=True, timeout=180, env={**os.environ, "PLOTLY_PYTHON": str(ROOT / ".venv/bin/python")})
         dist = build / "dist/module.js"
         assert dist.stat().st_size > 1_000_000, dist
         bundle = dist.read_text(errors="ignore")

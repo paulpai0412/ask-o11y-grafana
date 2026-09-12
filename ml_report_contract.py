@@ -46,8 +46,8 @@ PRIORITIES = {"primary", "supporting", "technical"}
 WIDTHS = {"full", "half"}
 VIEW_TEXT_FIELDS = ("headline", "data_observation", "interpretation", "limitation", "next_step")
 SECTION_REQUIRED_FIELDS = ("section_id", "title", "purpose", "panels")
-PANEL_REQUIRED_FIELDS = ("artifact_id", "view_ids", "headline", "observation", "interpretation", "limitation", "evidence")
-VIEW_REQUIRED_FIELDS = ("view_id", "headline", "data_observation", "interpretation", "limitation", "evidence")
+PANEL_REQUIRED_FIELDS = ("artifact_id", "view_ids", "headline")
+VIEW_REQUIRED_FIELDS = ("view_id",)
 
 
 def _safe_segment(value: Any, fallback: str) -> str:
@@ -352,13 +352,11 @@ def _safe_text(value: Any, where: str, *, identifier: bool = False) -> str:
         raise ValueError(f"{where} text is invalid")
     text = value.strip()
     lowered = text.lower()
-    if ml_plotly_contract.contains_markup(text) or any(token in lowered for token in ("http://", "https://", "javascript:", "script")):
+    if ml_plotly_contract.contains_markup(text) or any(token in lowered for token in ("http://", "https://", "javascript:")):
         raise ValueError(f"{where} contains unsafe text")
     if identifier:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", text):
             raise ValueError(f"{where} identifier is invalid")
-    elif re.search(r"\d", text):
-        raise ValueError(f"{where} contains unsupported numeric text; use evidence facts")
     return text
 
 
@@ -381,7 +379,9 @@ def _artifact_ids(manifest: dict[str, Any]) -> set[str]:
 
 
 def _validate_evidence(evidence: Any, catalog: dict[str, dict[str, Any]], where: str) -> None:
-    if not isinstance(evidence, list) or not 1 <= len(evidence) <= MAX_EVIDENCE:
+    if evidence is None:
+        return
+    if not isinstance(evidence, list) or len(evidence) > MAX_EVIDENCE:
         raise ValueError(f"{where} evidence is outside bounds")
     seen_facts = set()
     for evidence_item in evidence:
@@ -403,7 +403,7 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
     if not isinstance(synthesis, dict):
         raise ValueError("report synthesis must be an object")
     unexpected_keys = sorted(set(synthesis) - expected_keys)
-    missing_keys = sorted(expected_keys - set(synthesis))
+    missing_keys = sorted((expected_keys - {"thesis_evidence"}) - set(synthesis))
     if unexpected_keys or missing_keys:
         details = []
         if missing_keys:
@@ -441,7 +441,7 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
         block_ids = set()
         for block_index, block in enumerate(narrative_blocks):
             block_where = f"{where}.narrative_blocks[{block_index}]"
-            if not isinstance(block, dict) or set(block) != {"block_id", "title", "body", "evidence", "priority"}:
+            if not isinstance(block, dict) or not {"block_id", "title", "body", "priority"} <= set(block) <= {"block_id", "title", "body", "evidence", "priority"}:
                 raise ValueError(f"{block_where} shape is invalid")
             block_id = _safe_text(block.get("block_id"), f"{block_where}.block_id", identifier=True)
             if block_id in block_ids:
@@ -460,7 +460,7 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
             raise ValueError("report synthesis panel count exceeds bound")
         for panel_index, panel in enumerate(panels):
             panel_where = f"{where}.panels[{panel_index}]"
-            allowed = {*PANEL_REQUIRED_FIELDS, *TEXT_FIELDS, "view_narratives", "priority", "preferred_width"}
+            allowed = {*PANEL_REQUIRED_FIELDS, *TEXT_FIELDS, "evidence", "view_narratives", "priority", "preferred_width"}
             if not isinstance(panel, dict) or not set(PANEL_REQUIRED_FIELDS) <= set(panel) <= allowed:
                 raise ValueError(f"{panel_where} shape is invalid")
             artifact_id = _safe_text(panel.get("artifact_id"), f"{panel_where}.artifact_id", identifier=True)
@@ -477,7 +477,7 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
             narrative_ids = []
             for narrative_index, view_narrative in enumerate(view_narratives):
                 narrative_where = f"{panel_where}.view_narratives[{narrative_index}]"
-                allowed_view = {*VIEW_REQUIRED_FIELDS, "visual_observation", "next_step"}
+                allowed_view = {*VIEW_REQUIRED_FIELDS, *VIEW_TEXT_FIELDS, "evidence", "visual_observation", "next_step"}
                 if not isinstance(view_narrative, dict) or not set(VIEW_REQUIRED_FIELDS) <= set(view_narrative) <= allowed_view:
                     raise ValueError(f"{narrative_where} shape is invalid")
                 narrative_id = _safe_text(view_narrative.get("view_id"), f"{narrative_where}.view_id", identifier=True)
@@ -497,16 +497,18 @@ def validate_report_synthesis(manifest: dict[str, Any], synthesis: dict[str, Any
             if panel.get("priority", "supporting") not in PRIORITIES or panel.get("preferred_width", "full") not in WIDTHS:
                 raise ValueError(f"{panel_where} presentation hints are invalid")
             _validate_evidence(panel.get("evidence"), catalog, panel_where)
-    if total_panels < 1:
-        raise ValueError("report synthesis requires at least one evidence panel")
     # Validate bounds and shape before copying any untrusted nested content.
     normalized = copy.deepcopy(synthesis)
+    normalized.setdefault("thesis_evidence", [])
     for section in normalized["sections"]:
         section.setdefault("collapsed", False)
-        section.setdefault("narrative_blocks", [])
+        for block in section.setdefault("narrative_blocks", []):
+            block.setdefault("evidence", [])
         for panel in section["panels"]:
+            panel.setdefault("evidence", [])
             panel.setdefault("priority", "supporting")
             panel.setdefault("preferred_width", "full")
             for view in panel.setdefault("view_narratives", []):
+                view.setdefault("evidence", [])
                 view.setdefault("visual_observation", None)
     return normalized

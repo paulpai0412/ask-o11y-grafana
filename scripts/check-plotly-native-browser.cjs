@@ -38,6 +38,12 @@ const deps = path.join(root, ".scratch/ask-o11y-release-build/node_modules");
           alt: i < 9 ? `Retained original figure ${i - 4}` : "Inert text",
         },
   );
+  // Optional report prose must not make a valid figure crash at render time.
+  assert.ok(options[0].narrative);
+  delete options[0].narrative.evidence;
+  options[0].viewNarratives = [
+    { view_id: "figure", headline: "Optional details" },
+  ];
   options.push(charts.at(-1).options);
   const files = {
     "/react.js": path.join(deps, "react/umd/react.production.min.js"),
@@ -225,11 +231,9 @@ const deps = path.join(root, ".scratch/ask-o11y-release-build/node_modules");
       assert.deepEqual(errors, []);
       assert.deepEqual(blocked, []);
       for (const index of [3, 8, 10])
-        await page
-          .locator(`#p${index}`)
-          .screenshot({
-            path: path.join(out, `browser-${width}-panel-${index}.png`),
-          });
+        await page.locator(`#p${index}`).screenshot({
+          path: path.join(out, `browser-${width}-panel-${index}.png`),
+        });
     }
     await context.close();
     console.log(

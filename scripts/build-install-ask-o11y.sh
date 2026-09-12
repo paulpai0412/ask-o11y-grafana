@@ -48,6 +48,7 @@ git apply "$ROOT/patches/ask-o11y-prompt-cleanup.patch"
 git apply "$ROOT/patches/ask-o11y-native-plotly-delivery.patch"
 git apply "$ROOT/patches/ask-o11y-session-tool-history.patch"
 git apply "$ROOT/patches/ask-o11y-assessment-status.patch"
+git apply "$ROOT/patches/ask-o11y-llm-flow-removal.patch"
 npm ci --ignore-scripts
 npm run typecheck
 npm run build:frontend:prod

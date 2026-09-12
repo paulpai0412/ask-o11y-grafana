@@ -103,10 +103,10 @@ def main():
         generic_resolved = call('resolve_dashboard_refs', {'dashboard': {'$dashboard_ref': generic_composed['refs']['dashboard_ref']}})
         assert generic_resolved['ok']
         assert len([p for p in generic_resolved['dashboard']['panels'] if p.get('type') == 'asko11y-plotly-panel']) == len(figures)
-        assert 'not_assessed' in json.dumps(generic_resolved['dashboard'])
+        assert 'Automated evidence assessment' not in json.dumps(generic_resolved['dashboard'])
         assert generic_resolved['dashboard'].get('askO11yDeliveryStatus') != 'partial'
         notice = generic_resolved['dashboard']['panels'][0]['options']['content']
-        assert 'not a finding of missing work or failure' in notice
+        assert 'Completeness was not evaluated' not in notice
         assert 'analysis is not complete' not in notice
         assert 'analysis is not complete' not in dashboard['panels'][0]['options']['content']
         if out := os.environ.get('ASSESSMENT_NOTICE_OUT'):
@@ -120,6 +120,21 @@ def main():
                     {'name': 'artifact-bridge_compose_ml_dashboard', 'arguments': generic_args, 'result': generic_composed},
                 ],
             }], 'originals_unchanged': True, 'repair_added_compute_calls': 0}))
+        # Direct composition needs no inspection receipt, required citations or prose template.
+        direct_synthesis = copy.deepcopy(generic_synthesis)
+        direct_synthesis.pop('thesis_evidence')
+        direct_synthesis['thesis'] = 'The result contains 4 observations.'
+        direct_synthesis['sections'][0]['panels'] = [{'artifact_id': p['artifact_id'], 'view_ids': p['view_ids'], 'headline': 'Result 4'} for p in panels[:-1]]
+        direct_args = {'report_manifest_ref': generic_ref, 'synthesis': direct_synthesis, 'uid': 'direct-report', 'title': 'Direct report'}
+        direct = call('compose_ml_dashboard', direct_args)
+        assert direct['ok'], direct
+        direct_dashboard = call('resolve_dashboard_refs', {'dashboard': {'$dashboard_ref': direct['refs']['dashboard_ref']}})
+        assert direct_dashboard['ok'], direct_dashboard
+        for actor in ({**owner, 'user_id': 'other'}, {**owner, 'session_id': 'other'}):
+            assert not call('compose_ml_dashboard', direct_args, actor)['ok']
+        direct_synthesis['sections'][0]['panels'] = []
+        text_only = call('compose_ml_dashboard', {**direct_args, 'uid': 'text-only'})
+        assert text_only['ok'], text_only
         # The unchanged v1 reader preserves its digest and view identity.
         old_results = fixtures['make_results']([{'data': [{'type': 'bar', 'x': ['a'], 'y': [1]}], 'layout': {'title': 'Legacy'}}])
         old_ref = seed(old_results, legacy=True)

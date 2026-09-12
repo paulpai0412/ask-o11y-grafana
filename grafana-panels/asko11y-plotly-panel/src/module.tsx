@@ -31,23 +31,23 @@ const plotlyRuntime = Plotly as PlotlyRuntime;
 type NarrativeEvidence = { fact_ref: string; label: string; display: string };
 type ViewNarrative = {
   view_id: string;
-  headline: string;
-  data_observation: string;
-  visual_observation: string | null;
-  interpretation: string;
-  limitation: string;
+  headline?: string;
+  data_observation?: string;
+  visual_observation?: string | null;
+  interpretation?: string;
+  limitation?: string;
   next_step?: string;
-  evidence: NarrativeEvidence[];
+  evidence?: NarrativeEvidence[];
 };
 
 type Narrative = {
-  headline: string;
-  observation: string;
-  interpretation: string;
+  headline?: string;
+  observation?: string;
+  interpretation?: string;
   cross_chart_context?: string;
-  limitation: string;
+  limitation?: string;
   next_step?: string;
-  evidence: NarrativeEvidence[];
+  evidence?: NarrativeEvidence[];
 };
 
 type Options = {
@@ -86,7 +86,7 @@ function NarrativeBlock({ narrative }: { narrative?: Narrative }) {
     >
       <strong>{narrative.headline}</strong>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
-        {narrative.evidence.map((item) => (
+        {(narrative.evidence ?? []).map((item) => (
           <span
             key={item.fact_ref}
             style={{
@@ -126,7 +126,7 @@ function ViewNarrativeBlock({ narrative }: { narrative?: ViewNarrative }) {
     >
       <strong>{narrative.headline}</strong>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
-        {narrative.evidence.map((item) => (
+        {(narrative.evidence ?? []).map((item) => (
           <span
             key={item.fact_ref}
             style={{

@@ -65,7 +65,7 @@ def main() -> int:
     for field in ("headline", "observation", "interpretation", "limitation", "evidence"):
         invalid = copy.deepcopy(minimal)
         next(item for item in invalid["panels"] if item.get("askO11yArtifactId"))["askO11yNarrative"].pop(field)
-        expect_reject(invalid)
+        contract.validate_preview_dashboard(invalid)
     for mutation in ("duplicate-view", "unknown-field", "unknown-view-narrative", "empty-optional"):
         invalid = copy.deepcopy(minimal)
         target = next(item for item in invalid["panels"] if item.get("askO11yArtifactId"))
@@ -81,13 +81,13 @@ def main() -> int:
         expect_reject(invalid)
 
     missing_tag = copy.deepcopy(value); missing_tag["tags"] = ["ask-o11y-preview"]
-    expect_reject(missing_tag)
+    contract.validate_preview_dashboard(missing_tag)
     missing_section = copy.deepcopy(value); next(item for item in missing_section["panels"] if item.get("type") == "row").pop("askO11ySectionId")
-    expect_reject(missing_section)
+    contract.validate_preview_dashboard(missing_section)
     missing_narrative = copy.deepcopy(value); next(item for item in missing_narrative["panels"] if item.get("askO11yArtifactId")).pop("askO11yNarrative")
-    expect_reject(missing_narrative)
+    contract.validate_preview_dashboard(missing_narrative)
     native_target = copy.deepcopy(value); native_target["panels"].append({"type": "timeseries", "targets": [{"refId": "A"}]})
-    expect_reject(native_target)
+    contract.validate_preview_dashboard(native_target)
 
     print("ok: flow-agnostic report dashboard contract")
     return 0

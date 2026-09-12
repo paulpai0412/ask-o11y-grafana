@@ -9,7 +9,7 @@ level = "INFO"
 
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:v1.0.21"
+execd_image = "sha256:40820c279764f7b82621d87fa725b645138a2f4c0ac4868399b4ffb29aaee212"
 
 [storage]
 allowed_host_paths = ["/var/empty/opensandbox"]

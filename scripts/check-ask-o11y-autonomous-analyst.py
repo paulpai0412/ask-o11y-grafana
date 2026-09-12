@@ -8,6 +8,9 @@ alone do not cover the final skills after the NLAP and analyst patches.
 from __future__ import annotations
 
 import os
+import io
+import json
+from unittest.mock import patch
 import re
 import runpy
 import shlex
@@ -25,27 +28,24 @@ def check_configured_prompt() -> None:
     config["validate_payload"]({"jsonData": data})
     prompt = data["defaultSystemPrompt"]
     for required in (
-        "not an algorithm or analysis procedure", "not which algorithm to use",
-        "Do not treat an unspecified method as ambiguous intent",
-        "The user need not name ML", "plain-language decision summary",
-        "Keep facts, uncertainty and limitations unchanged across audiences",
-        "not a Grafana permission role and never grants access",
-        "outside the confirmed contract", "wait for confirmation",
-        "Never reinterpret prior confirmation as blanket permission",
-        "lock a winner before final holdout", "indeterminate",
-        "When the currently agreed work includes creating a Grafana Preview",
-        "Use every approved row", "ask_o11y_select_capabilities",
-        "ask_o11y_approve_analysis_scope", "Free-form Python cannot be scope-covered",
-        "Beginner-facing question alignment", "alignment_basis",
-        "proposal_not_confirmation", "actions_granted=[]",
-        "never select the first match automatically", "do not turn not_recorded into a compulsory questionnaire",
+        "Choose methods and next steps yourself", "optional helpers", "generic Python",
+        "does not need repeated", "derived data", "explicit task-specific restrictions",
+        "RBAC", "session-private", "indeterminate", "publication requires separate authorization",
     ):
         assert required in prompt, f"Configured analyst prompt missing: {required}"
     assert "as-of, chronological split" not in prompt, "No universal time split"
     assert data["approvalPolicy"] == "approved"
     assert "Include explicit `方法選擇理由`" not in prompt, "Preview needs method/evaluation substance, not mandatory headings"
-    for required in ("explain why each proposed method fits", "concrete data-quality/precondition checks", "evaluation metrics or output-integrity checks"):
-        assert required in prompt, required
+    for forbidden in ("ask_o11y_select_capabilities", "ask_o11y_approve_analysis_scope", "wait for confirmation", "Use every approved row", "inspection_ref"):
+        assert forbidden not in prompt, forbidden
+    custom = "Operator-authored prompt: preserve exactly."
+    assert config["build_json_data"]({"defaultSystemPrompt": custom}, True)["defaultSystemPrompt"] == custom
+    apply = config["apply_settings"]
+    with patch.dict(apply.__globals__, {"auth_headers": lambda: {}, "secure_mcp_headers": lambda: {}}), patch.object(config["urllib"].request, "urlopen", side_effect=[io.BytesIO(json.dumps({"jsonData": {"defaultSystemPrompt": custom}}).encode()), io.BytesIO(b"{}")]) as request:
+        apply("http://fixture.invalid", {"jsonData": data})
+        posted = json.loads(request.call_args_list[1].args[0].data)
+        assert posted["jsonData"]["defaultSystemPrompt"] == custom
+        assert data["defaultSystemPrompt"] == prompt, "apply must not mutate the supplied payload"
 
 
 def main() -> None:
@@ -63,7 +63,7 @@ def main() -> None:
     names = [Path(command[-1]).name for command in commands]
     ordered = ["ask-o11y-nlap-authority-and-effects.patch", "ask-o11y-autonomous-analyst.patch",
                "ask-o11y-bounded-autonomy.patch", "ask-o11y-approval-default.patch",
-               "ask-o11y-report-dashboard-provenance.patch", "ask-o11y-semantic-alignment.patch"]
+               "ask-o11y-report-dashboard-provenance.patch", "ask-o11y-semantic-alignment.patch", "ask-o11y-llm-flow-removal.patch"]
     assert all(names.count(name) == 1 for name in ordered), "Required overlays must be applied exactly once"
     positions = [names.index(name) for name in ordered]
     assert positions == sorted(positions), "Overlay prerequisite order changed"
@@ -74,9 +74,9 @@ def main() -> None:
             subprocess.run(command, cwd=folder, check=True)
         for relative in ("pkg/plugin/prompt_defaults.go", "pkg/agent/skills/data-understanding/SKILL.md"):
             text = (Path(folder) / relative).read_text()
-            assert "alignment_basis" in text and "proposal_not_confirmation" in text, f"Missing alignment guidance: {relative}"
+            assert "ask_o11y_approve_analysis_scope" not in text and "ask_o11y_select_capabilities" not in text, f"Retired gates survived: {relative}"
         for test in ("pkg/plugin/analyst_prompt_test.go", "pkg/agent/analyst_skills_test.go",
-                     "pkg/agent/analysis_autonomy_test.go", "pkg/agent/analysis_autonomy_safety_test.go"):
+                     "pkg/agent/llm_flow_test.go"):
             assert (Path(folder) / test).is_file(), f"Missing regression test: {test}"
         env = dict(os.environ, GOPROXY="off", GOSUMDB="off", GOTOOLCHAIN="local")
         subprocess.run([str(go.resolve()), "test", "./pkg/plugin", "./pkg/agent", "./pkg/mcp", "-skip", "Redis", "-count=1"],

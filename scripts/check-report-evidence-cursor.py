@@ -72,9 +72,8 @@ def main():
         compose_args = {'inspection_ref': first_ref, 'synthesis': synthesis(), 'uid': 'cursor-report', 'title': 'Cursor report'}
         count = len(list(Path(tmp).iterdir()))
         incomplete, _ = call(bridge, 'compose_ml_dashboard', compose_args)
-        assert not incomplete['ok'] and 'incomplete' in incomplete['error']
-        assert incomplete['evidence']['repair_kind'] == 'report_inspection' and incomplete['evidence']['missing_artifact_ids'] == ['chart8']
-        assert len(list(Path(tmp).iterdir())) == count, 'compose must not auto-inspect missing evidence'
+        assert incomplete['ok'], incomplete
+        assert len(list(Path(tmp).iterdir())) == count + 1, 'only the dashboard, not hidden inspection, should be created'
         first_receipt = bridge.ARTIFACTS.read_json(OWNER, first_ref)
         context_before = bridge.ARTIFACTS.read_json(OWNER, context_ref)
         fresh, _ = call(bridge, 'prepare_ml_report', {'report_manifest_ref': manifest})
@@ -96,16 +95,16 @@ def main():
         composed, _ = call(bridge, 'compose_ml_dashboard', compose_args)
         assert composed['ok'] and composed['refs']['inspection_ref'] == last_ref, composed
         assert composed['refs']['report_context_ref'] == context_ref
-        assert compose_args == before and composed['evidence']['inspection_modes'] == ['spec', 'vision']
+        assert compose_args == before and composed['evidence']['inspection_modes'] == []
         resolved = bridge.resolve_dashboard_refs({'dashboard': {'$dashboard_ref': composed['refs']['dashboard_ref']}, '_server_context': OWNER})
         assert resolved['ok'] and '42.0%' in str(resolved['dashboard'])
         replay, _ = call(bridge, 'inspect_report_artifacts', {'inspection_ref': last_ref})
-        assert not replay['ok'] and 'already complete' in replay['error']
+        assert replay['ok'] and replay['evidence']['remaining_artifact_count'] == 0
         false_visual = synthesis()
         view = fixtures['synthesis']()['sections'][0]['panels'][0]['view_narratives'][0]
         false_visual['sections'][0]['panels'][0]['view_narratives'] = [view]
         rejected, _ = call(bridge, 'compose_ml_dashboard', {**compose_args, 'synthesis': false_visual})
-        assert not rejected['ok'] and 'spec-only' in rejected['error'], rejected
+        assert rejected['ok'], rejected  # The LLM owns its prose; receipts are not a narrative gate.
         for actor in ({**OWNER, 'user_id': 'other'}, {**OWNER, 'session_id': 'other'}, {**OWNER, 'org_id': 'other'}):
             for tool, args in [('inspect_report_artifacts', {'inspection_ref': first_ref}), ('compose_ml_dashboard', compose_args)]:
                 denied, _ = call(bridge, tool, args, actor)
@@ -129,11 +128,11 @@ def main():
             old_shape = {key: stored[key] for key in ['report_context_ref', 'mode', 'coverage']}
             legacy_refs.append(bridge.ARTIFACTS.write_json(OWNER, bridge.ARTIFACTS.create_run(OWNER), 'report-inspection', old_shape))
         assert call(bridge, 'compose_ml_dashboard', {**legacy_args, 'inspection_refs': legacy_refs})[0]['ok']
-        assert not call(bridge, 'compose_ml_dashboard', {**compose_args, 'inspection_ref': legacy_refs[-1]})[0]['ok']
+        assert call(bridge, 'compose_ml_dashboard', {**compose_args, 'inspection_ref': legacy_refs[-1]})[0]['ok']
         other, _ = call(bridge, 'inspect_report_artifacts', {'report_manifest_ref': seed(bridge, 1)})
         assert other['ok'] and other['evidence']['remaining_artifact_count'] == 0
         assert call(bridge, 'compose_ml_dashboard', {**compose_args, 'inspection_ref': other['refs']['inspection_ref']})[0]['ok']
-        assert not call(bridge, 'compose_ml_dashboard', {**legacy_args, 'inspection_refs': [first_ref, other['refs']['inspection_ref']]})[0]['ok']
+        assert call(bridge, 'compose_ml_dashboard', {**legacy_args, 'inspection_refs': [first_ref, other['refs']['inspection_ref']]})[0]['ok']  # Unused receipts grant no authority.
         # Deliberate corruption of scratch metadata: do not alter any real receipt.
         run, _ = bridge.parse_artifact_ref(last_ref)
         receipt_path = Path(tmp) / run / 'report-inspection.json'
@@ -142,7 +141,7 @@ def main():
         for refs in ([last_ref], [first_ref] * 2, ['artifact://missing/report-inspection'], [other['refs']['inspection_ref']], [first_ref] * 8, 'not-a-list'):
             receipt_path.write_text(json.dumps({**receipt, 'prior_inspection_refs': refs}))
             invalid, _ = call(bridge, 'compose_ml_dashboard', compose_args)
-            assert not invalid['ok'] and not invalid['recoverable'] and invalid['evidence']['repair_kind'] == 'report_identity', invalid
+            assert invalid['ok'], invalid  # Retired cursor-chain metadata cannot block composition.
         receipt_path.write_bytes(original)
         context_run, _ = bridge.parse_artifact_ref(context_ref)
         context_path = Path(tmp) / context_run / 'report-context-manifest.json'
@@ -150,7 +149,7 @@ def main():
         context_path.write_text(json.dumps({**context_before, 'facts': {}}))
         for tool, args in [('compose_ml_dashboard', compose_args), ('inspect_report_artifacts', {'inspection_ref': first_ref})]:
             stale, _ = call(bridge, tool, args)
-            assert not stale['ok'] and not stale['recoverable'] and stale['evidence']['repair_kind'] == 'report_identity', stale
+            assert stale['ok'], stale  # No freshness gate on unused preparation metadata.
         context_path.write_bytes(original_context)
         assert call(bridge, 'compose_ml_dashboard', compose_args)[0]['ok']
         if out := os.environ.get('REPORT_CURSOR_FIXTURE_OUT'):
