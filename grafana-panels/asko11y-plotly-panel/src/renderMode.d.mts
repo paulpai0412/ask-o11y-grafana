@@ -4,8 +4,6 @@ export type RenderModeOptions = {
   fallbackUrl?: string;
 };
 
-export function shouldShowPanelNarrative(viewCount: number): boolean;
-
 export function resolveRenderMode(
   options: RenderModeOptions,
 ): "plotly" | "image" | "error";

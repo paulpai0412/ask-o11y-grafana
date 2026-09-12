@@ -433,13 +433,13 @@ func (a *AgentLoop) executeTool(ctx context.Context, tc ToolCall, req LoopReques
 	}
 	args["_server_session_id"] = req.SessionID
 	if tc.Function.Name == "mcp-grafana_update_dashboard" {
-		if err := a.resolveDashboardBindings(args, req); err != nil {
+		if err := a.resolveDashboardBindings(ctx, args, req); err != nil {
 			return err.Error(), true, "tool"
 		}
 	}
 	mcp.EnsureScopedGraphitiArgs(tool, args, req.OrgID)
 
-	result, err := a.mcpProxy.CallToolWithActorContext(tc.Function.Name, args, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
+	result, err := a.mcpProxy.CallToolForRequest(ctx, tc.Function.Name, args, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
 	if err != nil {
 		a.logger.Error("Tool call failed", "tool", tc.Function.Name, "error", err)
 		var te *mcp.TransportError

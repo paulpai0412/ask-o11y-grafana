@@ -9,9 +9,13 @@ Executes Ask O11y-generated Python against one authorized Grafana columnar frame
 - `list_python_analyses()`
 - `inspect_python_analysis(provenance_ref)`
 - `revise_python_analysis(provenance_ref, python_code, seed?)`
-- `repair_generic_report(execution_ref)` — one same-session host-only repair of a rejected generic report manifest; never reruns Python or promotes generic output to trusted ML
+- `reconcile_operation(operation_id?)` — inspect an owned receipt, or list recent session-owned operation statuses; never executes Python
 
-A query frame and its validity rules are transferred as bounded JSON. Original user-uploaded CSV/XLSX documents use an owner/session-bound `document_ref` and are copied into the fresh sandbox without exposing a host path. Trusted `capture.py`, baked into the image, creates filtered `df` and captures named tables, bounded CSV outputs, JSON results, Matplotlib PNG, Plotly JSON, HTML, text, errors, and validity audit. Successful generic Python renderables are host-bound to a fresh `report_manifest_ref` with stable logical artifact IDs and execution-specific output digests; a succeeded execution with a rejected report persistence receipt can use `repair_generic_report` once to create a fresh generic version from retained validated outputs; report synthesis must use that ref, not guessed output indexes. Explicit text/JSON results are returned inline up to 32 KiB total; CSV outputs receive retention-bound signed download URLs. `emit_frame(df)` returns a validated `derived_frame_ref`; document preprocessing also registers the same output as a derived session dataset for later discover/inspect/Planner/Grafana Query use. Display names never control physical paths. No CSV or SQLite input intermediate is created.
+An authorized query frame is transferred as bounded JSON; no analysis plan, fixed model template, validity rule, or report contract is required. Original uploaded CSV/XLSX documents use an owner/session-bound `document_ref`, without exposing a host path. `capture.py` creates `df` and captures the LLM-generated Python's original outputs and input audit. Native Plotly figures are referenced by `execution_ref` and `output_index`; the host resolves them for an approved Dashboard write without asking the model to copy their arrays.
+
+Text/JSON results are returned inline up to 32 KiB total; CSV outputs receive retention-bound signed download URLs. `emit_frame(df)` returns a validated `derived_frame_ref`; document preprocessing also registers that output as a derived session dataset for later discovery/query. Display names never control physical paths. No CSV or SQLite frame-input intermediate is created. Only the current execution/provenance format is supported. Legacy report readers and fixed ML/profile/report generators are removed from the source and image recipes; analysis methods and code belong to the LLM. This source change neither migrates nor deletes stored artifacts, and does not change an already running image.
+
+MCP calls carry the authenticated actor/application session and an initialized MCP session. Cancellation targets the owned call's sandbox. A cancellation request is not termination evidence: an unconfirmed outcome stays indeterminate and blocks replacement computation in that session, even with changed code. The local cancellation wiring still requires real UI/OpenSandbox acceptance.
 
 The image pins NumPy, SciPy, pandas, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna. PyTorch and TensorFlow are intentionally omitted because their image and runtime cost is disproportionate for this bounded tabular-analysis service.
 
@@ -36,13 +40,13 @@ export ANALYSIS_SERVICE_USER_ID=ask-o11y
 uv run python sandbox-analysis-mcp/server.py
 ```
 
-Run checks:
+Source-only check (does not execute Python analysis or contact services):
 
 ```bash
-uv run python sandbox-analysis-mcp/server.py --self-check
-uv run python scripts/run-sandbox-analysis-real-spike.py
-MCP_SHARED_TOKEN='<same-token>' uv run python scripts/run-sandbox-analysis-http-revision-e2e.py
+.venv/bin/python -m py_compile sandbox-analysis-mcp/server.py artifact_store.py
 ```
+
+The old `--self-check` fixture path is retired. Historical scripted spikes contain predefined data/code and are not acceptance for the minimal runtime. Acceptance requires the real Ask O11y UI, an authorized data source, actual LLM-generated code and real OpenSandbox results. Deployment, settings changes and live testing require separate authorization; see `../docs/design/ask-o11y-minimal-source.md`.
 
 ## Serving authorized image assets
 
@@ -55,5 +59,5 @@ For local Grafana use, the bridge defaults `ARTIFACT_PUBLIC_BASE` to `http://127
 - Configure OpenSandbox with gVisor or Kata; do not enable `SANDBOX_ALLOW_RUNC`.
 - Pin and publish the custom image by digest.
 - Enable OpenSandbox API authentication and set `SANDBOX_API_KEY` only in the MCP process; it is never injected into a sandbox.
-- Keep deny-all egress, empty sandbox environment, no volumes, 1 CPU, 1 GiB memory, 10-minute lifetime, and bounded input/output.
+- Keep deny-all egress, empty sandbox environment, no volumes and bounded input/output. Current source limits are 4 CPUs, 4 GiB memory and a one-hour lifetime.
 - Put the signed asset endpoint behind TLS and set `ARTIFACT_PUBLIC_BASE` to its browser-reachable URL; do not use loopback outside local development.

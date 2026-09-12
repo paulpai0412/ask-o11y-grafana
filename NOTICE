@@ -1,11 +1,12 @@
 Adaptive Ask O11y ML Platform — Third-Party Notices
 
 [ask-o11y]
-Consensys Ask O11y plugin v0.3.2 (locally patched)
+Consensys Ask O11y plugin v0.3.2 (locally maintained source)
 Copyright (c) 2026 Consensys
 License: MIT
 Source: https://github.com/Consensys/ask-o11y-plugin/tree/8395ae1
-Patch: patches/ask-o11y-dynamic-tools-and-timeout.patch
+Local source: ask-o11y/ (see ask-o11y/LOCAL-DEVELOPMENT.md)
+Historical Ask O11y patch stack: retained in Git history before patch retirement.
 
 ## Grafana Skills
 Copyright Grafana Labs and contributors.

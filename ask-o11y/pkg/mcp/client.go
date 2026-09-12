@@ -486,17 +486,31 @@ func (c *Client) CallToolWithContext(toolName string, arguments map[string]inter
 }
 
 func (c *Client) CallToolWithActorContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
+	return c.CallToolForRequest(c.ctx, toolName, arguments, orgID, orgName, scopeOrgId, actorUserID)
+}
+
+func (c *Client) CallToolForRequest(ctx context.Context, toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
+	if err := c.ctx.Err(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, toolCallTimeout)
+	defer cancel()
+	stop := context.AfterFunc(c.ctx, cancel)
+	defer stop()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Remove server ID prefix from tool name
 	originalName := strings.TrimPrefix(toolName, c.config.ID+"_")
 
 	switch c.config.Type {
 	case "openapi":
-		return c.callOpenAPIToolWithContext(originalName, arguments, orgID, orgName, scopeOrgId)
+		return c.callOpenAPIToolWithContext(ctx, originalName, arguments, orgID, orgName, scopeOrgId)
 	case "sse", "streamable-http", "http+streamable":
-		return c.callMCPToolWithActorContext(originalName, arguments, orgID, orgName, scopeOrgId, actorUserID)
+		return c.callMCPToolWithActorContext(ctx, originalName, arguments, orgID, orgName, scopeOrgId, actorUserID)
 	default:
 		// Fallback to standard MCP protocol
-		return c.callStandardTool(originalName, arguments)
+		return c.callStandardTool(ctx, originalName, arguments)
 	}
 }
 
@@ -538,12 +552,12 @@ type callToolOncer func(toolName string, arguments map[string]interface{}, orgID
 // is wrapped in *TransportError so callers can distinguish transport outages
 // from tool-layer failures and avoid fabricating around missing data.
 func (c *Client) callMCPToolWithContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
-	return c.callMCPToolWithActorContext(toolName, arguments, orgID, orgName, scopeOrgId, "")
+	return c.callMCPToolWithActorContext(c.ctx, toolName, arguments, orgID, orgName, scopeOrgId, "")
 }
 
-func (c *Client) callMCPToolWithActorContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
+func (c *Client) callMCPToolWithActorContext(ctx context.Context, toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
 	// Each call owns its connection: reconnects cannot replace another actor's session.
-	isolated := NewClient(c.ctx, c.config, c.logger, c.httpClient)
+	isolated := NewClient(ctx, c.config, c.logger, c.httpClient)
 	c.mu.RLock()
 	isolated.tools = append([]Tool(nil), c.tools...)
 	c.mu.RUnlock()
@@ -1152,7 +1166,7 @@ func getJSONType(value interface{}) string {
 
 // callOpenAPIToolWithContext calls a tool on an OpenAPI server with additional context (e.g., Org ID, Org Name, Scope Org ID)
 // Org headers are forwarded to all OpenAPI servers - each server can use whichever headers it needs.
-func (c *Client) callOpenAPIToolWithContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
+func (c *Client) callOpenAPIToolWithContext(ctx context.Context, toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
 	// Track whether we're using org context
 	useOrgContext := orgID != "" || orgName != "" || scopeOrgId != ""
 
@@ -1195,7 +1209,7 @@ func (c *Client) callOpenAPIToolWithContext(toolName string, arguments map[strin
 		return nil, fmt.Errorf("failed to marshal arguments: %w", err)
 	}
 
-	req, err := http.NewRequest(opMetadata.Method, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, opMetadata.Method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -1260,7 +1274,7 @@ func (c *Client) callOpenAPIToolWithContext(toolName string, arguments map[strin
 }
 
 // callStandardTool calls a tool on a standard MCP server
-func (c *Client) callStandardTool(toolName string, arguments map[string]interface{}) (*CallToolResult, error) {
+func (c *Client) callStandardTool(ctx context.Context, toolName string, arguments map[string]interface{}) (*CallToolResult, error) {
 	url := c.config.URL
 	if !strings.HasSuffix(url, "/") {
 		url += "/"
@@ -1289,7 +1303,7 @@ func (c *Client) callStandardTool(toolName string, arguments map[string]interfac
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

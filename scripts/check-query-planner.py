@@ -89,19 +89,12 @@ def check(planner):
         if result.get("ok") or expected_codes[name] not in codes or result.get("evidence", {}).get("downstream_call_counts") != {"grafana_query": 0, "sandbox": 0, "dashboard_write": 0}:
             raise RuntimeError(f"unsafe semantic fixture escaped: {name} {result}")
         negative_codes[name] = codes
-    wferp_context = planner.wferp_sql.build_context("科目/部門預算單身檔的已耗與可用預算", planner.WFERP_METADATA, top_k=8, ontology_snapshot=planner.ontology_contract.load_snapshot(dataset_id="wferp"))
-    if not {"ACTMI", "ACTMJ", "ACTMK"}.issubset({table["id"] for table in wferp_context["tables"]}) or len(wferp_context["relationships"]) < 2:
-        raise RuntimeError(str(wferp_context))
-    wferp_ontology = planner.ontology_contract.load_snapshot(dataset_id="wferp")
-    approved_relations = [relation for dataset in wferp_ontology["registry"]["datasets"] for relation in dataset.get("relations", []) if relation.get("status") == "approved" and bool(relation.get("executable"))]
-    if not approved_relations:
-        raise RuntimeError("WFERP ontology has no reviewed executable relation fixture")
-    print(json.dumps({"ok": True, "generic_plan_ref": plan["plan_ref"], "ontology_plan_ref": safe_plan["plan_ref"], "ontology_snapshot_sha256": identity["sha256"], "runtime_tools": [tool["name"] for tool in planner.TOOLS], "wferp_context_tables": [table["id"] for table in wferp_context["tables"]], "wferp_ontology": {"snapshot": planner.ontology_contract.snapshot_identity(wferp_ontology), "datasets": len(wferp_ontology["registry"]["datasets"]), "approved_relations": len(approved_relations)}, "negative_checks": {"generic": ["invalid_field", "natural_language_routing"], "ontology": negative_codes}}, ensure_ascii=False, indent=2))
+    print(json.dumps({"ok": True, "generic_plan_ref": plan["plan_ref"], "ontology_plan_ref": safe_plan["plan_ref"], "ontology_snapshot_sha256": identity["sha256"], "runtime_tools": [tool["name"] for tool in planner.TOOLS], "negative_checks": {"generic": ["invalid_field", "natural_language_routing"], "ontology": negative_codes}}, ensure_ascii=False, indent=2))
 
 
 def main():
     source = (ROOT / "data-query-planner-mcp/server.py").read_text()
-    for fixture_name in ("u1-operating-daily", "heat_rate", "ACTMI", "ACTMJ", "ACTMK"):
+    for fixture_name in ("u1-operating-daily", "heat_rate"):
         if fixture_name in source:
             raise AssertionError(f"dataset-specific fixture leaked into Planner: {fixture_name}")
     spec = importlib.util.spec_from_file_location("planner_check", ROOT / "data-query-planner-mcp/server.py")

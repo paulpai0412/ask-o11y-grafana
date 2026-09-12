@@ -34,7 +34,7 @@ Evidence directory: `.scratch/opensandbox-completion-fix/`.
 - The original user ML operation remains indeterminate and was not resumed or rewritten. These are real execution-layer checks, not a fresh Ask O11y ML/Dashboard E2E result.
 - Existing MCP `--self-check` has a stale Plotly expectation that rejects a figure where current report behavior preserves a partial report. Both HEAD baseline and modified source fail the same expectation (`mcp-self-check-baseline.log`, `mcp-self-check.log`). It is not reported as passing or fixed here; the current native report regression passes.
 - Go race instrumentation was unavailable: first CGO disabled, then no gcc (`execute-race*.log`). No compiler installed; ordinary Go tests and actual native execution checks passed.
-- Four changed runtime/check/config primary LSP checks and six-file scoped lens cache are clean. Unscoped session cache still reports seven errors in untouched `wferp/_Source/1_mssql_to_json.py` plus unrelated warnings; this is not a whole-repository clean claim.
+- Four changed runtime/check/config primary LSP checks and six-file scoped lens cache are clean. Unscoped session cache still reports errors in an untouched historical ETL file plus unrelated warnings; this is not a whole-repository clean claim.
 - Three unrelated string-identity scanner findings were source-verified membership comparisons, marked false-positive; `stale-diagnostic-check.json` confirms no string-identity comparisons in either file. Do not change those report assertions to satisfy stale warnings.
 - Initial Docker build using a bare config ID in FROM failed resolution; corrected to the existing repository digest and preserved both logs. No service change occurred on that failed build.
 

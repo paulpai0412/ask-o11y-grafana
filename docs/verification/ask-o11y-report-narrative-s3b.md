@@ -19,7 +19,7 @@ Source-only；主代理實作／自查，非獨立審查。TODO-d76569de，母 T
 - `render.log`：實際 plugin React SSR＋jsdom 解析 compositor HTML。文字和 entity literal 保留，HTML 已轉義；retained `p < 0.05` 可見，沒有 script/link/image/SVG/iframe/object 注入。Grafana hooks／Plotly pixels 仍 stub，**不是 browser 品質驗收**。
 - 負例：raw tags／comment／doctype／processing instruction／malformed declaration／URL／javascript 拒絕；直接敘事數字、未知 fact、spec-only 視覺宣稱仍拒絕。report 長度限制保留，rendered HTML 中 image／active tags 仍拒絕。
 - 相關回歸：synthesis、dashboard contract、compositor、legacy Bridge、cursor、analysis coverage、Plotly contract、S3a labels、dashboard write gate 全部通過。
-- 七個程式檔 primary LSP 無錯。全 session cached lens 另有 `wferp/_Source/1_mssql_to_json.py` 七個 blocking errors 與六個既有文件／shell warnings；該 ETL 不在本片範圍，未修，不宣稱全 repo clean。新 Markdown analyzer 初次 unavailable，後續兩份文件 primary LSP 無錯；不推定所有 scanner 都完成。
+- 七個程式檔 primary LSP 無錯。全 session cached lens 另有歷史 ETL 檔案的 blocking errors 與六個既有文件／shell warnings；該 ETL 不在本片範圍，未修，不宣稱全 repo clean。新 Markdown analyzer 初次 unavailable，後續兩份文件 primary LSP 無錯；不推定所有 scanner 都完成。
 - Scanner 對 `except REPORT_MANIFEST_ERRORS` 的 Boolean 誤報另以 AST／四 exception-class catch probe 核對（`exception-tuple.json`），保留原 handler。精確 `is not False` 亦保留；不是以 equality 放寬 lineage guard。
 
 重現本片新增路徑：

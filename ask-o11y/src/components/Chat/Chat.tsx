@@ -8,7 +8,14 @@ import { useChatScene } from './hooks/useChatScene';
 import { useSidePanelState } from './hooks/useSidePanelState';
 import { ChatInterfaceState } from './scenes/ChatInterfaceScene';
 import { GrafanaPageState } from './scenes/GrafanaPageScene';
-import { SessionSidebar, NewChatButton, UploadButton, HistoryButton, SaveToMemoryButton, ModelSelector } from './components';
+import {
+  SessionSidebar,
+  NewChatButton,
+  UploadButton,
+  HistoryButton,
+  SaveToMemoryButton,
+  ModelSelector,
+} from './components';
 import { ChatInputRef } from './components/ChatInput/ChatInput';
 import { ChatErrorBoundary } from '../ErrorBoundary';
 import type { SessionMetadata } from './hooks/useSessionManager';
@@ -123,20 +130,26 @@ function ChatComponent({
 
   useKeyboardNavigation(containerRef);
 
-  const handleSuggestionClick = useCallback((message: string) => {
-    setCurrentInput(message);
-    setTimeout(() => {
-      chatInputRef.current?.focus();
-    }, 100);
-  }, [setCurrentInput]);
-
-  const handleUploaded = useCallback((message: string, sessionId: string, dataset: UploadedDataset) => {
-    setUploaded({ dataset, sessionId });
-    void sessionManager.loadSession(sessionId).then(() => {
+  const handleSuggestionClick = useCallback(
+    (message: string) => {
       setCurrentInput(message);
-      setTimeout(() => chatInputRef.current?.focus(), 100);
-    });
-  }, [sessionManager, setCurrentInput]);
+      setTimeout(() => {
+        chatInputRef.current?.focus();
+      }, 100);
+    },
+    [setCurrentInput]
+  );
+
+  const handleUploaded = useCallback(
+    (message: string, sessionId: string, dataset: UploadedDataset) => {
+      setUploaded({ dataset, sessionId });
+      void sessionManager.loadSession(sessionId).then(() => {
+        setCurrentInput(message);
+        setTimeout(() => chatInputRef.current?.focus(), 100);
+      });
+    },
+    [sessionManager, setCurrentInput]
+  );
 
   const currentSession = sessionManager.sessions.find((s: SessionMetadata) => s.id === sessionManager.currentSessionId);
   const currentSessionTitle = currentSession?.title;
@@ -146,8 +159,8 @@ function ChatComponent({
   const currentModelLabel = sessionModel
     ? sessionModelOption?.label || formatModelLabel(sessionModel)
     : chatHistory.length > 0
-      ? selectedModelOption?.label || formatModelSelectionLabel(selectedModel)
-      : undefined;
+    ? selectedModelOption?.label || formatModelSelectionLabel(selectedModel)
+    : undefined;
   const hasMessages = chatHistory.length > 0;
   const graphitiEnabled = pluginSettings.mcpServers?.some((s) => s.id === 'graphiti' && s.enabled) ?? false;
   const showModelSelector = !readOnly && modelOptions.length > 0 && !sessionModel;

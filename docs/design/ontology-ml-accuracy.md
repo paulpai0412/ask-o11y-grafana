@@ -69,7 +69,7 @@ Mechanism:
    - an **as-of eligibility rule** — only events strictly before the prediction timestamp may contribute. This is point-in-time correctness made explicit; Palantir does not automate this and we should.
 3. Candidates enter a review queue like any other snapshot change; approval adds them to the feature allowlist. The plan gate then treats them identically to physical columns.
 
-Bounds: ≤ 2 hops, ≤ 32 synthetic candidates per dataset, windows/timestamps must be declared fields. Honest scope note: single-table uploads gain nothing from F; its value concentrates on WFERP-style multi-dataset analyses.
+Bounds: ≤ 2 hops, ≤ 32 synthetic candidates per dataset, windows/timestamps must be declared fields. Honest scope note: single-table uploads gain nothing from F; its value concentrates on multi-dataset relational analyses.
 
 ## Workstream G — autoresearch: budgeted auto-tuning with generalization guards
 
@@ -108,7 +108,7 @@ Measured baseline: Adult dataset, stratified split seed=42 — LogReg 0.8055 / L
 | B widened contracts | ~0 directly | enforcement reach; enables C/D for all models |
 | C quality policy | 0 on clean datasets; prevents catastrophic errors on dirty ones | floor-raising, not ceiling-raising |
 | D preprocessing library | ~0 to +1% (consistent encoding quality) | stability; removes generated-code crashes |
-| F hidden fields | dataset-dependent; large on relational data (WFERP), zero on single tables | unlocks semantically reachable signal with leakage control |
+| F hidden fields | dataset-dependent; potentially large on relational data, zero on single tables | unlocks semantically reachable signal with leakage control |
 | G autoresearch | **+2–4%** on Adult-like problems (0.835 → ≈0.87) plus generalization guarantees | the main numerical lever, with overfit detection built in |
 
 Conclusion: A–D raise the floor and make results trustworthy and reproducible. F widens the ceiling on relational datasets. G closes the gap to published leaderboards while guaranteeing that reported numbers generalize.

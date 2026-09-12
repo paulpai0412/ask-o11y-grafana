@@ -386,14 +386,10 @@ def self_check() -> None:
             raise RuntimeError("201-field classification error was not descriptive") from exc
     else:
         raise RuntimeError("201-field classification was allowed")
-    wferp = tool_get_semantic_context({"dataset_id": "ACPTA", "intent": "inspect voucher relationships"})
-    relation = wferp["context"]["relations"][0]
     observability = tool_get_semantic_context({"dataset_id": "http-server-request", "intent": "inspect HTTP latency", "fields": ["http.server.request.duration"]})
-    relation_expansion = tool_get_relation_paths({"dataset_ids": ["ACTMK"], "max_hops": 2, "limit": 8})
     manifests = tool_list_snapshots({})["snapshots"]
     catalog_entries = contract.load_catalog()["snapshots"]
-    expanded = relation_expansion["expansion"]
-    if len(manifests) != len(catalog_entries) or any(not item["snapshot_id"] or not item["sha256"] for item in manifests) or observability["context"]["asset_kind"] != "event_topic" or not {"ACTMI", "ACTMJ", "ACTMK"}.issubset(set(expanded["datasets"])) or any(path["relation"]["status"] != "approved" for path in expanded["paths"]):
+    if len(manifests) != len(catalog_entries) or any(not item["snapshot_id"] or not item["sha256"] for item in manifests) or observability["context"]["asset_kind"] != "event_topic":
         raise RuntimeError("generic catalog fixture self-check failed")
     forbidden = handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_semantic_context", "arguments": {"dataset_id": "u1-operating-daily", "intent": "x", "sql": "SELECT *"}}})
     listed = handle_rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
@@ -402,7 +398,7 @@ def self_check() -> None:
     tool_names = [tool["name"] for tool in listed["result"]["tools"]]
     if not forbidden["result"]["isError"] or any(name in tool_names for name in ("mutate", "query", "dump_graph")):
         raise RuntimeError("read-only tool contract self-check failed")
-    print(json.dumps({"ok": True, "snapshot": identity, "catalog_snapshots": [item["snapshot_id"] for item in manifests], "fixtures": {"tabular_file": "u1-operating-daily", "event_topic": "http-server-request"}, "relation_expansion": {"seed": "ACTMK", "datasets": expanded["datasets"], "path_count": len(expanded["paths"])}, "tools": tool_names, "negative_checks": ["raw_sql", "no_mutation", "no_graph_dump", "proxy_forbidden"]}, indent=2))
+    print(json.dumps({"ok": True, "snapshot": identity, "catalog_snapshots": [item["snapshot_id"] for item in manifests], "fixtures": {"tabular_file": "u1-operating-daily", "event_topic": "http-server-request"}, "tools": tool_names, "negative_checks": ["raw_sql", "no_mutation", "no_graph_dump", "proxy_forbidden"]}, indent=2))
 
 
 def main() -> int:

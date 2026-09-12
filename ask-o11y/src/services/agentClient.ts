@@ -1,3 +1,6 @@
+import { AppEvents } from '@grafana/data';
+import { getAppEvents } from '@grafana/runtime';
+
 import { grafanaFetch } from './grafanaFetch';
 
 export interface AgentRunRequest {
@@ -348,14 +351,31 @@ export async function runAgentDetached(request: AgentRunRequest): Promise<Detach
 }
 
 export async function cancelAgentRun(runId: string, orgId?: string): Promise<void> {
-  const resp = await grafanaFetch(`${AGENT_RUNS_URL}/${runId}/cancel`, {
-    method: 'POST',
-    headers: orgIdHeaders(orgId),
-  });
+  try {
+    const resp = await grafanaFetch(`${AGENT_RUNS_URL}/${runId}/cancel`, {
+      method: 'POST',
+      headers: orgIdHeaders(orgId),
+    });
 
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Failed to cancel run (${resp.status}): ${text}`);
+    if (!resp.ok) {
+      throw new Error(`Cancellation request failed (${resp.status})`);
+    }
+    getAppEvents().publish({
+      type: AppEvents.alertInfo.name,
+      payload: [
+        'Cancellation requested',
+        'Waiting for the agent to stop. This does not confirm that remote operations have stopped.',
+      ],
+    });
+  } catch (error) {
+    getAppEvents().publish({
+      type: AppEvents.alertError.name,
+      payload: [
+        'Cancellation not confirmed',
+        'The agent or remote operations may still be running. Check this conversation before retrying.',
+      ],
+    });
+    throw error;
   }
 }
 
@@ -414,7 +434,29 @@ export async function reconnectToAgentRun(
     if (completed || abortSignal?.aborted) {
       return;
     }
+
+    // Cancellation closes the stream without a done event. Read the owned run
+    // before replaying: EOF alone is neither completion nor cancellation.
+    const run = await getAgentRunStatus(runId, orgId);
+    if (abortSignal?.aborted) {
+      return;
+    }
+    if (run.status === 'cancelled') {
+      callbacks.onError(
+        'Agent stopped. Remote operations may still be running; reconcile their receipts before retrying.'
+      );
+      return;
+    }
+    if (run.status === 'failed') {
+      callbacks.onError(run.error || 'Agent run failed');
+      return;
+    }
+    if (run.status === 'completed') {
+      return;
+    }
   }
 
-  callbacks.onError('Agent run did not complete after multiple reconnection attempts');
+  callbacks.onError(
+    'Agent run did not complete after multiple reconnection attempts; remote operations may still be running. Check the run before retrying.'
+  );
 }

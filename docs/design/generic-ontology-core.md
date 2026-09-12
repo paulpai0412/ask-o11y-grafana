@@ -48,7 +48,7 @@ The compiler selects the legacy U1 ML schema or the generic schema based on regi
 
 ### Catalog resolver
 
-`semantic/catalog.json` maps namespace/dataset/snapshot identity to an immutable path and SHA-256. The WFERP entry indexes all physical table IDs plus the aggregate `wferp` dataset alias. `ontology_contract.load_snapshot()` verifies:
+`semantic/catalog.json` maps namespace/dataset/snapshot identity to an immutable path and SHA-256. `ontology_contract.load_snapshot()` verifies:
 
 1. one unambiguous catalog entry;
 2. path remains under `semantic/snapshots`;
@@ -73,13 +73,13 @@ The sixth tool remains the U1 ML advisory validator for backward compatibility. 
 
 ## Candidate import and promotion
 
-`scripts/import-csv-ontology.py` reads any UTF-8 CSV header and at most 1,000 rows for primitive physical type inference, then emits observed-only Candidate IR without keys, units, roles, metrics, relations, or approval. `scripts/import-wferp-ontology.py` reads the existing offline WFERP schema bundle, primary-key map, and heuristic relationship edges. It never contacts the datasource and emits `semantic/candidates/wferp.json` under `candidate-ir.schema.json`.
+`scripts/import-csv-ontology.py` reads any UTF-8 CSV header and at most 1,000 rows for primitive physical type inference, then emits observed-only Candidate IR without keys, units, roles, metrics, relations, or approval. Candidate IR can be reviewed and promoted through the explicit approval manifest; import never contacts a datasource.
 
 Candidate IR schemas permit only `observed` or `proposed`; relationship candidates are structurally fixed to `status: proposed` and `executable: false`. `scripts/promote-ontology-relations.py` accepts any Candidate IR plus an explicit reviewed approval manifest, rejects conflicting or unknown endpoints, validates the resulting registry, then emits an immutable catalogued snapshot. Snapshot-level `approved` means the artifact is approved for read-only discovery, not that imported fields or joins are authorized.
 
 Candidate discovery starts with datasource metadata lexical seeds, then calls the generic `ontology_graph.expand_datasets(snapshot, seeds, max_hops, limit)`. By default only approved executable relations participate. Expansion adds adjacent/multi-hop datasets before remaining lexical candidates and returns exact relation paths; proposed edges are kept in a separate non-authorizing list. There are no domain keyword/table boosts in graph expansion.
 
-SQL relation validation is implemented in the datasource-neutral `ontology_sql_validator.py`. It accepts SQL, a pinned snapshot, and a SQLGlot dialect; it knows no WFERP table or column names. The WFERP adapter supplies `tsql` and performs its existing SQL Server 2000 policy checks. Each AST scope, including correlated subqueries, is validated independently, and every JOIN predicate must exactly cover one approved executable relation.
+SQL relation validation, when used by a consumer, is implemented in the datasource-neutral `ontology_sql_validator.py`. It accepts SQL, a pinned snapshot, and a declared SQLGlot dialect; it knows no product-specific table or column names. Each AST scope, including correlated subqueries, is validated independently, and every JOIN predicate must exactly cover one approved executable relation.
 
 Datasource evidence import is likewise generic: `scripts/export-sqlserver-fk-catalog.sql` exports checked SQL Server FK catalog rows, `scripts/import-sqlserver-relations.py` converts any such catalog into proposed relation evidence, `scripts/merge-ontology-relation-evidence.py` merges any proposed evidence into any Candidate IR, and `scripts/promote-ontology-relations.py` combines the merged Candidate IR with an explicit reviewed approval manifest. No importer or compiler automatically approves FK evidence.
 
@@ -88,20 +88,19 @@ Datasource evidence import is likewise generic: `scripts/export-sqlserver-fk-cat
 A bounded context has:
 
 ```yaml
-snapshot_id: wferp-payables-v0.1.0
-namespace: erp.payables
+snapshot_id: u1-operating-daily-v0.1.0
+namespace: analysis.u1
 status: approved
 provenance: {...}
 datasets:
-  - canonical_id: dataset.wferp.acpta
-    physical_id: ACPTA
-    asset_kind: sql_table
-    status: observed
-    grain: one row per voucher header
-    entity_key: [TA001, TA002]
-    time_identity: TA003
+  - canonical_id: dataset.u1.operating_daily
+    physical_id: u1-operating-daily
+    asset_kind: tabular_file
+    status: approved
+    grain: one row per operating day
+    entity_key: [date]
+    time_identity: date
     fields: [...]
-    relations: [...]
 ```
 
 Supported asset kinds are `tabular_file`, `sql_table`, `timeseries`, `log_stream`, `event_topic`, and `api_resource`. Fields carry physical/canonical identity, physical type, optional unit, semantic kind, evidence status, and reason. Relations carry endpoints, key fields, cardinality, status, executability, and reason.
@@ -115,19 +114,16 @@ The same catalog loader and MCP implementation serve:
 | Fixture | Shape | Required proof |
 | --- | --- | --- |
 | `u1-operating-daily` | CSV/tabular ML dataset | Existing SHAP roles, allowlist, snapshot hash, and negative gates remain unchanged. |
-| Full WFERP metadata | 1,369 SQL tables, 32,022 fields, 1,178 candidate relations | Tables/fields are observed; every medium-confidence heuristic relation remains proposed and `executable: false`. |
 | `http-server-request` | observability event dataset | OpenTelemetry-named event attributes and duration metric resolve through the same bounded context tool. |
 
-Self-check must prove all three snapshots load by dataset ID, tool output remains bounded/read-only, and the WFERP proposed relation cannot be mistaken for an approved join.
+Self-check must prove both registered snapshots load by dataset ID, tool output remains bounded/read-only, and unknown or unapproved relations cannot authorize a join.
 
 ## Acceptance criteria
 
-1. Three registries repeatedly compile to byte-identical canonical snapshots.
+1. The registered fixtures repeatedly compile to byte-identical canonical snapshots.
 2. Catalog JSON passes its Draft 2020-12 schema.
-3. `ontology-mcp/server.py --self-check` covers tabular, relational, and observability fixtures.
+3. `ontology-mcp/server.py --self-check` covers tabular and observability fixtures.
 4. Existing Planner U1 positive and negative semantic checks pass without snapshot hash drift.
 5. Unknown snapshot/dataset, raw SQL argument, mutation, and graph-dump paths fail closed.
 6. No access-policy or action-execution interface exists.
 7. `scripts/import-csv-ontology.py --check` imports a new CSV without changing Ontology Core and emits zero approved candidates.
-8. `scripts/import-wferp-ontology.py --check` produces a schema-valid, byte-identical Candidate IR containing all 1,369 tables, 32,022 fields, and 1,178 relations with zero approved candidates.
-9. SQLGlot parses WFERP T-SQL into an AST; a single-table query may pass, while any JOIN backed only by a proposed relation fails with `JOIN_RELATION_NOT_APPROVED` before Grafana Query.

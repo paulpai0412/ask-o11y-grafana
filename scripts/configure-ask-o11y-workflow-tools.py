@@ -174,18 +174,18 @@ def secure_mcp_headers() -> dict[str, str]:
     return secure
 
 
-def apply_settings(grafana_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+def apply_settings(grafana_url: str, payload: dict[str, Any], *, replace_system_prompt: bool = False) -> dict[str, Any]:
     url = grafana_url.rstrip("/") + f"/api/plugins/{PLUGIN_ID}/settings"
     headers = {"Content-Type": "application/json", **auth_headers()}
     request_payload = {**payload, "secureJsonData": secure_mcp_headers()}
     try:
-        # Settings updates must not silently replace an operator's persisted prompt.
+        # Prompt replacement requires the operator's explicit opt-in.
         with urllib.request.urlopen(urllib.request.Request(url, headers=auth_headers()), timeout=30) as resp:
             existing = json.loads(resp.read()).get("jsonData", {})
         request_payload["jsonData"] = {**existing, **payload["jsonData"]}
         if "builtInMCPToolSelections" in existing:
             request_payload["jsonData"]["builtInMCPToolSelections"] = existing["builtInMCPToolSelections"]
-        if existing.get("defaultSystemPrompt"):
+        if existing.get("defaultSystemPrompt") and not replace_system_prompt:
             request_payload["jsonData"]["defaultSystemPrompt"] = existing["defaultSystemPrompt"]
         validate_payload(request_payload)
         req = urllib.request.Request(url, data=json.dumps(request_payload).encode(), headers=headers, method="POST")
@@ -202,6 +202,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--local-defaults", action="store_true", help="Use 127.0.0.1 MCP URLs for local development when URL env vars are unset.")
     parser.add_argument("--apply", action="store_true", help="POST the settings to Grafana; requires explicit Grafana auth env vars.")
+    parser.add_argument("--replace-system-prompt", action="store_true", help="Explicitly replace the persisted system prompt with the maintained default when applying settings.")
     parser.add_argument("--grafana-url", default=os.environ.get("GRAFANA_URL", ""))
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--self-check", action="store_true")
@@ -217,7 +218,7 @@ def main() -> int:
     if args.apply:
         if not args.grafana_url:
             raise SystemExit("--grafana-url or GRAFANA_URL is required for --apply")
-        result = apply_settings(args.grafana_url, payload)
+        result = apply_settings(args.grafana_url, payload, replace_system_prompt=args.replace_system_prompt)
         print(json.dumps({"ok": True, "settings_payload": str(args.out), "grafana_response": result}, ensure_ascii=False, indent=2))
     else:
         print(json.dumps({"ok": True, "dry_run": True, "settings_payload": str(args.out), "apply": "rerun with --apply and explicit Grafana auth env vars"}, ensure_ascii=False, indent=2))

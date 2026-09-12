@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,13 +12,13 @@ import (
 const artifactBridgeResolveTool = "artifact-bridge_resolve_dashboard_refs"
 
 // Reuse opaque bindings: the model supplies layout/references, not figure arrays.
-func (a *AgentLoop) resolveDashboardBindings(args map[string]interface{}, req LoopRequest) error {
+func (a *AgentLoop) resolveDashboardBindings(ctx context.Context, args map[string]interface{}, req LoopRequest) error {
 	encoded, err := json.Marshal(args)
 	if err != nil {
 		return fmt.Errorf("invalid dashboard arguments")
 	}
 	opaque := false
-	for _, marker := range []string{`"$execution_ref"`, `"$report_manifest_ref"`, `"$plan_ref"`, `"$dashboard_ref"`, `"askO11yPlotlyBindings"`, `"askO11yAssetBindings"`} {
+	for _, marker := range []string{`"$execution_ref"`, `"askO11yPlotlyBindings"`, `"askO11yAssetBindings"`} {
 		opaque = opaque || strings.Contains(string(encoded), marker)
 	}
 	if !opaque {
@@ -30,7 +31,7 @@ func (a *AgentLoop) resolveDashboardBindings(args map[string]interface{}, req Lo
 	if !mcp.IsToolEnabled(artifactBridgeResolveTool, req.MCPServers) {
 		return fmt.Errorf("artifact bridge is disabled")
 	}
-	result, err := a.mcpProxy.CallToolWithActorContext(artifactBridgeResolveTool,
+	result, err := a.mcpProxy.CallToolForRequest(ctx, artifactBridgeResolveTool,
 		map[string]interface{}{"dashboard": dashboard, "_server_session_id": req.SessionID},
 		req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
 	if err != nil || result == nil || result.IsError {

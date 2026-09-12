@@ -176,4 +176,4 @@ Analysis dashboards contain no Grafana data targets. A PNG content type/magic ch
 
 ## Out of scope
 
-Access policy, property-level authorization, hidden-field security behavior, action definitions/execution, production curation UI, causal inference, enterprise knowledge graphs, DataHub/OpenMetadata/MetricFlow/Cube, LinkML/SHACL production runtime, and Semantica production dependency are deferred. WFERP and observability metadata are generic-core discovery fixtures only; WFERP proposed relations still cannot authorize joins.
+Access policy, property-level authorization, hidden-field security behavior, action definitions/execution, production curation UI, causal inference, enterprise knowledge graphs, DataHub/OpenMetadata/MetricFlow/Cube, LinkML/SHACL production runtime, and Semantica production dependency are deferred. Observability metadata remains a generic-core discovery fixture; proposed relations still cannot authorize joins.

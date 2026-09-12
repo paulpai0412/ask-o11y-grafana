@@ -9,11 +9,12 @@
       "tag": "v0.3.2",
       "commit": "8395ae1",
       "license": "MIT",
-      "status": "adopted-runtime-plugin-with-local-patch",
+      "status": "adopted-locally-maintained-source",
       "copyright": "Copyright (c) 2026 Consensys",
       "notice": "NOTICE#ask-o11y",
-      "local_patches": ["patches/ask-o11y-dynamic-tools-and-timeout.patch"],
-      "integration": "only runtime LLM planner; local patch dynamically selects tools and embedded Agent Skills, resolves opaque dashboard data bindings host-side, preserves successful refs/dashboard identities across turns, and raises the external MCP tool-call deadline from 30 seconds to 10 minutes"
+      "local_patches": [],
+      "local_source": "ask-o11y/",
+      "integration": "Maintained directly from the pinned upstream source, not rebuilt from patches. Ask O11y retains the native agent loop, advisory prompts, approved Grafana writer and host-side opaque binding resolution. Local source/build status and pending live acceptance are recorded in docs/design/ask-o11y-minimal-source.md."
     },
     {
       "name": "grafana/mcp-grafana",

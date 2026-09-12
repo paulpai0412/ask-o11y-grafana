@@ -5,7 +5,7 @@
       "name": "Grafana Metadata and Query Read Boundary",
       "url_env": "GRAFANA_QUERY_MCP_URL",
       "local_url": "http://127.0.0.1:8772/mcp",
-      "enabled_tools": ["discover_datasets", "inspect_dataset", "query_dataset", "search_wferp_schema"],
+      "enabled_tools": ["discover_datasets", "inspect_dataset", "query_dataset"],
       "disabled_tools": []
     },
     {

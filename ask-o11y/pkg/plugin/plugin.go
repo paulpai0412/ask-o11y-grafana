@@ -1027,7 +1027,7 @@ func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 
 	go p.agentLoop.Run(runCtx, loopReq, eventCh)
 	go func() {
-		p.consumeAgentEvents(runID, sessionID, userID, numericOrgID, eventCh)
+		p.consumeAgentEvents(runCtx, runID, sessionID, userID, numericOrgID, eventCh)
 		runCancel()
 		p.runCancelsMu.Lock()
 		delete(p.runCancels, runID)
@@ -1044,7 +1044,7 @@ func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (p *Plugin) consumeAgentEvents(runID, sessionID string, userID, orgID int64, eventCh <-chan agent.SSEEvent) {
+func (p *Plugin) consumeAgentEvents(ctx context.Context, runID, sessionID string, userID, orgID int64, eventCh <-chan agent.SSEEvent) {
 	var lastEvent agent.SSEEvent
 	var allEvents []agent.SSEEvent
 	for event := range eventCh {
@@ -1062,18 +1062,12 @@ func (p *Plugin) consumeAgentEvents(runID, sessionID string, userID, orgID int64
 			errMsg = ee.Message
 		}
 		p.runStore.FinishRun(runID, RunStatusFailed, errMsg)
-	case "":
-		p.runCancelsMu.Lock()
-		_, stillCancellable := p.runCancels[runID]
-		p.runCancelsMu.Unlock()
-
-		if !stillCancellable {
-			p.runStore.FinishRun(runID, RunStatusCancelled, "run cancelled by user")
-		} else {
-			p.runStore.FinishRun(runID, RunStatusFailed, "agent terminated without producing events")
-		}
 	default:
-		p.runStore.FinishRun(runID, RunStatusCancelled, "")
+		if ctx.Err() != nil {
+			p.runStore.FinishRun(runID, RunStatusCancelled, "Agent stopped. Remote operations may still be running; reconcile their receipts before retrying.")
+		} else {
+			p.runStore.FinishRun(runID, RunStatusFailed, "agent terminated without a final event")
+		}
 	}
 
 	if sessionID != "" {
@@ -1365,12 +1359,14 @@ func (p *Plugin) handleCancelRun(w http.ResponseWriter, r *http.Request, runID s
 	cancelFn, exists := p.runCancels[runID]
 	p.runCancelsMu.Unlock()
 
-	if exists {
-		cancelFn()
+	if !exists {
+		http.Error(w, "Run cannot be cancelled by this instance", http.StatusConflict)
+		return
 	}
+	cancelFn()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "cancelled"})
+	json.NewEncoder(w).Encode(map[string]string{"status": "cancellation_requested"})
 }
 
 func (p *Plugin) handleAgentRunEvents(w http.ResponseWriter, r *http.Request, runID string) {

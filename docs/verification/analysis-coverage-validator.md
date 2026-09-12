@@ -124,7 +124,7 @@ Fixtures 驗證的是公開 report 工具行為與 metadata/evidence contract，
 
 本批先以 `.scratch/analysis-business-binding-red.log` 驗證舊行為：trusted comparison 即使有指標，也可能只有 `business_question_status="not_assessed"`。現在：
 
-- `data-query-planner.plan_query` 接受 bounded `business_question`，將精確問題寫入 immutable query plan、plan provenance 與 plan hash；WFERP legacy plan 也保留原始 bounded prompt 作為問題 lineage。
+- `data-query-planner.plan_query` 接受 bounded `business_question`，將精確問題寫入 immutable query plan、plan provenance 與 plan hash；每種授權資料集都保留原始 bounded prompt 作為問題 lineage。
 - Sandbox `read_plan_contract`／trusted executor 只從 retained plan 讀取問題，將它寫入 server-owned `sandbox-provenance`；trusted ML template 使用該值產生 report purpose。LLM 後續不能用 metric、chart title 或 synthesis prose 覆寫。
 - Artifact Bridge 只在 report purpose 與 retained question 精確相等，且 plan hash、frame ref/hash、execution、report manifest、provenance 仍配對時，標示 `business_question_status="assessed"`，並回傳 bounded lineage metadata。缺問題變成 `BUSINESS_QUESTION_NOT_RECORDED`；不一致直接 fail closed。
 - 新增 planner、executor、report prepare/compose 正反例：問題可追溯、缺失不猜、report purpose mismatch 停止、unsafe/過長問題拒絕。18-patch installer fidelity 保留 Go prompt 的 business_question 指引；沒有執行 installer。

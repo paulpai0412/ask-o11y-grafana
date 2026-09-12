@@ -72,21 +72,28 @@
                 "type": "object",
                 "required": ["file", "session_id"],
                 "properties": {
-                  "file": {"type": "string", "format": "binary"},
-                  "session_id": {"type": "string"},
-                  "sheet": {"type": "string", "description": "Optional spreadsheet sheet name"}
+                  "file": { "type": "string", "format": "binary" },
+                  "session_id": { "type": "string" },
+                  "sheet": { "type": "string", "description": "Optional spreadsheet sheet name" }
                 }
               }
             }
           }
         },
         "responses": {
-          "201": {"description": "Uploaded and attached to the session", "content": {"application/json": {"schema": {"type": "object", "properties": {"dataset_id": {"type": "string"}}}}}},
-          "400": {"description": "Invalid multipart data or session identifier"},
-          "404": {"description": "Owned session not found"},
-          "413": {"description": "Invalid request or file size"},
-          "502": {"description": "Upstream response failed or was invalid"},
-          "503": {"description": "Upload service unavailable"}
+          "201": {
+            "description": "Uploaded and attached to the session",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "properties": { "dataset_id": { "type": "string" } } }
+              }
+            }
+          },
+          "400": { "description": "Invalid multipart data or session identifier" },
+          "404": { "description": "Owned session not found" },
+          "413": { "description": "Invalid request or file size" },
+          "502": { "description": "Upstream response failed or was invalid" },
+          "503": { "description": "Upload service unavailable" }
         }
       },
       "delete": {
@@ -94,15 +101,15 @@
         "operationId": "deleteSessionDataset",
         "tags": ["Sessions"],
         "parameters": [
-          {"name": "dataset_id", "in": "query", "required": true, "schema": {"type": "string"}},
-          {"name": "session_id", "in": "query", "required": true, "schema": {"type": "string"}}
+          { "name": "dataset_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
-          "200": {"description": "Dataset removed and matching attachment cleared"},
-          "400": {"description": "Invalid dataset or session identifier"},
-          "404": {"description": "Owned session or dataset not found"},
-          "502": {"description": "Removal result unavailable; do not infer success"},
-          "503": {"description": "Upload service unavailable"}
+          "200": { "description": "Dataset removed and matching attachment cleared" },
+          "400": { "description": "Invalid dataset or session identifier" },
+          "404": { "description": "Owned session or dataset not found" },
+          "502": { "description": "Removal result unavailable; do not infer success" },
+          "503": { "description": "Upload service unavailable" }
         }
       }
     },
@@ -111,9 +118,7 @@
         "summary": "Health check",
         "description": "Returns the health status of the plugin and MCP server connectivity. This endpoint does not require authentication.",
         "operationId": "healthCheck",
-        "tags": [
-          "Health"
-        ],
+        "tags": ["Health"],
         "security": [],
         "responses": {
           "200": {
@@ -125,10 +130,7 @@
                   "properties": {
                     "status": {
                       "type": "string",
-                      "enum": [
-                        "ok",
-                        "warning"
-                      ],
+                      "enum": ["ok", "warning"],
                       "description": "Overall health status"
                     },
                     "message": {
@@ -140,10 +142,7 @@
                       "description": "Number of healthy MCP servers"
                     }
                   },
-                  "required": [
-                    "status",
-                    "message"
-                  ]
+                  "required": ["status", "message"]
                 },
                 "example": {
                   "status": "ok",
@@ -164,9 +163,7 @@
         "summary": "Default handler",
         "description": "Informational endpoint that returns plugin metadata. This endpoint does not require authentication.",
         "operationId": "defaultInfo",
-        "tags": [
-          "Health"
-        ],
+        "tags": ["Health"],
         "security": [],
         "responses": {
           "200": {
@@ -199,9 +196,7 @@
         "summary": "OpenAPI specification",
         "description": "Returns the complete OpenAPI 3.0.3 specification for this API. This endpoint does not require authentication.",
         "operationId": "getOpenAPISpec",
-        "tags": [
-          "Health"
-        ],
+        "tags": ["Health"],
         "security": [],
         "responses": {
           "200": {
@@ -231,9 +226,7 @@
         "summary": "MCP JSON-RPC proxy",
         "description": "Raw MCP protocol JSON-RPC 2.0 proxy endpoint. Forwards requests to configured MCP servers. This is a low-level endpoint; most users should use `/api/mcp/tools` and `/api/mcp/call-tool` instead.",
         "operationId": "mcpProxy",
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -275,9 +268,7 @@
         "summary": "List MCP tools",
         "description": "Returns a list of available MCP tools filtered by the user's role. Admin/Editor roles see all tools, while Viewer role only sees tools with `readOnlyHint: true` annotation. Tools from multiple MCP servers are aggregated.",
         "operationId": "listMCPTools",
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -298,9 +289,7 @@
                       }
                     }
                   },
-                  "required": [
-                    "tools"
-                  ]
+                  "required": ["tools"]
                 },
                 "example": {
                   "tools": [
@@ -315,9 +304,7 @@
                             "description": "PromQL query"
                           }
                         },
-                        "required": [
-                          "query"
-                        ]
+                        "required": ["query"]
                       },
                       "annotations": {
                         "readOnlyHint": true
@@ -342,9 +329,7 @@
         "summary": "Execute MCP tool",
         "description": "Executes an MCP tool with RBAC enforcement. The tool must be available in the user's filtered tool list (see `/api/mcp/tools`). Admin/Editor roles can access all tools, while Viewer role can only access tools with `readOnlyHint: true` annotation. RBAC is enforced both at tool listing time and at execution time (double-check pattern).",
         "operationId": "callMCPTool",
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -424,9 +409,7 @@
         "summary": "Get MCP server health",
         "description": "Returns health status for all configured MCP servers. Used for monitoring MCP server connectivity.",
         "operationId": "getMCPServerHealth",
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "responses": {
           "200": {
             "description": "MCP server health status",
@@ -451,21 +434,11 @@
                           },
                           "type": {
                             "type": "string",
-                            "enum": [
-                              "openapi",
-                              "standard",
-                              "sse",
-                              "streamable-http"
-                            ]
+                            "enum": ["openapi", "standard", "sse", "streamable-http"]
                           },
                           "status": {
                             "type": "string",
-                            "enum": [
-                              "healthy",
-                              "unhealthy",
-                              "degraded",
-                              "disconnected"
-                            ]
+                            "enum": ["healthy", "unhealthy", "degraded", "disconnected"]
                           },
                           "lastCheck": {
                             "type": "string",
@@ -500,11 +473,7 @@
                       "properties": {
                         "overallStatus": {
                           "type": "string",
-                          "enum": [
-                            "healthy",
-                            "degraded",
-                            "unhealthy"
-                          ]
+                          "enum": ["healthy", "degraded", "unhealthy"]
                         },
                         "total": {
                           "type": "integer"
@@ -539,9 +508,7 @@
         "summary": "Start detached agent run",
         "description": "Starts an agentic conversation loop in detached mode. The agent processes the user's message asynchronously, calling MCP tools as needed. Returns immediately with a `runId` and `sessionId`. Use `/api/agent/runs/{runId}/events` to stream the results via SSE.\n\n## RBAC\nTool execution within the agent loop respects user role permissions. Viewer role can only use read-only tools.\n\n## Iteration Limit\nMax 25 iterations per run.",
         "operationId": "startAgentRun",
-        "tags": [
-          "Agent"
-        ],
+        "tags": ["Agent"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -552,10 +519,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": [
-                "base",
-                "large"
-              ]
+              "enum": ["base", "large"]
             },
             "description": "Optional explicit LLM app model abstraction to use for this session. Omit to let Ask O11y choose base or large from the task type and message complexity. Once explicitly set on a session, later runs must use the same model."
           }
@@ -588,36 +552,21 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": [
-                        "running"
-                      ],
+                      "enum": ["running"],
                       "description": "Initial run status"
                     },
                     "model": {
                       "type": "string",
-                      "enum": [
-                        "base",
-                        "large"
-                      ],
+                      "enum": ["base", "large"],
                       "description": "Effective model selected for this run"
                     },
                     "modelSource": {
                       "type": "string",
-                      "enum": [
-                        "auto",
-                        "request",
-                        "session"
-                      ],
+                      "enum": ["auto", "request", "session"],
                       "description": "How the effective model was chosen"
                     }
                   },
-                  "required": [
-                    "runId",
-                    "sessionId",
-                    "status",
-                    "model",
-                    "modelSource"
-                  ]
+                  "required": ["runId", "sessionId", "status", "model", "modelSource"]
                 },
                 "example": {
                   "runId": "fL3eq5ZJZuczUSZa643ltfg8eXhAvvppZu_X4rksm8w",
@@ -646,9 +595,7 @@
         "summary": "Get agent run status and events",
         "description": "Returns the current status and all events for an agent run. Only the user who created the run (in the same organization) can access it.",
         "operationId": "getAgentRun",
-        "tags": [
-          "Agent"
-        ],
+        "tags": ["Agent"],
         "parameters": [
           {
             "name": "runId",
@@ -713,9 +660,7 @@
         "summary": "Stream agent run events",
         "description": "Streams all events for an agent run using Server-Sent Events (SSE). Replays all historical events, then streams new events until the run completes. Includes keepalive comments every 15 seconds. Only the user who created the run (in the same organization) can access it.\n\nThis endpoint is useful for reconnecting to an in-progress run after a page refresh.",
         "operationId": "streamAgentRunEvents",
-        "tags": [
-          "Agent"
-        ],
+        "tags": ["Agent"],
         "parameters": [
           {
             "name": "runId",
@@ -763,9 +708,7 @@
         "summary": "Cancel agent run",
         "description": "Cancels a running agent. Only the user who created the run (in the same organization) can cancel it. Returns 409 if the run is not currently running.",
         "operationId": "cancelAgentRun",
-        "tags": [
-          "Agent"
-        ],
+        "tags": ["Agent"],
         "parameters": [
           {
             "name": "runId",
@@ -783,7 +726,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Run cancelled successfully",
+            "description": "Cancellation requested. This acknowledgement does not confirm that remote operations have stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -791,9 +734,7 @@
                   "properties": {
                     "status": {
                       "type": "string",
-                      "enum": [
-                        "cancelled"
-                      ]
+                      "enum": ["cancellation_requested"]
                     }
                   }
                 }
@@ -810,7 +751,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "description": "Run is not running (already completed, failed, or cancelled)",
+            "description": "Run is not running or cannot be cancelled by this instance",
             "content": {
               "application/json": {
                 "schema": {
@@ -838,9 +779,7 @@
         "summary": "Resolve an agent tool approval",
         "description": "Approves or rejects a pending approval-gated tool call for an agent run. Duplicate same-decision requests are idempotent.",
         "operationId": "resolveAgentApproval",
-        "tags": [
-          "Agent"
-        ],
+        "tags": ["Agent"],
         "parameters": [
           {
             "name": "runId",
@@ -904,9 +843,7 @@
       "get": {
         "summary": "List captured agent evals",
         "operationId": "listAgentEvals",
-        "tags": [
-          "Agent"
-        ],
+        "tags": ["Agent"],
         "responses": {
           "200": {
             "description": "Eval capture state and captured eval rows",
@@ -936,9 +873,7 @@
       "post": {
         "summary": "Run experimental agent evals",
         "operationId": "runAgentEvals",
-        "tags": [
-          "Agent"
-        ],
+        "tags": ["Agent"],
         "requestBody": {
           "required": false,
           "content": {
@@ -959,9 +894,7 @@
                   "properties": {
                     "status": {
                       "type": "string",
-                      "enum": [
-                        "completed"
-                      ]
+                      "enum": ["completed"]
                     },
                     "results": {
                       "type": "array",
@@ -970,10 +903,7 @@
                       }
                     }
                   },
-                  "required": [
-                    "status",
-                    "results"
-                  ]
+                  "required": ["status", "results"]
                 }
               }
             }
@@ -991,9 +921,7 @@
       "get": {
         "summary": "Get Graphiti-backed topology for agent Scenes",
         "operationId": "getAgentTopology",
-        "tags": [
-          "Agent"
-        ],
+        "tags": ["Agent"],
         "parameters": [
           {
             "name": "query",
@@ -1051,9 +979,7 @@
         "summary": "Get prompt template defaults",
         "description": "Returns the built-in default prompt templates from the Go backend. Used by the frontend settings UI to populate prompt editors and power the 'Reset to Default' button. The Go backend is the single source of truth for prompt defaults.",
         "operationId": "getPromptDefaults",
-        "tags": [
-          "Configuration"
-        ],
+        "tags": ["Configuration"],
         "responses": {
           "200": {
             "description": "Default prompt templates",
@@ -1076,9 +1002,7 @@
         "summary": "List user sessions",
         "description": "Returns a list of all sessions for the current user in the current organization. Sessions are sorted by last update time (most recent first). Max 50 sessions per user/org; oldest sessions are auto-evicted when limit is reached.",
         "operationId": "listSessions",
-        "tags": [
-          "Sessions"
-        ],
+        "tags": ["Sessions"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -1110,9 +1034,7 @@
         "summary": "Create session",
         "description": "Creates a new chat session. If this is the first session for the user/org, it is automatically set as the current session. Max 50 sessions per user/org; oldest sessions are auto-evicted when limit is reached.",
         "operationId": "createSession",
-        "tags": [
-          "Sessions"
-        ],
+        "tags": ["Sessions"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -1167,9 +1089,7 @@
         "summary": "Delete all sessions",
         "description": "Deletes all sessions for the current user in the current organization. This action is irreversible.",
         "operationId": "deleteAllSessions",
-        "tags": [
-          "Sessions"
-        ],
+        "tags": ["Sessions"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -1205,9 +1125,7 @@
         "summary": "Get current session ID",
         "description": "Returns the ID of the current active session for the user/org, or empty string if no current session is set.",
         "operationId": "getCurrentSessionId",
-        "tags": [
-          "Sessions"
-        ],
+        "tags": ["Sessions"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -1242,9 +1160,7 @@
         "summary": "Set current session",
         "description": "Sets the specified session as the current active session for the user/org. Pass empty string to clear the current session.",
         "operationId": "setCurrentSession",
-        "tags": [
-          "Sessions"
-        ],
+        "tags": ["Sessions"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -1262,9 +1178,7 @@
                     "description": "Session ID to set as current (empty string to clear)"
                   }
                 },
-                "required": [
-                  "sessionId"
-                ]
+                "required": ["sessionId"]
               }
             }
           }
@@ -1303,9 +1217,7 @@
         "summary": "Clear current session",
         "description": "Clears the current active session for the user/org. Equivalent to PUT with empty sessionId.",
         "operationId": "clearCurrentSession",
-        "tags": [
-          "Sessions"
-        ],
+        "tags": ["Sessions"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -1341,9 +1253,7 @@
         "summary": "Get session by ID",
         "description": "Returns full session details including all messages. Only the session owner (same user + org) can access it.",
         "operationId": "getSession",
-        "tags": [
-          "Sessions"
-        ],
+        "tags": ["Sessions"],
         "parameters": [
           {
             "name": "sessionId",
@@ -1388,9 +1298,7 @@
         "summary": "Update session",
         "description": "Updates session metadata (title, summary) or appends messages. Only the session owner (same user + org) can update it.",
         "operationId": "updateSession",
-        "tags": [
-          "Sessions"
-        ],
+        "tags": ["Sessions"],
         "parameters": [
           {
             "name": "sessionId",
@@ -1467,9 +1375,7 @@
         "summary": "Delete session",
         "description": "Deletes a session. Only the session owner (same user + org) can delete it. This action is irreversible.",
         "operationId": "deleteSession",
-        "tags": [
-          "Sessions"
-        ],
+        "tags": ["Sessions"],
         "parameters": [
           {
             "name": "sessionId",
@@ -1518,9 +1424,7 @@
         "summary": "List shares for session",
         "description": "Returns all active shares created by the current user for the specified session.",
         "operationId": "getSessionShares",
-        "tags": [
-          "Shares"
-        ],
+        "tags": ["Shares"],
         "parameters": [
           {
             "name": "sessionId",
@@ -1580,9 +1484,7 @@
         "summary": "Create share link",
         "description": "Creates a shareable link for a session snapshot. The share is scoped to the organization and can be accessed by any user in the same org. Rate limited to 50 shares per hour per user. The share contains a snapshot of the session at creation time (not live updates).",
         "operationId": "createShare",
-        "tags": [
-          "Shares"
-        ],
+        "tags": ["Shares"],
         "parameters": [
           {
             "$ref": "#/components/parameters/X-Grafana-Org-Id"
@@ -1614,10 +1516,7 @@
                     "description": "Expiration time in days (optional, converted to hours)"
                   }
                 },
-                "required": [
-                  "sessionId",
-                  "sessionData"
-                ]
+                "required": ["sessionId", "sessionData"]
               }
             }
           }
@@ -1669,9 +1568,7 @@
         "summary": "Get shared session",
         "description": "Returns a read-only snapshot of a shared session. The share must belong to the same organization as the requesting user. The returned session includes `isShared: true` and `sharedBy` fields.",
         "operationId": "getSharedSession",
-        "tags": [
-          "Shares"
-        ],
+        "tags": ["Shares"],
         "parameters": [
           {
             "name": "shareId",
@@ -1702,9 +1599,7 @@
                       "properties": {
                         "isShared": {
                           "type": "boolean",
-                          "enum": [
-                            true
-                          ]
+                          "enum": [true]
                         },
                         "sharedBy": {
                           "type": "string",
@@ -1770,9 +1665,7 @@
         "summary": "Revoke share",
         "description": "Revokes a share link. Only the user who created the share can revoke it. After revocation, the share URL will no longer be accessible.",
         "operationId": "revokeShare",
-        "tags": [
-          "Shares"
-        ],
+        "tags": ["Shares"],
         "parameters": [
           {
             "name": "shareId",
@@ -1839,9 +1732,7 @@
         "summary": "Knowledge graph status",
         "description": "Returns the knowledge graph connection status, including whether the Graphiti integration is enabled and currently connected.",
         "operationId": "getGraphitiStatus",
-        "tags": [
-          "Knowledge Graph"
-        ],
+        "tags": ["Knowledge Graph"],
         "responses": {
           "200": {
             "description": "Knowledge graph status",
@@ -1871,9 +1762,7 @@
         "summary": "Trigger knowledge graph discovery",
         "description": "Starts a background discovery agent session that explores the full observability environment and ingests findings into the knowledge graph. Returns immediately with a run ID that can be polled for status.",
         "operationId": "triggerGraphitiDiscovery",
-        "tags": [
-          "Knowledge Graph"
-        ],
+        "tags": ["Knowledge Graph"],
         "responses": {
           "200": {
             "description": "Discovery run started",
@@ -1888,9 +1777,7 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": [
-                        "running"
-                      ],
+                      "enum": ["running"],
                       "description": "Initial status of the discovery run"
                     }
                   }
@@ -1909,35 +1796,25 @@
         "summary": "Ingest session into knowledge graph",
         "description": "Ingests conversation messages from a completed investigation session into the knowledge graph. This is the 'Feed to Knowledge Graph' action \u2014 the user opts in to share their investigation findings so future sessions can leverage discovered causal relationships (e.g., 'service A failed because database B connection pool was exhausted').",
         "operationId": "ingestSessionToGraph",
-        "tags": [
-          "Knowledge Graph"
-        ],
+        "tags": ["Knowledge Graph"],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": [
-                  "messages"
-                ],
+                "required": ["messages"],
                 "properties": {
                   "messages": {
                     "type": "array",
                     "description": "Conversation messages to ingest",
                     "items": {
                       "type": "object",
-                      "required": [
-                        "role",
-                        "content"
-                      ],
+                      "required": ["role", "content"],
                       "properties": {
                         "role": {
                           "type": "string",
-                          "enum": [
-                            "user",
-                            "assistant"
-                          ],
+                          "enum": ["user", "assistant"],
                           "description": "Message author role"
                         },
                         "content": {
@@ -2137,11 +2014,7 @@
       "PromptDefaults": {
         "type": "object",
         "description": "Built-in default prompt templates from the Go backend",
-        "required": [
-          "defaultSystemPrompt",
-          "investigationPrompt",
-          "performancePrompt"
-        ],
+        "required": ["defaultSystemPrompt", "investigationPrompt", "performancePrompt"],
         "properties": {
           "defaultSystemPrompt": {
             "type": "string",
@@ -2163,9 +2036,7 @@
         "properties": {
           "jsonrpc": {
             "type": "string",
-            "enum": [
-              "2.0"
-            ]
+            "enum": ["2.0"]
           },
           "id": {
             "type": "string",
@@ -2181,10 +2052,7 @@
             "description": "Method-specific parameters"
           }
         },
-        "required": [
-          "jsonrpc",
-          "method"
-        ]
+        "required": ["jsonrpc", "method"]
       },
       "MCPResponse": {
         "type": "object",
@@ -2192,9 +2060,7 @@
         "properties": {
           "jsonrpc": {
             "type": "string",
-            "enum": [
-              "2.0"
-            ]
+            "enum": ["2.0"]
           },
           "id": {
             "type": "string",
@@ -2216,16 +2082,10 @@
               },
               "data": {}
             },
-            "required": [
-              "code",
-              "message"
-            ]
+            "required": ["code", "message"]
           }
         },
-        "required": [
-          "jsonrpc",
-          "id"
-        ]
+        "required": ["jsonrpc", "id"]
       },
       "Tool": {
         "type": "object",
@@ -2247,10 +2107,7 @@
             "$ref": "#/components/schemas/ToolAnnotations"
           }
         },
-        "required": [
-          "name",
-          "inputSchema"
-        ]
+        "required": ["name", "inputSchema"]
       },
       "ToolAnnotations": {
         "type": "object",
@@ -2299,9 +2156,7 @@
             "description": "Scope organization ID (optional, for multi-tenant routing)"
           }
         },
-        "required": [
-          "name"
-        ]
+        "required": ["name"]
       },
       "CallToolResult": {
         "type": "object",
@@ -2328,16 +2183,12 @@
             "description": "True if tool execution failed"
           }
         },
-        "required": [
-          "content"
-        ]
+        "required": ["content"]
       },
       "RunRequest": {
         "type": "object",
         "description": "Request to start an agent run. The backend builds the system prompt and manages context window based on the message type and server-side session history.",
-        "required": [
-          "message"
-        ],
+        "required": ["message"],
         "properties": {
           "message": {
             "type": "string",
@@ -2345,11 +2196,7 @@
           },
           "type": {
             "type": "string",
-            "enum": [
-              "investigation",
-              "performance",
-              "chat"
-            ],
+            "enum": ["investigation", "performance", "chat"],
             "description": "Message type that determines which server-side prompt template to use"
           },
           "sessionId": {
@@ -2435,11 +2282,7 @@
             "description": "Event sequence number (monotonically increasing)"
           }
         },
-        "required": [
-          "type",
-          "data",
-          "sequence"
-        ]
+        "required": ["type", "data", "sequence"]
       },
       "RunStartedEvent": {
         "type": "object",
@@ -2451,9 +2294,7 @@
             "type": "string"
           }
         },
-        "required": [
-          "runId"
-        ]
+        "required": ["runId"]
       },
       "ContentEvent": {
         "type": "object",
@@ -2463,9 +2304,7 @@
             "description": "AI-generated text content"
           }
         },
-        "required": [
-          "content"
-        ]
+        "required": ["content"]
       },
       "ToolCallStartEvent": {
         "type": "object",
@@ -2483,11 +2322,7 @@
             "description": "JSON-encoded tool arguments"
           }
         },
-        "required": [
-          "id",
-          "name",
-          "arguments"
-        ]
+        "required": ["id", "name", "arguments"]
       },
       "ToolCallResultEvent": {
         "type": "object",
@@ -2509,12 +2344,7 @@
             "description": "True if tool execution failed"
           }
         },
-        "required": [
-          "id",
-          "name",
-          "content",
-          "isError"
-        ]
+        "required": ["id", "name", "content", "isError"]
       },
       "PlanStep": {
         "type": "object",
@@ -2532,11 +2362,7 @@
             "type": "string"
           }
         },
-        "required": [
-          "id",
-          "title",
-          "status"
-        ]
+        "required": ["id", "title", "status"]
       },
       "RunPlanEvent": {
         "type": "object",
@@ -2551,10 +2377,7 @@
             }
           }
         },
-        "required": [
-          "objective",
-          "steps"
-        ]
+        "required": ["objective", "steps"]
       },
       "StepEvent": {
         "type": "object",
@@ -2569,10 +2392,7 @@
             "type": "string"
           }
         },
-        "required": [
-          "id",
-          "status"
-        ]
+        "required": ["id", "status"]
       },
       "EvidenceEvent": {
         "type": "object",
@@ -2605,11 +2425,7 @@
             "type": "string"
           }
         },
-        "required": [
-          "id",
-          "title",
-          "summary"
-        ]
+        "required": ["id", "title", "summary"]
       },
       "ApprovalRequestEvent": {
         "type": "object",
@@ -2633,40 +2449,25 @@
             "type": "string"
           }
         },
-        "required": [
-          "approvalId",
-          "toolCallId",
-          "toolName",
-          "risk",
-          "reason",
-          "arguments"
-        ]
+        "required": ["approvalId", "toolCallId", "toolName", "risk", "reason", "arguments"]
       },
       "ApprovalDecisionRequest": {
         "type": "object",
         "properties": {
           "decision": {
             "type": "string",
-            "enum": [
-              "approved",
-              "rejected"
-            ]
+            "enum": ["approved", "rejected"]
           },
           "comment": {
             "type": "string"
           },
           "approvalScope": {
             "type": "string",
-            "enum": [
-              "once",
-              "always"
-            ],
+            "enum": ["once", "always"],
             "description": "Use always to save a session-scoped grant for this tool after approving it."
           }
         },
-        "required": [
-          "decision"
-        ]
+        "required": ["decision"]
       },
       "ApprovalResolvedEvent": {
         "type": "object",
@@ -2685,10 +2486,7 @@
             "format": "date-time"
           }
         },
-        "required": [
-          "approvalId",
-          "decision"
-        ]
+        "required": ["approvalId", "decision"]
       },
       "FinalReportEvent": {
         "type": "object",
@@ -2721,9 +2519,7 @@
             }
           }
         },
-        "required": [
-          "summary"
-        ]
+        "required": ["summary"]
       },
       "AgentEvalRunRequest": {
         "type": "object",
@@ -2795,12 +2591,7 @@
           },
           "status": {
             "type": "string",
-            "enum": [
-              "running",
-              "completed",
-              "failed",
-              "cancelled"
-            ]
+            "enum": ["running", "completed", "failed", "cancelled"]
           },
           "createdAt": {
             "type": "string",
@@ -2857,11 +2648,7 @@
             "type": "string"
           }
         },
-        "required": [
-          "id",
-          "label",
-          "type"
-        ]
+        "required": ["id", "label", "type"]
       },
       "TopologyEdge": {
         "type": "object",
@@ -2879,11 +2666,7 @@
             "type": "string"
           }
         },
-        "required": [
-          "id",
-          "source",
-          "target"
-        ]
+        "required": ["id", "source", "target"]
       },
       "AgentTopology": {
         "type": "object",
@@ -2916,12 +2699,7 @@
             }
           }
         },
-        "required": [
-          "enabled",
-          "source",
-          "nodes",
-          "edges"
-        ]
+        "required": ["enabled", "source", "nodes", "edges"]
       },
       "DoneEvent": {
         "type": "object",
@@ -2931,9 +2709,7 @@
             "description": "Number of agent loop iterations completed"
           }
         },
-        "required": [
-          "totalIterations"
-        ]
+        "required": ["totalIterations"]
       },
       "ErrorEvent": {
         "type": "object",
@@ -2959,9 +2735,7 @@
             "description": "Whether retrying the same operation may succeed"
           }
         },
-        "required": [
-          "message"
-        ]
+        "required": ["message"]
       },
       "AgentRun": {
         "type": "object",
@@ -2972,12 +2746,7 @@
           },
           "status": {
             "type": "string",
-            "enum": [
-              "running",
-              "completed",
-              "failed",
-              "cancelled"
-            ]
+            "enum": ["running", "completed", "failed", "cancelled"]
           },
           "userId": {
             "type": "integer"
@@ -3008,15 +2777,7 @@
             "description": "Error message (only if status is 'failed')"
           }
         },
-        "required": [
-          "runId",
-          "status",
-          "userId",
-          "orgId",
-          "createdAt",
-          "updatedAt",
-          "events"
-        ]
+        "required": ["runId", "status", "userId", "orgId", "createdAt", "updatedAt", "events"]
       },
       "AgentRunTrace": {
         "type": "object",
@@ -3076,10 +2837,7 @@
         "properties": {
           "role": {
             "type": "string",
-            "enum": [
-              "user",
-              "assistant"
-            ],
+            "enum": ["user", "assistant"],
             "description": "Message role"
           },
           "content": {
@@ -3097,10 +2855,7 @@
             "nullable": true
           }
         },
-        "required": [
-          "role",
-          "content"
-        ]
+        "required": ["role", "content"]
       },
       "ChatSession": {
         "type": "object",
@@ -3143,21 +2898,11 @@
           },
           "model": {
             "type": "string",
-            "enum": [
-              "base",
-              "large"
-            ],
+            "enum": ["base", "large"],
             "description": "LLM app model abstraction locked to this session, if selected"
           }
         },
-        "required": [
-          "id",
-          "title",
-          "messages",
-          "createdAt",
-          "updatedAt",
-          "messageCount"
-        ]
+        "required": ["id", "title", "messages", "createdAt", "updatedAt", "messageCount"]
       },
       "SessionMetadata": {
         "type": "object",
@@ -3189,20 +2934,11 @@
           },
           "model": {
             "type": "string",
-            "enum": [
-              "base",
-              "large"
-            ],
+            "enum": ["base", "large"],
             "description": "LLM app model abstraction locked to this session, if selected"
           }
         },
-        "required": [
-          "id",
-          "title",
-          "createdAt",
-          "updatedAt",
-          "messageCount"
-        ]
+        "required": ["id", "title", "createdAt", "updatedAt", "messageCount"]
       }
     }
   }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 import re
@@ -140,11 +141,28 @@ class ArtifactStore:
         result = completion["result"]
         if (result.get("evidence") or {}).get("effect_outcome") == "indeterminate":
             raise WorkflowContractError("unknown outcome is not completion evidence")
-        self._durable_json(operation / "response.json", result)
-        return {"operation_id": operation_id, "status": "completed" if result.get("ok", True) else "failed", "result": result, "redispatch_allowed": False}
+        status = "cancelled" if (result.get("evidence") or {}).get("effect_outcome") == "cancelled" else ("completed" if result.get("ok", True) else "failed")
+        return {"operation_id": operation_id, "status": status, "result": result, "redispatch_allowed": False}
+
+    def operation_statuses(self, context: dict[str, Any]) -> list[dict[str, str]]:
+        actor = {key: str(context.get(key) or "") for key in ("org_id", "user_id", "session_id")}
+        if not all(actor.values()):
+            raise ArtifactAuthError("operation status requires an authenticated actor and session")
+        statuses = []
+        # ponytail: scan the existing journal; index only if measured history size requires it.
+        paths = sorted((self.root / "operations").glob("*/identity.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        for path in paths:
+            try:
+                identity = json.loads(path.read_text())
+            except (OSError, ValueError) as exc:
+                raise WorkflowContractError("operation journal is unreadable; no new execution allowed") from exc
+            if isinstance(identity, list) and identity and identity[0] == actor:
+                record = self.reconcile_operation(context, path.parent.name)
+                statuses.append({"operation_id": record["operation_id"], "status": record["status"]})
+        return statuses
 
     def run_once(self, context: dict[str, Any], kind: str, inputs: dict[str, Any], execute: Callable[[], dict[str, Any]]) -> dict[str, Any]:
-        """Reserve before effects; a crash or unknown outcome is never automatically retried."""
+        """Reserve before effects; unresolved session work also blocks changed-code redispatch."""
         actor = {key: str(context.get(key) or "") for key in ("org_id", "user_id", "session_id")}
         if not all(actor.values()):
             raise ArtifactAuthError("effect execution requires an authenticated actor and session")
@@ -153,33 +171,36 @@ class ArtifactStore:
         directory = self.root / "operations"
         directory.mkdir(mode=0o700, exist_ok=True)
         operation = directory / key
-        response = operation / "response.json"
-        try:
-            operation.mkdir(mode=0o700)
-        except FileExistsError:
+        if operation.exists():
+            recovered = self.reconcile_operation(context, key)
+            if recovered["status"] in {"completed", "failed", "cancelled"}:
+                return recovered["result"]
+            raise WorkflowContractError(f"operation {key} is running or indeterminate; reconcile it before retrying")
+        scope = hashlib.sha256(json.dumps(actor, sort_keys=True).encode()).hexdigest()
+        with os.fdopen(os.open(directory / ("session-" + scope + ".lock"), os.O_CREAT | os.O_RDWR, 0o600), "w") as lock:
             try:
-                cached = json.loads(response.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                recovered = self.reconcile_operation(context, key)
-                if recovered["status"] in {"completed", "failed"}:
-                    return recovered["result"]
-                raise WorkflowContractError(f"operation {key} is running or indeterminate; reconcile it before retrying")
-            except (OSError, ValueError) as exc:
-                raise WorkflowContractError("operation receipt is invalid; no redispatch allowed") from exc
-            return cached
-        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        self._durable_json(operation / "identity.json", [actor, kind, inputs])
-        result = execute()
-        result.setdefault("evidence", {})["operation_id"] = key
-        if (result.get("evidence") or {}).get("effect_outcome") == "indeterminate":
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise WorkflowContractError("a session operation is active; call reconcile_operation before another computation") from exc
+            for record in self.operation_statuses(context):
+                if record["status"] == "indeterminate":
+                    raise WorkflowContractError(f"operation {record['operation_id']} is indeterminate; no replacement computation allowed")
+            # A completed concurrent attempt can be replayed, never rerun.
+            if operation.exists():
+                return self.reconcile_operation(context, key)["result"]
+            operation.mkdir(mode=0o700)
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            self._durable_json(operation / "identity.json", [actor, kind, inputs])
+            result = execute()
+            result.setdefault("evidence", {})["operation_id"] = key
+            if (result.get("evidence") or {}).get("effect_outcome") == "indeterminate":
+                return result
+            self._durable_json(operation / "completion.json", {"operation_id": key, "result": result})
             return result
-        self._durable_json(operation / "completion.json", {"operation_id": key, "result": result})
-        self._durable_json(response, result)
-        return result
 
     def write_json(self, context: dict[str, Any], run_id: str, name: str, value: Any) -> str:
         self._authorize(context, run_id, name)

@@ -10,11 +10,11 @@
     {
       "type": "application",
       "name": "consensys-asko11y-app",
-      "version": "0.3.2+skills+timeout3600s",
+      "version": "0.3.2",
       "purl": "pkg:github/Consensys/ask-o11y-plugin@v0.3.2",
       "licenses": [{"license": {"id": "MIT"}}],
       "externalReferences": [{"type": "vcs", "url": "https://github.com/Consensys/ask-o11y-plugin/tree/8395ae1"}],
-      "properties": [{"name": "notice", "value": "NOTICE#ask-o11y"}, {"name": "local.patch", "value": "patches/ask-o11y-dynamic-tools-and-timeout.patch"}]
+      "properties": [{"name": "notice", "value": "NOTICE#ask-o11y"}, {"name": "local.source", "value": "ask-o11y/"}, {"name": "local.source.status", "value": "Local maintenance; build receipts and pending live acceptance are documented in docs/design/ask-o11y-minimal-source.md"}]
     },
     {
       "type": "data",

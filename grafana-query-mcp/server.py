@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Grafana Query workflow-node MCP.
+"""Read authorized datasets through Grafana /api/ds/query.
 
-Executes already-planned query artifacts through Grafana /api/ds/query and
-validates the returned Grafana DataFrame contract. No direct datasource access.
+Validates returned frame shape and resource bounds without requiring an analysis
+plan. Datasource access stays behind Grafana; SQL remains policy-checked.
 """
 from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import importlib.util
 import json
 import os
@@ -40,14 +39,11 @@ workflow_node = load_module("workflow_node", ROOT / "workflow_node.py")
 artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 uploaded_datasets = load_module("uploaded_datasets", ROOT / "uploaded_datasets.py")
-ontology_contract = load_module("ontology_contract", ROOT / "ontology_contract.py")
-wferp_sql = load_module("wferp_sql", ROOT / "data-query-planner-mcp/wferp_sql.py")
 ArtifactStore = artifact_store.ArtifactStore
 authenticate_headers = mcp_security.authenticate_headers
 require_runtime_token = mcp_security.require_runtime_token
 require_service_identity = mcp_security.require_service_identity
 runtime_bind_host = mcp_security.runtime_bind_host
-parse_artifact_ref = workflow_node.parse_artifact_ref
 success_response = workflow_node.success_response
 error_response = workflow_node.error_response
 
@@ -221,24 +217,7 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
             query_columns = [{"selector": field["name"], "text": field["name"], "type": "timestamp" if field["type"] == "date" else field["type"]} for field in upload["fields"]]
             query_template = {"refId": "A", "datasource": {"uid": uid, "type": live.get("type")}, "type": "csv", "source": "url", "url": signed_url, "parser": "backend", "format": "table", "url_options": {"method": "GET", "data": ""}, "csv_options": {"delimiter": ",", "skip_empty_lines": True}, "columns": query_columns}
             metadata_artifact = {"dataset_id": dataset_id, "title": upload["filename"], "description": "Session-owned uploaded dataset", "domain_hints": ["uploaded", "csv", "excel"], "datasource_uid": uid, "datasource_type": live.get("type"), "query_kind": query_kind, "session_id": upload["session_id"], "source_format": upload.get("source_format"), "fields": fields, "minimum_rows": 1, "row_count_hint": upload["rows"], "date_range": upload.get("date_range") or {"kind": "unbounded"}, "query_template": query_template}
-        elif query_kind == "wferp_llm_sql" and configured is not None:
-            schema_bundle = load_json(ROOT / "data-query-planner-mcp" / "metadata" / "wferp" / "schema_bundle.json")
-            metadata_artifact = {
-                "dataset_id": dataset_id,
-                "title": configured.get("title"),
-                "description": configured.get("description"),
-                "domain_hints": configured.get("domain_hints", []),
-                "datasource_uid": uid,
-                "datasource_type": live.get("type"),
-                "query_kind": query_kind,
-                "schema_summary": {
-                    "module_count": len(schema_bundle.get("modules", [])),
-                    "table_count": len(schema_bundle.get("tables", [])),
-                    "languages": ["zh-TW", "vi", "field-id"],
-                    "sql_author": "Ask O11y LLM",
-                },
-            }
-        elif query_kind == "infinity_csv" and configured is not None:
+        if query_kind == "infinity_csv" and configured is not None:
             metadata = load_json(ROOT / str(configured.get("metadata_file")))
             profile = load_json(ROOT / str(configured.get("query_profile_file")))
             fields = [{key: field.get(key) for key in ["name", "type", "display_name", "unit", "description", "aliases", "validity_for", "accepted_values"]} for field in metadata.get("fields", []) if isinstance(field, dict)]
@@ -260,7 +239,7 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; authorized dataset inspection failed.")
     preview_keys = ["dataset_id", "title", "description", "domain_hints", "datasource_uid", "datasource_type", "query_kind", "source_format", "fields", "minimum_rows", "row_count_hint", "date_range", "schema_summary"]
     preview = {key: metadata_artifact[key] for key in preview_keys if key in metadata_artifact}
-    instruction = "Use the returned fields to choose analysis or visualization. WFERP schema search can help author SQL. query_dataset executes without an analysis-plan ticket."
+    instruction = "Use the returned fields to choose analysis or visualization. query_dataset executes without an analysis-plan ticket."
     refs = {"dataset_metadata_ref": metadata_ref}
     if document_ref is not None:
         refs["document_ref"] = document_ref
@@ -315,22 +294,6 @@ def validate_frame(response: dict[str, Any], contract: dict[str, Any], ref_id: s
     return {"ok": not errors, "errors": errors, "field_names": fields, "row_count": row_count, "minimum_rows": minimum_rows, "maximum_rows": maximum_rows, "maximum_fields": maximum_fields, "frames": frames}
 
 
-def verify_authorized_plan(context: dict[str, str], plan: dict[str, Any]) -> None:
-    dataset_id = str(plan.get("dataset_id") or "")
-    if not dataset_id.startswith("upload_"):
-        ontology_contract.verify_plan(plan)
-        return
-    claimed = plan.get("plan_sha256")
-    ontology = plan.get("ontology")
-    if not isinstance(claimed, str) or not isinstance(ontology, dict):
-        raise ValueError("CONTRACT_HASH_MISMATCH")
-    metadata = uploaded_datasets.inspect_upload(context, dataset_id, context.get("session_id"))
-    payload = {key: value for key, value in plan.items() if key != "plan_sha256"}
-    actual = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    if claimed != actual or ontology.get("sha256") != metadata["source_sha256"] or ontology.get("snapshot_id") != f"candidate:{dataset_id}":
-        raise ValueError("CONTRACT_HASH_MISMATCH")
-
-
 _RELATIVE_TIME_RANGE = re.compile(r"^now-(?P<amount>[1-9]\d*)(?P<unit>[smhdw])$")
 
 
@@ -348,76 +311,6 @@ def parse_time_bound(value: str, reference_time: datetime) -> datetime:
     return reference_time - timedelta(**{unit: amount})
 
 
-def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
-    unexpected = sorted(set(args) - {"plan_ref", "context", "_server_context", "_server_session_id"})
-    if unexpected:
-        return error_response(step="execute_planned_query", error="forbidden Grafana Query arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; Grafana Query executes only an authorized opaque plan_ref.")
-    plan_ref = args.get("plan_ref")
-    if not isinstance(plan_ref, str):
-        return error_response(step="execute_planned_query", error="plan_ref is required", recoverable=False, instruction="Stop; Data Query Planner must return a plan_ref first.")
-    try:
-        context = context_from_args(args)
-    except workflow_node.WorkflowContractError as exc:
-        return error_response(step="execute_planned_query", error=str(exc), recoverable=False, instruction="Stop; artifact context is required.")
-    try:
-        run_id, _ = parse_artifact_ref(plan_ref)
-        plan = ARTIFACTS.read_json(context, plan_ref)
-    except Exception as exc:
-        return error_response(step="execute_planned_query", error=str(exc), recoverable=False, instruction="Stop; plan_ref could not be read or authorized.")
-    try:
-        verify_authorized_plan(context, plan)
-    except ValueError as exc:
-        return error_response(step="execute_planned_query", error=str(exc), recoverable=False, instruction="Stop before datasource execution; the ontology/plan contract hash is invalid.", evidence={"rejection_codes": [str(exc)]})
-    expected_session = plan.get("upload_session_id")
-    if expected_session is not None and context.get("session_id") != expected_session:
-        return error_response(step="execute_planned_query", error="uploaded dataset session mismatch", recoverable=False, instruction="Stop; the upload belongs to another chat session.")
-    query = plan.get("grafana_query")
-    contract = plan.get("analysis_input_contract")
-    if not isinstance(query, dict) or not isinstance(contract, dict):
-        return error_response(step="execute_planned_query", error="plan artifact must contain grafana_query and analysis_input_contract", recoverable=False, instruction="Stop; invalid plan artifact.")
-    time_range = plan.get("time_range")
-    if not isinstance(time_range, dict) or not isinstance(time_range.get("from"), str) or not isinstance(time_range.get("to"), str):
-        return error_response(step="execute_planned_query", error="plan artifact must contain a bounded time_range", recoverable=False, instruction="Stop; invalid plan artifact.")
-    try:
-        reference_time = datetime.now(timezone.utc)
-        start = parse_time_bound(time_range["from"], reference_time)
-        end = parse_time_bound(time_range["to"], reference_time)
-        maximum_bytes = int(contract.get("maximum_response_bytes", MAX_RESPONSE_BYTES))
-    except (ValueError, TypeError, OverflowError):
-        return error_response(step="execute_planned_query", error="plan bounds are invalid", recoverable=False, instruction="Stop; invalid plan artifact.")
-    if end < start or (end - start).total_seconds() > MAX_TIME_RANGE_SECONDS or not 1 <= maximum_bytes <= MAX_RESPONSE_BYTES:
-        return error_response(step="execute_planned_query", error="plan bounds exceed executor limits", recoverable=False, instruction="Stop; invalid plan artifact.")
-    ref_id = str(query.get("refId", "A"))
-    body = {"queries": [query], "from": time_range["from"], "to": time_range["to"]}
-    try:
-        response = post_grafana("/api/ds/query", body, maximum_bytes)
-    except RuntimeError as exc:
-        return error_response(step="execute_planned_query", error=str(exc), recoverable=False, instruction="Stop; Grafana query execution failed.")
-    validation = validate_frame(response, contract, ref_id=ref_id)
-    validation_ref = ARTIFACTS.write_json(context, run_id, "dataframe-validation", {key: value for key, value in validation.items() if key != "frames"})
-    if not validation["ok"]:
-        return error_response(
-            step="execute_planned_query",
-            error="DataFrame contract validation failed",
-            recoverable=False,
-            instruction="Stop and report the validation errors. Do not continue to analysis.",
-            evidence={"validation": {key: value for key, value in validation.items() if key != "frames"}, "validation_ref": validation_ref, "response_persisted": False},
-        )
-    response_ref = ARTIFACTS.write_json(context, run_id, "grafana-query-response", response)
-    frame_ref = ARTIFACTS.write_json(context, run_id, "grafana-frame", validation["frames"])
-    return success_response(
-        step="execute_planned_query",
-        run_id=run_id,
-        refs={"frame_ref": frame_ref, "validation_ref": validation_ref, "response_ref": response_ref},
-        instruction="Use the validated frame_ref and field metadata to choose only the domain analysis requested by the user; there is no mandatory next tool.",
-        evidence={"executed_by": "Grafana /api/ds/query", "validation": {key: value for key, value in validation.items() if key != "frames"}},
-        frame_ref=frame_ref,
-        validation={key: value for key, value in validation.items() if key != "frames"},
-        available_fields=validation.get("field_names", []),
-        provenance={**(plan.get("provenance") or {}), "executed_by": "Grafana /api/ds/query", "query_ref": ref_id},
-    )
-
-
 def tool_query_dataset(args: dict[str, Any]) -> dict[str, Any]:
     """Build the authorized read at execution time; no analysis plan is a ticket."""
     step = "query_dataset"
@@ -432,21 +325,9 @@ def tool_query_dataset(args: dict[str, Any]) -> dict[str, Any]:
             return inspected
         metadata = ARTIFACTS.read_json(context, inspected["dataset_metadata_ref"])
         kind = metadata.get("query_kind")
-        if kind == "wferp_llm_sql":
-            sql = args.get("sql")
-            if not isinstance(sql, str):
-                raise workflow_node.WorkflowContractError("WFERP requires one bounded SELECT")
-            valid, reason = wferp_sql.validate_sql_policy(sql)
-            if not valid:
-                raise workflow_node.WorkflowContractError(reason)
-            valid, reason, _tables = wferp_sql.validate_metadata_references(sql, wferp_sql.load_metadata()["bundle"])
-            if not valid:
-                raise workflow_node.WorkflowContractError(reason)
-            query = {"refId": "A", "datasource": {"uid": metadata["datasource_uid"], "type": metadata["datasource_type"]}, "rawSql": sql.strip().rstrip(";"), "format": "table"}
-        else:
-            if "sql" in args or kind not in {"infinity_csv", "uploaded_csv"}:
-                raise workflow_node.WorkflowContractError("this dataset uses its authorized CSV query, not model-authored SQL or URLs")
-            query = metadata["query_template"]
+        if "sql" in args or kind not in {"infinity_csv", "uploaded_csv"}:
+            raise workflow_node.WorkflowContractError("this dataset uses its authorized CSV query, not model-authored SQL or URLs")
+        query = metadata["query_template"]
         time_range = args.get("time_range")
         if time_range is None:
             dates = metadata.get("date_range") or {}
@@ -478,28 +359,12 @@ def tool_query_dataset(args: dict[str, Any]) -> dict[str, Any]:
                             evidence={"executed_by": "Grafana /api/ds/query", "dataset_id": metadata["dataset_id"], "time_range": time_range})
 
 
-def tool_search_wferp_schema(args: dict[str, Any]) -> dict[str, Any]:
-    try:
-        context_from_args(args)
-        prompt = args.get("prompt")
-        if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > wferp_sql.MAX_PROMPT_BYTES:
-            raise workflow_node.WorkflowContractError("a bounded schema search prompt is required")
-        if not any(item.get("id") == "wferp" for item in configured_datasets()):
-            raise workflow_node.WorkflowContractError("WFERP dataset is not authorized")
-        schema = wferp_sql.build_context(prompt, wferp_sql.load_metadata())
-        return success_response(step="search_wferp_schema", run_id="run_schema", schema_context=schema,
-                                instruction="Use this schema to author a read-only SELECT for query_dataset. Method and join choices are yours; database/table/column access is validated at execution.")
-    except (PermissionError, workflow_node.WorkflowContractError, OSError, ValueError) as exc:
-        return error_response(step="search_wferp_schema", error=str(exc), recoverable=False, instruction="Schema context is unavailable; do not guess private table or column names.")
-
-
 TOOLS = [
     {"name": "discover_datasets", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "List compact authorized Grafana-backed datasets and domain hints. Reads Grafana datasource metadata only; never executes a datasource query and never exposes credentials or physical paths.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
     {"name": "inspect_dataset", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Inspect one authorized dataset's sanitized fields, types, units, row/date hints, and domain hints. Returns an opaque dataset_metadata_ref containing the internal query template; does not execute a datasource query.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_id": {"type": "string"}}, "required": ["dataset_id"]}},
-    {"name": "query_dataset", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Read an authorized dataset through Grafana and save a frame for Python. CSV queries use server-owned datasource/URL settings. WFERP accepts one read-only SELECT within its authorized schema. No analysis-plan ticket is required. Optional time_range is the Grafana request window; it does not itself filter CSV rows.", "inputSchema": {"type": "object", "additionalProperties": False, "required": ["dataset_id"], "properties": {"dataset_id": {"type": "string"}, "sql": {"type": "string"}, "time_range": {"type": "object", "additionalProperties": False, "required": ["from", "to"], "properties": {"from": {"type": "string"}, "to": {"type": "string"}}}}}},
-    {"name": "search_wferp_schema", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Search the bounded, authorized WFERP schema before authoring a SELECT. Advisory context only; no ontology or analysis-plan approval.", "inputSchema": {"type": "object", "additionalProperties": False, "required": ["prompt"], "properties": {"prompt": {"type": "string", "maxLength": wferp_sql.MAX_PROMPT_BYTES}}}},
+    {"name": "query_dataset", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Read an authorized dataset through Grafana and save a frame for Python. Queries use server-owned datasource/URL settings; model-authored SQL and URLs are rejected. No analysis-plan ticket is required. Optional time_range is the Grafana request window; it does not itself filter CSV rows.", "inputSchema": {"type": "object", "additionalProperties": False, "required": ["dataset_id"], "properties": {"dataset_id": {"type": "string"}, "sql": {"type": "string"}, "time_range": {"type": "object", "additionalProperties": False, "required": ["from", "to"], "properties": {"from": {"type": "string"}, "to": {"type": "string"}}}}}},
 ]
-HANDLERS = {"discover_datasets": tool_discover_datasets, "inspect_dataset": tool_inspect_dataset, "query_dataset": tool_query_dataset, "search_wferp_schema": tool_search_wferp_schema}
+HANDLERS = {"discover_datasets": tool_discover_datasets, "inspect_dataset": tool_inspect_dataset, "query_dataset": tool_query_dataset}
 
 
 def rpc_result(rid, result):
@@ -629,36 +494,8 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("grafana-query-mcp " + format % args + "\n")
 
 
-def self_check() -> None:
-    dqp = load_module("data_query_planner_self_check", ROOT / "data-query-planner-mcp" / "server.py")
-    context = {"org_id": "1", "user_id": "self-check-grafana-query"}
-    wide_names = [f"field_{index}" for index in range(MAX_RESULT_FIELDS)]
-    wide_frame = {"schema": {"fields": [{"name": name} for name in wide_names]}, "data": {"values": [[index] for index in range(MAX_RESULT_FIELDS)]}}
-    wide_validation = validate_frame({"results": {"A": {"status": 200, "frames": [wide_frame]}}}, {"required_fields": wide_names, "minimum_rows": 1, "maximum_fields": MAX_RESULT_FIELDS})
-    if not wide_validation["ok"]:
-        raise RuntimeError(str(wide_validation))
-    discovery = tool_discover_datasets({"_server_context": context})
-    inspected = tool_inspect_dataset({"dataset_id": "u1-operating-daily", "_server_context": context})
-    fields = ["date", "heat_rate", "raw_coal_consumption_g"]
-    expected_fields = [*fields, "heat_rate_valid"]
-    plan = dqp.tool_plan_query({"dataset_metadata_ref": inspected["dataset_metadata_ref"], "selected_fields": fields, "minimum_rows": 100, "_server_context": context})
-    out = tool_execute_planned_query({"plan_ref": plan["plan_ref"], "_server_context": context})
-    if not discovery.get("ok") or not inspected.get("ok") or not plan.get("ok") or not out.get("ok") or out["validation"]["row_count"] < 100:
-        raise RuntimeError(json.dumps({"discovery": discovery, "inspected": inspected, "plan": plan, "execute": out}, ensure_ascii=False))
-    if out["evidence"]["executed_by"] != "Grafana /api/ds/query" or set(out.get("available_fields") or []) != set(expected_fields):
-        raise RuntimeError(str(out))
-    if "next_step" in out or "rawSql" in json.dumps(out):
-        raise RuntimeError("Grafana Query must not expose a fixed analysis step or SQL fallback")
-    print(json.dumps({"ok": True, "dataset_count": len(discovery["datasets"]), "metadata_ref": inspected["dataset_metadata_ref"], "plan_ref": plan["plan_ref"], "frame_ref": out["frame_ref"], "row_count": out["validation"]["row_count"]}, ensure_ascii=False, indent=2))
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--self-check", action="store_true")
-    args = parser.parse_args()
-    if args.self_check:
-        self_check()
-        return 0
+    argparse.ArgumentParser(description=__doc__).parse_args()
     require_runtime_token()
     require_service_identity()
     bind_host = runtime_bind_host()

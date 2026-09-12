@@ -1,7 +1,7 @@
 # Generic Ontology MCP：GitHub 套件選型與重構建議
 
 > 查核日：2026-08-13
-> 範圍：把目前只支援 `u1-operating-daily`／`random_forest_shap` 的 PoC 泛化為可服務 CSV、關聯式 schema、WFERP metadata、observability 與 event datasets 的 read-only Ontology MCP。
+> 範圍：把目前只支援 `u1-operating-daily`／`random_forest_shap` 的 PoC 泛化為可服務 CSV、關聯式 schema、observability 與 event datasets 的 read-only Ontology MCP。
 > 方法：優先查官方 GitHub source、release、規格與一手文件；既有 Semantica 深度查核沿用 [`ask-o11y-semantica-ontology-analysis.md`](./ask-o11y-semantica-ontology-analysis.md)。
 
 ## 結論
@@ -15,7 +15,7 @@
 5. read-only bounded projection tools；
 6. 位於 Planner 的 consumer-specific deterministic validators。
 
-只建議新增一個 production dependency：**SQLGlot**，但放在 Data Query Planner，而不是 Ontology MCP。它用 AST 取代 WFERP 現有 regex table/JOIN 解析，讓 approved relation、join key、cardinality、fanout 與 SQL policy 可被 deterministic 驗證。SQLGlot 是 parser/transpiler，不是授權器；parse 成功不能取代本案的 semantic gate。[SQLGlot README](https://github.com/tobymao/sqlglot/blob/aa3e8f2de7c12964e3727dc8b8fd143eef7d40a5/README.md) · [package metadata](https://github.com/tobymao/sqlglot/blob/aa3e8f2de7c12964e3727dc8b8fd143eef7d40a5/pyproject.toml)
+只建議新增一個 production dependency：**SQLGlot**，但放在 Data Query Planner，而不是 Ontology MCP。它用 AST 解析受控 relational query，讓 approved relation、join key、cardinality、fanout 與 SQL policy 可被 deterministic 驗證。SQLGlot 是 parser/transpiler，不是授權器；parse 成功不能取代本案的 semantic gate。[SQLGlot README](https://github.com/tobymao/sqlglot/blob/aa3e8f2de7c12964e3727dc8b8fd143eef7d40a5/README.md) · [package metadata](https://github.com/tobymao/sqlglot/blob/aa3e8f2de7c12964e3727dc8b8fd143eef7d40a5/pyproject.toml)
 
 ## 需求與目前 hardcode
 
@@ -26,7 +26,6 @@
 - validator 固定 `kind == random_forest_shap`、target/features/split/seed；
 - registry schema 以 ML dataset、target、feature allowlist 為中心；
 - Ontology MCP 只有單 snapshot，缺 namespace/catalog、asset/entity/relation/metric/event/state；
-- `data-query-planner-mcp/wferp_sql.py` 用 regex 提取 `FROM/JOIN`，且 heuristic relationship edges 尚不是 approved join authority。
 
 因此 U1 應降為第一個普通 fixture；SHAP policy 應移至 ML Planner validator，不能留在 ontology core。
 
@@ -134,10 +133,10 @@ Catalog entry：
 
 ```json
 {
-  "snapshot_id": "erp-procurement-v1",
-  "namespace": "erp.procurement",
-  "datasets": ["wferp"],
-  "path": "snapshots/erp-procurement-v1.json",
+  "snapshot_id": "relational-procurement-v1",
+  "namespace": "relational.procurement",
+  "datasets": ["procurement"],
+  "path": "snapshots/relational-procurement-v1.json",
   "sha256": "...",
   "status": "approved",
   "effective_from": "..."
@@ -192,8 +191,6 @@ SQLGlot只負責把 SQL轉 AST並可靠列出 tables、columns、aliases、JOIN 
 | `semantic/schema/registry.schema.json` | 升級為 generic asset/entity/field/key/relation/metric/event/state schema；ML policy另檔。 |
 | `ontology-mcp/server.py` | 依 namespace/dataset/snapshot resolver查 catalog；改用通用 tools與 response caps。本階段不實作 access policy、hidden-field security 或 action。 |
 | `data-query-planner-mcp/server.py` | 把現有 SHAP規則移入 `validators/ml.py`；選 validator由 typed plan contract決定。 |
-| `data-query-planner-mcp/wferp_sql.py` | ranking可保留作 candidate discovery；regex SQL extraction改 SQLGlot AST；新增 approved relation/JOIN gate。 |
-| `data-query-planner-mcp/metadata/wferp/*.json` | 經 metadata-bundle importer轉 Candidate IR；所有 heuristic edges預設 proposed/non-executable。 |
 | `grafana-query-mcp/server.py`、`sandbox-analysis-mcp/server.py` | 保留 snapshot/plan hash驗證，不載入任何 datasource ontology library。 |
 | `scripts/run-ask-o11y-sandbox-shap-e2e.py` | U1 hash改由 catalog/tool result取得，不 hardcode；保留為 ML fixture。 |
 
@@ -216,22 +213,13 @@ SQLGlot只負責把 SQL轉 AST並可靠列出 tables、columns、aliases、JOIN 
 
 驗收：U1原安全/負向 fixtures結果不變，snapshot build可重現。
 
-### Phase 3：WFERP relational fixture
-
-- 匯入 `schema_bundle/field_index/alias_index/primary_key_map/relationship_edges`；
-- table/field可 observed，asserted PK與 heuristic relations維持 proposed；
-- SQLGlot AST validator；
-- 先由 steward核准少數真實 relation。
-
-驗收：候選 table可被 context選出；單表 query可通過；heuristic-only JOIN回 `JOIN_RELATION_NOT_APPROVED`且 Grafana calls=0；approved JOIN才可執行。
-
 ### Phase 4：Observability/event fixture
 
 - pin一版 OpenTelemetry Semantic Conventions；
 - 匯入 metric/log/event/entity attributes、unit、stability；
 - 用 OpenLineage-style facet表示 source/version/column lineage evidence。
 
-驗收：同一 MCP code可解析 U1、WFERP與observability三種形態；新增 fixture不修改 core。
+驗收：同一 MCP code可解析 U1與observability兩種形態；新增 fixture不修改 core。
 
 ### Phase 5：可選 interoperability PoC
 
@@ -254,7 +242,7 @@ SQLGlot只負責把 SQL轉 AST並可靠列出 tables、columns、aliases、JOIN 
 
 ## 最終採用方案
 
-**現在採用：** `PyYAML + jsonschema + stdlib` generic catalog/compiler/projector，及 Planner-only pinned SQLGlot `30.17.0`。實作驗證已全量匯入 WFERP 1,369 tables／32,022 fields／1,178 proposed relations；Candidate IR無 approved candidates，proposed JOIN由Planner以 `JOIN_RELATION_NOT_APPROVED`拒絕。
+**現在採用：** `PyYAML + jsonschema + stdlib` generic catalog/compiler/projector，及 Planner-only pinned SQLGlot `30.17.0`。U1 與 observability fixtures 可由同一 bounded catalog/projector 載入；Candidate IR 不會自動產生 approved candidates，proposed JOIN 由 Planner 明確拒絕。
 **採規格不採 runtime：** Frictionless Table Schema、OpenLineage、OpenTelemetry Semantic Conventions。
 **延後隔離 PoC：** LinkML、RDFLib/pySHACL、pyoxigraph。
 **拒絕 production runtime：** Owlready2、DataHub、OpenMetadata、Cube、MetricFlow、Semantica。

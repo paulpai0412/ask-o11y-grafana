@@ -38,7 +38,7 @@
 
 ## 診斷與限制
 
-- 最終 13 個指定檔案 primary LSP 全部 clean。`lens_diagnostics(mode=all)` 的 7 個 errors 均在未改的 `wferp/_Source/1_mssql_to_json.py`；不是全 repo clean。
+- 最終 13 個指定檔案 primary LSP 全部 clean。`lens_diagnostics(mode=all)` 的 errors 均在未改的歷史 ETL 檔案；不是全 repo clean。
 - 最初隔離 typecheck 曾逾時；後續 resolution probe、實際 traced typecheck 與 webpack 成功。逾時不算通過，也不宣稱已定位最初停滯原因。
 - 沒有獨立 reviewer（遵守 main-only）、Redis integration、部署或模型呼叫。一般既有傳輸／dashboard 大小限制仍適用；不宣稱所有未測圖型都已驗收。
 

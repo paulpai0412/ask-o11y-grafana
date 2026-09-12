@@ -161,6 +161,7 @@ export function useChat(
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeRunIdRef = useRef<string | null>(null);
+  const stopRequestedForRef = useRef<AbortController | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
   const pendingRunSessionIdRef = useRef<string | null>(null);
   const approvalInFlightRef = useRef<Set<string>>(new Set());
@@ -247,6 +248,9 @@ export function useChat(
         // Terminal event; stream completion is handled by the reconnect loop.
       },
       onReconnect: () => {
+        if (abortController.signal.aborted) {
+          return;
+        }
         setChatHistory((prev) =>
           updateLastAssistantMessage(prev, (msg) => ({
             ...msg,
@@ -257,7 +261,11 @@ export function useChat(
         setToolCalls(new Map());
       },
       onError: (message: string) => {
+        if (abortController.signal.aborted) {
+          return;
+        }
         hadErrorRef.current = true;
+        setMessageQueue([]);
         setChatHistory((prev) =>
           updateLastAssistantMessage(prev, (msg) => ({
             ...msg,
@@ -509,9 +517,18 @@ export function useChat(
         onSessionIdChange(result.sessionId);
       }
 
+      // Stop can be requested before the detached POST returns its run ID.
+      if (stopRequestedForRef.current === abortController) {
+        void cancelAgentRun(result.runId, orgId).catch(() => {
+          // The service reports the failure; keep observing the original run.
+        });
+      }
       const callbacks = makeCallbacks(abortController, hadErrorRef);
       await reconnectToAgentRun(result.runId, callbacks, orgId, abortController.signal);
 
+      if (abortControllerRef.current !== abortController || abortController.signal.aborted) {
+        return;
+      }
       activeRunIdRef.current = null;
 
       if (!readOnly) {
@@ -524,17 +541,11 @@ export function useChat(
         setRetryCount(0);
       }
     } catch (error) {
-      activeRunIdRef.current = null;
-
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        setChatHistory((prev) =>
-          updateLastAssistantMessage(prev, (msg) => ({
-            ...msg,
-            content: msg.content + '\n\n*[Generation stopped]*',
-          }))
-        );
+      if (abortControllerRef.current !== abortController || abortController.signal.aborted) {
         return;
       }
+      activeRunIdRef.current = null;
+      setMessageQueue([]);
       setChatHistory((prev) =>
         updateLastAssistantMessage(prev, (msg) => ({
           ...msg,
@@ -543,9 +554,13 @@ export function useChat(
       );
       setRetryCount((prev) => prev + 1);
     } finally {
-      setIsGenerating(false);
       if (abortControllerRef.current === abortController) {
+        setIsGenerating(false);
+        activeRunIdRef.current = null;
         abortControllerRef.current = null;
+      }
+      if (stopRequestedForRef.current === abortController) {
+        stopRequestedForRef.current = null;
       }
     }
   };
@@ -572,15 +587,18 @@ export function useChat(
   }, [toolCalls]);
 
   const stopGeneration = useCallback((): void => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
+    setMessageQueue([]);
+    const controller = abortControllerRef.current;
+    if (!controller) {
+      return;
     }
+    stopRequestedForRef.current = controller;
     const runId = activeRunIdRef.current;
     if (runId) {
-      cancelAgentRun(runId, orgId).catch(() => {});
-      activeRunIdRef.current = null;
+      void cancelAgentRun(runId, orgId).catch(() => {
+        // The service reports the failure; the live stream remains attached.
+      });
     }
-    setMessageQueue([]);
   }, [orgId]);
 
   // Reconnect to an active run on mount / session change (using backend activeRunId)

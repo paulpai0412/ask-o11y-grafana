@@ -17,7 +17,7 @@ inspect dataset/schema → observed/approved ontology evidence → Analysis Prev
 ```
 
 - Upload ontology 是 session-scoped observed candidate；manifest/provenance 明示 `inferred`，除非實際 approved snapshot 回傳 `approved`。
-- WFERP 無明確預測意圖時維持描述性、診斷性或比較性分析；先 schema search、再 bounded SELECT plan，檢查 grain、JOIN 膨脹與日期語義後才 profile。
+- 關聯式資料無明確預測意圖時維持描述性、診斷性或比較性分析；先取得授權 schema，再建立 bounded query，檢查 grain、JOIN 膨脹與日期語義後才 profile。
 - ML 只在使用者明確要求 prediction/estimation/forecast/model comparison 後啟動，重新建立 ontology-pinned target/features/split contract；`Timestamp` 等時間欄可作 chronological split，但不得自動進 feature。
 - Profile/ML 皆保留原始 frame row count；只有受信任 deterministic executor 可產生分析 artifact。報告由 `prepare_ml_report`、`inspect_report_artifacts`、`compose_ml_dashboard` 以 generic manifest/facts 處理，不代表只支援 ML。
 - Tool/recovery 錯誤交由 native LLM 讀取原始 error、schema、refs 與 evidence 後修正；不新增 Recovery Engine、固定 retry state machine、hardcoded ref、fallback、mock 或 fabricated data。

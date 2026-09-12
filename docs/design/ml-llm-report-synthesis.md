@@ -12,7 +12,7 @@
 
 `prepare_ml_report`、`inspect_report_artifacts`、`compose_ml_dashboard` 名稱沿自 ML 歷史，但 contract 不限 ML manifest；`ask-o11y-data-profile-v1` 可直接進同一條 evidence-bound report pipeline。Profile report 的 facts 必須保留完整輸入 row/field coverage，圖表聚合只能作視覺展示。LLM 先讀完整 bounded facts、artifact catalog 與每個 view spec，再以 vision/spec 批次檢查全部 artifacts；最後輸出整份 synthesis，每個 panel 保留白話觀察、解讀、限制與 evidence；只有需要個別解釋的 view 才補敘事，不逐圖重複填寫同一模板。若 validator 退回，僅依原始錯誤與 refs 修正，不重跑已成功的 query/profile。
 
-Profile 不會自動升級成 ML：WFERP/ERP 或 upload 若沒有明確預測意圖，報告只做描述性、診斷性或比較性敘事；ontology candidate 仍標示 `inferred`/`observed`，不得冒充 approved。
+Profile 不會自動升級成 ML：任何資料集若沒有明確預測意圖，報告只做描述性、診斷性或比較性敘事；ontology candidate 仍標示 `inferred`/`observed`，不得冒充 approved。
 
 ## 决议
 
@@ -200,7 +200,6 @@ Skill 只规定安全工具边界：先取得完整 bounded report context，再
 
 ## 验收
 
-- Live WFERP check：`scripts/check-wferp-data-understanding.py` 以 schema search 的实际 table/field evidence 动态产生 bounded SQL，完成 Grafana Query → full profile → all-artifact inspect → generic compose；不呼叫 ML。
 - Native recovery 的历史运行有修正错误记录，但现有 `check-native-recovery-e2e.py` 只验证摘要，不能证明完整运行链；NLAP-01 要求从原始 run/session/tool-call events 验证，不允许合并 continuation 冒充 fresh E2E。
 - Production 不得依业务字段名或固定 chart list 决策；2026-09-05 审查发现 upload roles 与 regression 文案仍有业务 hardcode，待 NLAP-08 修正，不能宣称全项目已无 hardcode。
 - 同一 compositor 渲染 classification、correlation、time-series fixtures。

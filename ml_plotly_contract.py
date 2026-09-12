@@ -1,7 +1,6 @@
 """Native Plotly figures with the existing offline, static-presentation boundary.
 
-No trace/layout feature allowlist. Legacy normalization is read-only compatibility
-for already retained v1 manifest hashes; new reports never use that path.
+No trace/layout feature allowlist or historical-format normalization.
 """
 from __future__ import annotations
 
@@ -11,21 +10,12 @@ import binascii
 from html.parser import HTMLParser
 import json
 import math
-import importlib.util
-from pathlib import Path
 import struct
 from typing import Any, Literal
 
 import plotly
 import plotly.graph_objects as go
 from plotly.offline import get_plotlyjs_version
-# Explicit file loading also works when the MCP host loads this module by path.
-_legacy_spec = importlib.util.spec_from_file_location("_plotly_legacy", Path(__file__).with_name("_plotly_legacy.py"))
-if _legacy_spec is None or _legacy_spec.loader is None:
-    raise ImportError("legacy Plotly reader is unavailable")
-_legacy = importlib.util.module_from_spec(_legacy_spec)
-_legacy_spec.loader.exec_module(_legacy)
-contains_markup = _legacy.contains_markup  # shared report-text policy, unchanged
 
 PLOTLY_PLUGIN_ID = "asko11y-plotly-panel"
 FIGURE_FORMAT = "ask-o11y-ml-plotly-v2"
@@ -124,9 +114,7 @@ def _static_value(value: Any, *, coordinate: bool = False, path: tuple[str, ...]
     raise FigureError("not_json_data")
 
 
-def sanitize_figure(figure: Any, *, legacy: bool = False) -> dict[str, Any]:
-    if legacy:
-        return _legacy.sanitize_figure(figure)
+def sanitize_figure(figure: Any) -> dict[str, Any]:
     if not isinstance(figure, dict) or set(figure) - {"data", "layout", "config"}:
         raise FigureError("invalid_figure")
     if "config" in figure and figure["config"] != FIXED_CONFIG:

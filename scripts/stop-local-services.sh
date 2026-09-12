@@ -29,7 +29,6 @@ systemctl --user stop \
 stop_pidfile "$HOME/.pi/agent/gateway.pid"
 
 cd "$ROOT"
-docker compose --env-file wferp/test_db/.env -f wferp/test_db/docker-compose.testdb.yml stop
 docker compose stop
 
 echo 'Grafana and local services are stopped.'
