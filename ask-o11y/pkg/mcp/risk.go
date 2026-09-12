@@ -56,7 +56,7 @@ func ClassifyToolRisk(tool Tool, servers []ServerConfig) ToolRisk {
 		}
 	}
 
-	risk.RequiresApproval = risk.Destructive || risk.OpenWorld || (!risk.ReadOnly && heuristicWrite)
+	risk.RequiresApproval = risk.Destructive || risk.OpenWorld || !risk.ReadOnly
 	if override != nil && override.RequiresApproval != nil {
 		risk.RequiresApproval = *override.RequiresApproval
 	}

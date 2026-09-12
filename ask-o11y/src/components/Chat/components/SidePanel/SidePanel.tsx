@@ -91,7 +91,7 @@ export const SidePanel: React.FC<SidePanelProps> = ({
           onClick={onClose}
           className={cx('p-1.5 rounded-md transition-colors text-secondary', styles.hoverButton)}
           aria-label="Close panel"
-          title="Close panel"
+          title="Hide preview"
         >
           <Icon name="times" size="md" />
         </button>

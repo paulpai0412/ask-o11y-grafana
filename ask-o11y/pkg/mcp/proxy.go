@@ -147,6 +147,10 @@ func (p *Proxy) CallTool(toolName string, arguments map[string]interface{}) (*Ca
 
 // CallToolWithContext routes a tool call to the appropriate MCP server with additional context (e.g., Org ID, Org Name, Scope Org ID)
 func (p *Proxy) CallToolWithContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
+	return p.CallToolWithActorContext(toolName, arguments, orgID, orgName, scopeOrgId, "")
+}
+
+func (p *Proxy) CallToolWithActorContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
 	// Extract server ID from tool name prefix
 	parts := strings.SplitN(toolName, "_", 2)
 	if len(parts) < 2 {
@@ -173,7 +177,7 @@ func (p *Proxy) CallToolWithContext(toolName string, arguments map[string]interf
 
 	p.logger.Debug("Calling tool on MCP server", "tool", toolName, "server", serverID, "orgID", orgID, "orgName", orgName, "scopeOrgId", scopeOrgId)
 
-	return client.CallToolWithContext(toolName, arguments, orgID, orgName, scopeOrgId)
+	return client.CallToolWithActorContext(toolName, arguments, orgID, orgName, scopeOrgId, actorUserID)
 }
 
 // HandleMCPRequest handles an MCP JSON-RPC request
@@ -354,7 +358,7 @@ func (p *Proxy) RemoveServer(id string) {
 func (p *Proxy) sdkClient() (*http.Client, error) {
 	return httpclient.New(httpclient.Options{
 		Timeouts: &httpclient.TimeoutOptions{
-			Timeout:     30 * time.Second,
+			Timeout:     toolCallTimeout,
 			DialTimeout: connectDialTimeout,
 		},
 	})

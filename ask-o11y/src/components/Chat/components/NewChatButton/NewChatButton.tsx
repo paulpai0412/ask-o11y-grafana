@@ -44,12 +44,11 @@ export function NewChatButton({ onConfirm, isGenerating }: NewChatButtonProps): 
         type="button"
         size="sm"
         variant="secondary"
-        icon="plus"
         onClick={() => setIsOpen(!isOpen)}
         aria-label="New chat"
         data-testid={testIds.chat.newChatButton}
       >
-        New chat
+        + New Chat
       </Button>
 
       {isOpen && (

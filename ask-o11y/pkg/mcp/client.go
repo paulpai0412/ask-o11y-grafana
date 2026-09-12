@@ -44,11 +44,13 @@ type Client struct {
 
 // customRoundTripper wraps http.RoundTripper to add custom headers
 type customRoundTripper struct {
-	base       http.RoundTripper
-	orgID      string
-	orgName    string
-	scopeOrgId string // Direct X-Scope-OrgId value (takes priority over orgName)
-	config     ServerConfig
+	base        http.RoundTripper
+	orgID       string
+	orgName     string
+	scopeOrgId  string // Direct X-Scope-OrgId value (takes priority over orgName)
+	actorUserID string
+	sessionID   string
+	config      ServerConfig
 }
 
 func (t *customRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -61,6 +63,9 @@ func (t *customRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	// X-Grafana-Org-Id: Grafana's numeric organization ID
 	if t.orgID != "" {
 		req.Header.Set("X-Grafana-Org-Id", t.orgID)
+	}
+	if t.actorUserID != "" {
+		req.Header.Set("X-Grafana-Actor-User-Id", t.actorUserID)
 	}
 
 	// X-Scope-OrgID: Tenant identifier for multi-tenant systems (Mimir/Cortex/Loki)
@@ -79,6 +84,23 @@ func (t *customRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		} else {
 			req.Header.Set(key, value)
 		}
+	}
+	// Actor/session headers are host-owned, never overridden by server configuration.
+	if t.orgID != "" {
+		req.Header.Set("X-Grafana-Org-Id", t.orgID)
+	}
+	if t.scopeOrgId != "" {
+		req.Header.Set("X-Scope-OrgID", t.scopeOrgId)
+	} else if t.orgName != "" {
+		req.Header.Set("X-Scope-OrgID", t.orgName)
+	}
+	req.Header.Del("X-Grafana-Actor-User-Id")
+	req.Header.Del("X-Grafana-Session-Id")
+	if t.actorUserID != "" {
+		req.Header.Set("X-Grafana-Actor-User-Id", t.actorUserID)
+	}
+	if t.sessionID != "" {
+		req.Header.Set("X-Grafana-Session-Id", t.sessionID)
 	}
 
 	return t.base.RoundTrip(req)
@@ -185,7 +207,10 @@ func (c *Client) forceReconnect() error {
 	return c.connectMCP()
 }
 
-const connectDialTimeout = 10 * time.Second
+const (
+	connectDialTimeout = 10 * time.Second
+	toolCallTimeout    = 3600 * time.Second
+)
 
 // forceReconnectMinInterval is the dedupe window that prevents the health
 // monitor from thrashing a session that the on-call retry path just refreshed.
@@ -237,6 +262,14 @@ func (t *configHeaderRoundTripper) RoundTrip(req *http.Request) (*http.Response,
 //   - X-Grafana-Org-Id: Grafana's numeric organization ID
 //   - X-Scope-OrgID: Tenant identifier (scopeOrgId takes priority over orgName)
 func (c *Client) connectMCPWithOrgContext(orgID string, orgName string, scopeOrgId string) error {
+	return c.connectMCPWithActorContext(orgID, orgName, scopeOrgId, "")
+}
+
+func (c *Client) connectMCPWithActorContext(orgID string, orgName string, scopeOrgId string, actorUserID string) error {
+	return c.connectMCPWithActorAndSessionContext(orgID, orgName, scopeOrgId, actorUserID, "")
+}
+
+func (c *Client) connectMCPWithActorAndSessionContext(orgID string, orgName string, scopeOrgId string, actorUserID string, sessionID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -255,11 +288,13 @@ func (c *Client) connectMCPWithOrgContext(orgID string, orgName string, scopeOrg
 	}, nil)
 
 	customHTTPClient := c.sdkHTTPClientWithTransport(&customRoundTripper{
-		base:       c.baseTransport(),
-		orgID:      orgID,
-		orgName:    orgName,
-		scopeOrgId: scopeOrgId,
-		config:     c.config,
+		base:        c.baseTransport(),
+		orgID:       orgID,
+		orgName:     orgName,
+		scopeOrgId:  scopeOrgId,
+		actorUserID: actorUserID,
+		sessionID:   sessionID,
+		config:      c.config,
 	})
 
 	var transport mcpsdk.Transport
@@ -447,6 +482,10 @@ func (c *Client) CallTool(toolName string, arguments map[string]interface{}) (*C
 }
 
 func (c *Client) CallToolWithContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
+	return c.CallToolWithActorContext(toolName, arguments, orgID, orgName, scopeOrgId, "")
+}
+
+func (c *Client) CallToolWithActorContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
 	// Remove server ID prefix from tool name
 	originalName := strings.TrimPrefix(toolName, c.config.ID+"_")
 
@@ -454,7 +493,7 @@ func (c *Client) CallToolWithContext(toolName string, arguments map[string]inter
 	case "openapi":
 		return c.callOpenAPIToolWithContext(originalName, arguments, orgID, orgName, scopeOrgId)
 	case "sse", "streamable-http", "http+streamable":
-		return c.callMCPToolWithContext(originalName, arguments, orgID, orgName, scopeOrgId)
+		return c.callMCPToolWithActorContext(originalName, arguments, orgID, orgName, scopeOrgId, actorUserID)
 	default:
 		// Fallback to standard MCP protocol
 		return c.callStandardTool(originalName, arguments)
@@ -499,12 +538,43 @@ type callToolOncer func(toolName string, arguments map[string]interface{}, orgID
 // is wrapped in *TransportError so callers can distinguish transport outages
 // from tool-layer failures and avoid fabricating around missing data.
 func (c *Client) callMCPToolWithContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
-	return c.callMCPToolWithRetry(c.callMCPToolOnce, toolName, arguments, orgID, orgName, scopeOrgId)
+	return c.callMCPToolWithActorContext(toolName, arguments, orgID, orgName, scopeOrgId, "")
+}
+
+func (c *Client) callMCPToolWithActorContext(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
+	// Each call owns its connection: reconnects cannot replace another actor's session.
+	isolated := NewClient(c.ctx, c.config, c.logger, c.httpClient)
+	c.mu.RLock()
+	isolated.tools = append([]Tool(nil), c.tools...)
+	c.mu.RUnlock()
+	defer isolated.Close()
+	return isolated.callMCPToolWithRetry(func(name string, args map[string]interface{}, org, orgName, scope string) (*CallToolResult, error) {
+		return isolated.callMCPToolOnceWithActor(name, args, org, orgName, scope, actorUserID)
+	}, toolName, arguments, orgID, orgName, scopeOrgId)
+}
+
+func (c *Client) safeTransportRetry(toolName string) bool {
+	// Read-only does not mean free to recompute. These effects need host receipts.
+	switch toolName {
+	case "update_dashboard", "execute_ml_contract", "execute_python_analysis", "execute_document_analysis", "execute_python_preprocessing", "profile_dataset", "revise_python_analysis":
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, tool := range c.tools {
+		if tool.Name == toolName && tool.Annotations != nil && tool.Annotations.ReadOnlyHint != nil {
+			return *tool.Annotations.ReadOnlyHint
+		}
+	}
+	return false
 }
 
 func (c *Client) callMCPToolWithRetry(once callToolOncer, toolName string, arguments map[string]interface{}, orgID, orgName, scopeOrgId string) (*CallToolResult, error) {
 	var lastErr error
-	maxAttempts := len(retrySchedule) + 1 // initial try + one retry per backoff slot
+	maxAttempts := 1
+	if c.safeTransportRetry(toolName) {
+		maxAttempts += len(retrySchedule)
+	}
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		result, err := once(toolName, arguments, orgID, orgName, scopeOrgId)
 		if err == nil {
@@ -547,6 +617,18 @@ func (c *Client) callMCPToolWithRetry(once callToolOncer, toolName string, argum
 // been proven safe in production. The outer retry wrapper adds attempts on
 // top — these are two independent reliability layers.
 func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string) (*CallToolResult, error) {
+	return c.callMCPToolOnceWithActor(toolName, arguments, orgID, orgName, scopeOrgId, "")
+}
+
+func (c *Client) callMCPToolOnceWithActor(toolName string, arguments map[string]interface{}, orgID string, orgName string, scopeOrgId string, actorUserID string) (*CallToolResult, error) {
+	sessionID, _ := arguments["_server_session_id"].(string)
+	wireArgs := make(map[string]interface{}, len(arguments))
+	for key, value := range arguments {
+		if key != "_server_session_id" {
+			wireArgs[key] = value
+		}
+	}
+	arguments = wireArgs
 	// Track whether we're using org context for potential reconnection
 	// Forward org headers to all MCP servers (not just specific ones)
 	useOrgContext := orgID != "" || orgName != "" || scopeOrgId != ""
@@ -556,7 +638,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
 	if useOrgContext {
 		c.logger.Debug("Calling tool with org context", "server", c.config.ID, "tool", toolName, "orgID", orgID, "orgName", orgName, "scopeOrgId", scopeOrgId)
 
-		if err := c.connectMCPWithOrgContext(orgID, orgName, scopeOrgId); err != nil {
+		if err := c.connectMCPWithActorAndSessionContext(orgID, orgName, scopeOrgId, actorUserID, sessionID); err != nil {
 			c.logger.Error("Failed to connect to server with org context", "server", c.config.ID, "error", sanitizeError(err))
 			return nil, err
 		}
@@ -577,7 +659,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
 		return nil, fmt.Errorf("session not established for tool call")
 	}
 
-	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, toolCallTimeout)
 	defer cancel()
 
 	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -586,7 +668,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
 	})
 	if err != nil {
 		// If the call failed due to connection issues, try to reconnect once
-		if strings.Contains(err.Error(), "connection closed") || strings.Contains(err.Error(), "client is closing") {
+		if c.safeTransportRetry(toolName) && (strings.Contains(err.Error(), "connection closed") || strings.Contains(err.Error(), "client is closing")) {
 			c.logger.Warn("Connection closed, attempting to reconnect", "error", sanitizeError(err), "server", c.config.ID)
 
 			// Try to reconnect - use the same connection method as the original call
@@ -594,7 +676,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
 			var reconnectErr error
 			if useOrgContext {
 				// connectMCPWithOrgContext handles session cleanup atomically
-				reconnectErr = c.connectMCPWithOrgContext(orgID, orgName, scopeOrgId)
+				reconnectErr = c.connectMCPWithActorAndSessionContext(orgID, orgName, scopeOrgId, actorUserID, sessionID)
 			} else {
 				// Clear the session to force reconnection
 				c.mu.Lock()
@@ -620,7 +702,7 @@ func (c *Client) callMCPToolOnce(toolName string, arguments map[string]interface
 				return nil, fmt.Errorf("session not established after reconnection")
 			}
 
-			retryCtx, retryCancel := context.WithTimeout(c.ctx, 30*time.Second)
+			retryCtx, retryCancel := context.WithTimeout(c.ctx, toolCallTimeout)
 			defer retryCancel()
 
 			result, err = session.CallTool(retryCtx, &mcpsdk.CallToolParams{

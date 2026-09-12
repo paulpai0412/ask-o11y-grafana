@@ -58,6 +58,54 @@
     }
   ],
   "paths": {
+    "/api/uploads": {
+      "post": {
+        "summary": "Upload a session-private CSV or spreadsheet",
+        "description": "Requires an owned session. Files are limited to 50 MiB. A successful upload attaches the returned dataset_id to that session.",
+        "operationId": "uploadSessionDataset",
+        "tags": ["Sessions"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file", "session_id"],
+                "properties": {
+                  "file": {"type": "string", "format": "binary"},
+                  "session_id": {"type": "string"},
+                  "sheet": {"type": "string", "description": "Optional spreadsheet sheet name"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {"description": "Uploaded and attached to the session", "content": {"application/json": {"schema": {"type": "object", "properties": {"dataset_id": {"type": "string"}}}}}},
+          "400": {"description": "Invalid multipart data or session identifier"},
+          "404": {"description": "Owned session not found"},
+          "413": {"description": "Invalid request or file size"},
+          "502": {"description": "Upstream response failed or was invalid"},
+          "503": {"description": "Upload service unavailable"}
+        }
+      },
+      "delete": {
+        "summary": "Remove a session-private uploaded dataset",
+        "operationId": "deleteSessionDataset",
+        "tags": ["Sessions"],
+        "parameters": [
+          {"name": "dataset_id", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "session_id", "in": "query", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Dataset removed and matching attachment cleared"},
+          "400": {"description": "Invalid dataset or session identifier"},
+          "404": {"description": "Owned session or dataset not found"},
+          "502": {"description": "Removal result unavailable; do not infer success"},
+          "503": {"description": "Upload service unavailable"}
+        }
+      }
+    },
     "/health": {
       "get": {
         "summary": "Health check",

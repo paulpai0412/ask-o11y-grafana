@@ -1,4 +1,11 @@
-import { runAgentDetached, reconnectToAgentRun, readSSEStream, AgentCallbacks, AgentRunRequest } from '../agentClient';
+import {
+  resolveAgentApproval,
+  runAgentDetached,
+  reconnectToAgentRun,
+  readSSEStream,
+  AgentCallbacks,
+  AgentRunRequest,
+} from '../agentClient';
 
 function createMockBody(lines: string[]) {
   const encoder = new TextEncoder();
@@ -112,6 +119,42 @@ describe('runAgentDetached', () => {
     expect(url).toBe('/api/plugins/consensys-asko11y-app/resources/api/agent/run?model=large');
     const body = JSON.parse(fetchOptions.body);
     expect(body.model).toBeUndefined();
+  });
+});
+
+describe('Grafana session refresh', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    jest.restoreAllMocks();
+  });
+
+  it('refreshes the session before retrying an unauthorized approval', async () => {
+    const mockFetch = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        text: jest.fn().mockResolvedValue('{"message":"Unauthorized"}'),
+      })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: jest.fn().mockResolvedValue({ approvalId: 'approval-1', decision: 'approved' }),
+      });
+    global.fetch = mockFetch;
+
+    await expect(resolveAgentApproval('run-1', 'approval-1', 'approved')).resolves.toEqual({
+      approvalId: 'approval-1',
+      decision: 'approved',
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch.mock.calls[1]).toEqual(['/api/login/ping', { credentials: 'same-origin' }]);
+    expect(mockFetch.mock.calls[2][1]).toEqual(
+      expect.objectContaining({ method: 'POST', credentials: 'same-origin' })
+    );
   });
 });
 

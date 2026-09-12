@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 func retryTestClient(ctx context.Context) *Client {
 	return &Client{
 		config: ServerConfig{ID: "test"},
+		tools:  []Tool{{Name: "t", Annotations: &ToolAnnotations{ReadOnlyHint: boolPtr(true)}}},
 		logger: log.DefaultLogger,
 		ctx:    ctx,
 	}
@@ -146,6 +149,41 @@ func TestRetry_ToolLogicErrorNeverSeenByRetry(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("expected 1 attempt for tool logic error, got %d", calls.Load())
+	}
+}
+
+func TestNLAPConfigurationCannotOverrideActorHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for key, expected := range map[string]string{"X-Grafana-Org-Id": "2", "X-Grafana-Actor-User-Id": "actor", "X-Grafana-Session-Id": "session", "X-Scope-OrgID": "scope", "X-Grafana-User": "service"} {
+			if r.Header.Get(key) != expected {
+				t.Errorf("%s was overridden: %s", key, r.Header.Get(key))
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := &http.Client{Timeout: time.Second, Transport: &customRoundTripper{base: http.DefaultTransport, orgID: "2", actorUserID: "actor", sessionID: "session", scopeOrgId: "scope", config: ServerConfig{Headers: map[string]string{"X-Grafana-Org-Id": "wrong", "X-Grafana-Actor-User-Id": "wrong", "X-Grafana-Session-Id": "wrong", "X-Scope-OrgID": "wrong", "X-Grafana-User": "service"}}}}
+	response, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+}
+
+func TestRetry_EffectsAndUnknownToolsAreNotReplayed(t *testing.T) {
+	for _, name := range []string{"update_dashboard", "execute_ml_contract", "execute_python_preprocessing", "unknown"} {
+		c := retryTestClient(context.Background())
+		if name != "unknown" {
+			c.tools = append(c.tools, Tool{Name: name, Annotations: &ToolAnnotations{ReadOnlyHint: boolPtr(true)}})
+		}
+		calls := 0
+		once := func(string, map[string]interface{}, string, string, string) (*CallToolResult, error) {
+			calls++
+			return nil, io.ErrUnexpectedEOF
+		}
+		if _, err := c.callMCPToolWithRetry(once, name, nil, "", "", ""); err == nil || calls != 1 {
+			t.Fatalf("%s was silently replayed: calls=%d err=%v", name, calls, err)
+		}
 	}
 }
 

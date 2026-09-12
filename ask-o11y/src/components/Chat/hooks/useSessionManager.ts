@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { ChatMessage } from '../types';
+import { parseGrafanaLinks } from '../utils/grafanaLinkParser';
 import {
   listSessions,
   getSession,
@@ -99,7 +100,13 @@ export function useSessionManager(
       try {
         const session = await getSession(sessionId);
         setCurrentSessionId_(session.id);
-        setChatHistory(session.messages as ChatMessage[]);
+        setChatHistory(
+          (session.messages as ChatMessage[]).map((message) =>
+            message.role === 'assistant'
+              ? { ...message, pageRefs: parseGrafanaLinks(message.content) }
+              : message
+          )
+        );
         setSessions((prev) => {
           const metadata = {
             id: session.id,

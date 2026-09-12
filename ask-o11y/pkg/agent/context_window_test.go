@@ -69,7 +69,7 @@ func TestTrimMessagesToTokenLimit(t *testing.T) {
 func TestTrimMessagesToTokenLimit_DropsOldMessages(t *testing.T) {
 	messages := []Message{
 		{Role: "system", Content: "sys"},
-		{Role: "user", Content: strings.Repeat("a", 40000)},    // ~10000 tokens
+		{Role: "user", Content: strings.Repeat("a", 40000)},      // ~10000 tokens
 		{Role: "assistant", Content: strings.Repeat("b", 40000)}, // ~10000 tokens
 		{Role: "user", Content: "recent"},                        // small
 	}
@@ -118,6 +118,18 @@ func TestTrimMessagesToTokenLimit_NoNoticeWhenNoDrop(t *testing.T) {
 	result := TrimMessagesToTokenLimit(messages, nil, 100_000)
 	if hasTruncationNotice(result) {
 		t.Fatalf("did not expect truncation notice when nothing was dropped, got %+v", result)
+	}
+}
+
+func TestBuildContextWindowKeepsToolPairs(t *testing.T) {
+	messages := []Message{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "read", Type: "function", Function: FunctionCall{Name: "inspect", Arguments: "{}"}}}},
+		{Role: "tool", ToolCallID: "read", Content: "retained evidence"},
+		{Role: "user", Content: "continue"},
+	}
+	window := BuildContextWindow("sys", messages, "", 2)
+	if len(window) != 4 || len(window[1].ToolCalls) != 1 || window[1].ToolCalls[0].ID != window[2].ToolCallID {
+		t.Fatal("recent-message boundary detached evidence from its tool call")
 	}
 }
 

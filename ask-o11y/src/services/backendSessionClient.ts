@@ -1,4 +1,5 @@
 import { config } from '@grafana/runtime';
+import { grafanaFetch } from './grafanaFetch';
 import type { ChatMessage } from '../components/Chat/types';
 
 const SESSIONS_URL = '/api/plugins/consensys-asko11y-app/resources/api/sessions';
@@ -34,7 +35,7 @@ export async function createSession(
   title?: string,
   messages?: ChatMessage[]
 ): Promise<BackendChatSession> {
-  const resp = await fetch(SESSIONS_URL, {
+  const resp = await grafanaFetch(SESSIONS_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...orgHeaders() },
     body: JSON.stringify({ title: title || '', messages: messages || [] }),
@@ -46,7 +47,7 @@ export async function createSession(
 }
 
 export async function listSessions(): Promise<SessionMetadata[]> {
-  const resp = await fetch(SESSIONS_URL, {
+  const resp = await grafanaFetch(SESSIONS_URL, {
     headers: orgHeaders(),
   });
   if (!resp.ok) {
@@ -56,7 +57,7 @@ export async function listSessions(): Promise<SessionMetadata[]> {
 }
 
 export async function getSession(sessionId: string): Promise<BackendChatSession> {
-  const resp = await fetch(`${SESSIONS_URL}/${sessionId}`, {
+  const resp = await grafanaFetch(`${SESSIONS_URL}/${sessionId}`, {
     headers: orgHeaders(),
   });
   if (!resp.ok) {
@@ -66,7 +67,7 @@ export async function getSession(sessionId: string): Promise<BackendChatSession>
 }
 
 export async function updateSession(sessionId: string, update: SessionUpdate): Promise<void> {
-  const resp = await fetch(`${SESSIONS_URL}/${sessionId}`, {
+  const resp = await grafanaFetch(`${SESSIONS_URL}/${sessionId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...orgHeaders() },
     body: JSON.stringify(update),
@@ -77,7 +78,7 @@ export async function updateSession(sessionId: string, update: SessionUpdate): P
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
-  const resp = await fetch(`${SESSIONS_URL}/${sessionId}`, {
+  const resp = await grafanaFetch(`${SESSIONS_URL}/${sessionId}`, {
     method: 'DELETE',
     headers: orgHeaders(),
   });
@@ -87,7 +88,7 @@ export async function deleteSession(sessionId: string): Promise<void> {
 }
 
 export async function deleteAllSessions(): Promise<void> {
-  const resp = await fetch(SESSIONS_URL, {
+  const resp = await grafanaFetch(SESSIONS_URL, {
     method: 'DELETE',
     headers: orgHeaders(),
   });
@@ -97,7 +98,7 @@ export async function deleteAllSessions(): Promise<void> {
 }
 
 export async function getCurrentSessionId(): Promise<string | null> {
-  const resp = await fetch(`${SESSIONS_URL}/current`, {
+  const resp = await grafanaFetch(`${SESSIONS_URL}/current`, {
     headers: orgHeaders(),
   });
   if (!resp.ok) {
@@ -108,7 +109,7 @@ export async function getCurrentSessionId(): Promise<string | null> {
 }
 
 export async function setCurrentSessionId(sessionId: string | null): Promise<void> {
-  const resp = await fetch(`${SESSIONS_URL}/current`, {
+  const resp = await grafanaFetch(`${SESSIONS_URL}/current`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...orgHeaders() },
     body: JSON.stringify({ sessionId: sessionId || '' }),
@@ -119,7 +120,7 @@ export async function setCurrentSessionId(sessionId: string | null): Promise<voi
 }
 
 export async function ingestSession(messages: ChatMessage[]): Promise<{ ingested: number }> {
-  const resp = await fetch(`${GRAPHITI_URL}/ingest-session`, {
+  const resp = await grafanaFetch(`${GRAPHITI_URL}/ingest-session`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...orgHeaders() },
     body: JSON.stringify({

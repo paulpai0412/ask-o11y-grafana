@@ -452,6 +452,7 @@ func (p *Plugin) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/graphiti/discover", p.handleGraphitiDiscover)
 	mux.HandleFunc("/api/graphiti/status", p.handleGraphitiStatus)
 	mux.HandleFunc("/api/graphiti/ingest-session", p.handleGraphitiIngestSession)
+	mux.HandleFunc("/api/uploads", p.handleUpload)
 
 	// Session CRUD (new) — registered before share routes for specificity
 	mux.HandleFunc("/api/sessions/current", p.handleSessionCurrent)
@@ -724,6 +725,63 @@ func (p *Plugin) handleMCPServers(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// Restore ordinary assistant/tool messages from the session's existing UI records.
+// Context sizing belongs to the agent's context window, not a second field whitelist.
+func restoreSessionMessages(history []SessionMessage) []agent.Message {
+	var messages []agent.Message
+	for messageIndex, msg := range history {
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			var calls []struct {
+				ID        string              `json:"id"`
+				Name      string              `json:"name"`
+				Arguments string              `json:"arguments"`
+				Error     string              `json:"error"`
+				Response  *mcp.CallToolResult `json:"response"`
+			}
+			if err := json.Unmarshal(msg.ToolCalls, &calls); err != nil {
+				calls = nil
+				messages = append(messages, agent.Message{Role: "assistant", Content: "Prior tool history is unavailable: invalid stored tool records. Do not infer successful results or retry authority."})
+			}
+			for callIndex, call := range calls {
+				if call.Name == "" {
+					continue
+				}
+				if call.ID == "" {
+					// Older UI records did not retain IDs; these are message-pair IDs, not operation IDs.
+					call.ID = fmt.Sprintf("history_%d_%d", messageIndex, callIndex)
+				}
+				content := "Tool result unavailable; do not infer success or automatically retry."
+				if call.Error != "" {
+					content = "[Tool failed]\n" + call.Error
+				} else if call.Response != nil {
+					var text []string
+					for _, block := range call.Response.Content {
+						if block.Type == "text" {
+							text = append(text, block.Text)
+						}
+					}
+					if len(text) > 0 {
+						content = strings.Join(text, "\n")
+					} else if call.Response.StructuredContent != nil {
+						if raw, err := json.Marshal(call.Response.StructuredContent); err == nil {
+							content = string(raw)
+						}
+					}
+					if call.Response.IsError {
+						content = "[Tool failed]\n" + content
+					}
+				}
+				messages = append(messages,
+					agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: call.ID, Type: "function", Function: agent.FunctionCall{Name: call.Name, Arguments: call.Arguments}}}},
+					agent.Message{Role: "tool", ToolCallID: call.ID, Content: content},
+				)
+			}
+		}
+		messages = append(messages, agent.Message{Role: msg.Role, Content: msg.Content})
+	}
+	return messages
+}
+
 func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -821,6 +879,7 @@ func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 
 	var messages []agent.Message
 	var sessionID string
+	var uploadDatasetID string
 	runModel := requestedModel
 	modelSource := "auto"
 	if requestedModel != "" {
@@ -834,6 +893,7 @@ func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sessionID = req.SessionID
+		uploadDatasetID = session.UploadDatasetID
 		if session.Model != "" {
 			if requestedModel != "" && requestedModel != session.Model {
 				http.Error(w, "Session model cannot be changed", http.StatusBadRequest)
@@ -849,12 +909,7 @@ func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		for _, msg := range session.Messages {
-			messages = append(messages, agent.Message{
-				Role:    msg.Role,
-				Content: msg.Content,
-			})
-		}
+		messages = append(messages, restoreSessionMessages(session.Messages)...)
 
 		messages = append(messages, agent.Message{
 			Role:    "user",
@@ -901,6 +956,15 @@ func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 	effectiveRunModel := runModel
 	if effectiveRunModel == "" {
 		effectiveRunModel = selectAgentModelForTask(req.Type, req.Message)
+		// Confirmation/retry turns belong to the same conversation task. Do not
+		// downgrade because the latest user message is only a short approval.
+		// Explicit request/session choices above remain authoritative.
+		for _, message := range messages {
+			if message.Role == "user" && selectAgentModelForTask(req.Type, message.Content) == agentModelLarge {
+				effectiveRunModel = agentModelLarge
+				break
+			}
+		}
 		modelSource = "auto"
 	}
 
@@ -940,6 +1004,9 @@ func (p *Plugin) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 		GrafanaURL:           grafanaURL,
 		AuthToken:            saToken,
 		UserRole:             userRole,
+		UserID:               strconv.FormatInt(userID, 10),
+		SessionID:            sessionID,
+		UploadDatasetID:      uploadDatasetID,
 		OrgID:                orgID,
 		OrgName:              req.OrgName,
 		ScopeOrgID:           req.ScopeOrgID,
@@ -1722,6 +1789,7 @@ func (p *Plugin) handleGraphitiDiscover(w http.ResponseWriter, r *http.Request) 
 		GrafanaURL:         grafanaURL,
 		AuthToken:          saToken,
 		UserRole:           userRole,
+		UserID:             strconv.FormatInt(userID, 10),
 		OrgID:              strconv.FormatInt(orgID, 10),
 		OrgName:            "Org" + strconv.FormatInt(orgID, 10),
 		ExcludeToolNames:   graphitiWriteToolNames,
@@ -2401,6 +2469,7 @@ func reconstructAssistantMessage(events []agent.SSEEvent) SessionMessage {
 				toolCallOrder = append(toolCallOrder, id)
 			}
 			toolCallsByID[id] = map[string]interface{}{
+				"id":        id,
 				"name":      name,
 				"arguments": arguments,
 				"running":   true,
@@ -2421,7 +2490,7 @@ func reconstructAssistantMessage(events []agent.SSEEvent) SessionMessage {
 			}
 			tc, exists := toolCallsByID[id]
 			if !exists {
-				tc = map[string]interface{}{"name": name}
+				tc = map[string]interface{}{"id": id, "name": name}
 				toolCallOrder = append(toolCallOrder, id)
 			}
 			tc["running"] = false

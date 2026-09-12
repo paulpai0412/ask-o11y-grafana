@@ -86,6 +86,7 @@ func TestSpecHasAllEndpoints(t *testing.T) {
 	}
 
 	expectedPaths := []string{
+		"/api/uploads",
 		"/health",
 		"/",
 		"/openapi.json",

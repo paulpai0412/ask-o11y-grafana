@@ -18,17 +18,18 @@ type SessionMessage struct {
 }
 
 type ChatSession struct {
-	ID           string           `json:"id"`
-	Title        string           `json:"title"`
-	Messages     []SessionMessage `json:"messages"`
-	Summary      string           `json:"summary,omitempty"`
-	CreatedAt    time.Time        `json:"createdAt"`
-	UpdatedAt    time.Time        `json:"updatedAt"`
-	MessageCount int              `json:"messageCount"`
-	ActiveRunID  string           `json:"activeRunId,omitempty"`
-	Model        string           `json:"model,omitempty"`
-	UserID       int64            `json:"-"`
-	OrgID        int64            `json:"-"`
+	ID              string           `json:"id"`
+	Title           string           `json:"title"`
+	Messages        []SessionMessage `json:"messages"`
+	Summary         string           `json:"summary,omitempty"`
+	CreatedAt       time.Time        `json:"createdAt"`
+	UpdatedAt       time.Time        `json:"updatedAt"`
+	MessageCount    int              `json:"messageCount"`
+	ActiveRunID     string           `json:"activeRunId,omitempty"`
+	Model           string           `json:"model,omitempty"`
+	UploadDatasetID string           `json:"uploadDatasetId,omitempty"`
+	UserID          int64            `json:"-"`
+	OrgID           int64            `json:"-"`
 }
 
 type SessionMetadata struct {
@@ -61,6 +62,7 @@ type SessionStoreInterface interface {
 	ClearCurrentSessionID(userID, orgID int64) error
 	SetActiveRunID(sessionID string, userID, orgID int64, runID string) error
 	ClearActiveRunID(sessionID string, userID, orgID int64) error
+	SetUploadDatasetID(sessionID string, userID, orgID int64, datasetID string) error
 }
 
 func sessionOwnerKey(userID, orgID int64) string {
@@ -180,6 +182,19 @@ func (s *SessionStore) GetSession(sessionID string, userID, orgID int64) (*ChatS
 	copied.Messages = make([]SessionMessage, len(session.Messages))
 	copy(copied.Messages, session.Messages)
 	return &copied, nil
+}
+
+func (s *SessionStore) SetUploadDatasetID(sessionID string, userID, orgID int64, datasetID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, exists := s.sessions[sessionID]
+	if !exists || session.UserID != userID || session.OrgID != orgID {
+		return fmt.Errorf("session not found")
+	}
+	session.UploadDatasetID = datasetID
+	session.UpdatedAt = time.Now()
+	return nil
 }
 
 func (s *SessionStore) ListSessions(userID, orgID int64) ([]SessionMetadata, error) {

@@ -9,4 +9,6 @@ This directory is maintained directly in the parent Grafana Git repository.
 
 Do not regenerate this directory from patches or a scratch checkout. Keep build outputs and dependencies ignored. Build scripts must not delete, reset, clone over, or deploy this source by default.
 
-The original upstream documentation is retained for reference; local runtime changes and verification are recorded in the design/TODO above. No new plugin ID or service is introduced.
+Build from the repository root with `bash scripts/build-install-ask-o11y.sh`. Despite its retained name, this entrypoint now only builds; deployment is separate. It uses this source without patches and does not install tools or dependencies. The local verification run was explicitly approved on the existing Node 24.18.0 (upstream documentation still specifies Node 22).
+
+The original upstream documentation is retained for reference; local runtime changes and verification are recorded in the design/TODO above. No new plugin ID or service is introduced. The MCP migration is not yet complete; a local build is not deployment acceptance.

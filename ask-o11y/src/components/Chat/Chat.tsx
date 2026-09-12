@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { useTheme2 } from '@grafana/ui';
+import { Icon, useTheme2 } from '@grafana/ui';
 
 import { useChat } from './hooks/useChat';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
@@ -8,12 +8,13 @@ import { useChatScene } from './hooks/useChatScene';
 import { useSidePanelState } from './hooks/useSidePanelState';
 import { ChatInterfaceState } from './scenes/ChatInterfaceScene';
 import { GrafanaPageState } from './scenes/GrafanaPageScene';
-import { SessionSidebar, NewChatButton, HistoryButton, SaveToMemoryButton, ModelSelector } from './components';
+import { SessionSidebar, NewChatButton, UploadButton, HistoryButton, SaveToMemoryButton, ModelSelector } from './components';
 import { ChatInputRef } from './components/ChatInput/ChatInput';
 import { ChatErrorBoundary } from '../ErrorBoundary';
 import type { SessionMetadata } from './hooks/useSessionManager';
 import type { ChatMessage } from './types';
 import type { AppPluginSettings } from '../../types/plugin';
+import { removeUploadedDataset, type UploadedDataset } from '../../services/uploadClient';
 import {
   formatModelLabel,
   formatModelSelectionLabel,
@@ -45,6 +46,7 @@ function ChatComponent({
   const allowEmbedding = useEmbeddingAllowed();
   const [modelOptions, setModelOptions] = useState<LLMModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState<LLMModelSelection>('auto');
+  const [uploaded, setUploaded] = useState<{ dataset: UploadedDataset; sessionId: string } | null>(null);
 
   const kioskModeEnabled = pluginSettings?.kioskModeEnabled ?? true;
   const chatPanelPosition = pluginSettings?.chatPanelPosition || 'right';
@@ -106,6 +108,7 @@ function ChatComponent({
     showSidePanel,
     handleRemoveTab,
     handleClose: handleSidePanelClose,
+    handleToggle: handleSidePanelToggle,
   } = useSidePanelState({
     detectedPageRefs,
     currentSessionId: sessionManager.currentSessionId,
@@ -126,6 +129,14 @@ function ChatComponent({
       chatInputRef.current?.focus();
     }, 100);
   }, [setCurrentInput]);
+
+  const handleUploaded = useCallback((message: string, sessionId: string, dataset: UploadedDataset) => {
+    setUploaded({ dataset, sessionId });
+    void sessionManager.loadSession(sessionId).then(() => {
+      setCurrentInput(message);
+      setTimeout(() => chatInputRef.current?.focus(), 100);
+    });
+  }, [sessionManager, setCurrentInput]);
 
   const currentSession = sessionManager.sessions.find((s: SessionMetadata) => s.id === sessionManager.currentSessionId);
   const currentSessionTitle = currentSession?.title;
@@ -166,12 +177,34 @@ function ChatComponent({
       chatContainerRef,
       chatInputRef,
       bottomSpacerRef,
-      leftSlot: hasMessages ? (
-        <div className="flex items-center gap-2">
-          <NewChatButton onConfirm={clearChat} isGenerating={isGenerating} />
-          {modelSelector}
+      leftSlot: (
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <NewChatButton onConfirm={clearChat} isGenerating={isGenerating} />
+            <UploadButton disabled={isGenerating} onUploaded={handleUploaded} />
+            {modelSelector}
+          </div>
+          {uploaded && uploaded.sessionId === sessionManager.currentSessionId && (
+            <div className="flex items-center gap-2 text-xs text-secondary">
+              <span className="truncate" title={uploaded.dataset.filename}>
+                {uploaded.dataset.filename} · {uploaded.dataset.rows} rows · {uploaded.dataset.columns} columns
+                {uploaded.dataset.sheet ? ` · ${uploaded.dataset.sheet}` : ''}
+              </span>
+              <button
+                type="button"
+                className="text-error"
+                onClick={() => {
+                  void removeUploadedDataset(uploaded.dataset.dataset_id, uploaded.sessionId)
+                    .then(() => setUploaded(null))
+                    .catch((error) => window.alert(error instanceof Error ? error.message : 'Remove failed'));
+                }}
+              >
+                Remove
+              </button>
+            </div>
+          )}
         </div>
-      ) : modelSelector,
+      ),
       rightSlot: (
         <div className="flex items-center gap-1">
           {graphitiEnabled && hasMessages && <SaveToMemoryButton messages={chatHistory} />}
@@ -192,6 +225,8 @@ function ChatComponent({
       currentSessionTitle,
       currentModelLabel,
       sessionManager.sessions.length,
+      sessionManager.currentSessionId,
+      uploaded,
       setCurrentInput,
       sendMessage,
       handleKeyPress,
@@ -202,6 +237,7 @@ function ChatComponent({
       modelSelector,
       graphitiEnabled,
       clearChat,
+      handleUploaded,
       openHistory,
       readOnly,
       handleSuggestionClick,
@@ -228,7 +264,7 @@ function ChatComponent({
   return (
     <div
       ref={containerRef}
-      className="w-full h-full flex"
+      className="w-full h-full flex relative"
       role="main"
       aria-label="Chat interface"
       style={{
@@ -247,6 +283,22 @@ function ChatComponent({
         <div data-plugin-split-layout style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <chatScene.Component model={chatScene} />
         </div>
+      )}
+      {visiblePageRefs.length > 0 && allowEmbedding === true && !showSidePanel && (
+        <button
+          onClick={handleSidePanelToggle}
+          className="absolute right-0 top-4 z-10 flex items-center gap-1 rounded-l-md border px-2 py-2 text-xs font-medium shadow"
+          aria-label="Show dashboard preview"
+          title="Show preview"
+          style={{
+            backgroundColor: theme.colors.background.primary,
+            borderColor: theme.colors.border.weak,
+            color: theme.colors.text.primary,
+          }}
+        >
+          <Icon name="columns" size="sm" />
+          <span>Preview</span>
+        </button>
       )}
     </div>
   );

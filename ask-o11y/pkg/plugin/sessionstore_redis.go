@@ -21,17 +21,18 @@ func sessionCurrentKey(userID, orgID int64) string {
 
 // redisSession is the on-wire format stored in Redis (includes owner fields).
 type redisSession struct {
-	ID           string           `json:"id"`
-	Title        string           `json:"title"`
-	Messages     []SessionMessage `json:"messages"`
-	Summary      string           `json:"summary,omitempty"`
-	CreatedAt    time.Time        `json:"createdAt"`
-	UpdatedAt    time.Time        `json:"updatedAt"`
-	MessageCount int              `json:"messageCount"`
-	ActiveRunID  string           `json:"activeRunId,omitempty"`
-	Model        string           `json:"model,omitempty"`
-	UserID       int64            `json:"userId"`
-	OrgID        int64            `json:"orgId"`
+	ID              string           `json:"id"`
+	Title           string           `json:"title"`
+	Messages        []SessionMessage `json:"messages"`
+	Summary         string           `json:"summary,omitempty"`
+	CreatedAt       time.Time        `json:"createdAt"`
+	UpdatedAt       time.Time        `json:"updatedAt"`
+	MessageCount    int              `json:"messageCount"`
+	ActiveRunID     string           `json:"activeRunId,omitempty"`
+	Model           string           `json:"model,omitempty"`
+	UploadDatasetID string           `json:"uploadDatasetId,omitempty"`
+	UserID          int64            `json:"userId"`
+	OrgID           int64            `json:"orgId"`
 }
 
 func toRedis(s *ChatSession) *redisSession {
@@ -39,7 +40,7 @@ func toRedis(s *ChatSession) *redisSession {
 		ID: s.ID, Title: s.Title, Messages: s.Messages,
 		Summary: s.Summary, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt,
 		MessageCount: s.MessageCount, ActiveRunID: s.ActiveRunID, Model: s.Model,
-		UserID: s.UserID, OrgID: s.OrgID,
+		UploadDatasetID: s.UploadDatasetID, UserID: s.UserID, OrgID: s.OrgID,
 	}
 }
 
@@ -48,7 +49,7 @@ func fromRedis(rs *redisSession) *ChatSession {
 		ID: rs.ID, Title: rs.Title, Messages: rs.Messages,
 		Summary: rs.Summary, CreatedAt: rs.CreatedAt, UpdatedAt: rs.UpdatedAt,
 		MessageCount: rs.MessageCount, ActiveRunID: rs.ActiveRunID, Model: rs.Model,
-		UserID: rs.UserID, OrgID: rs.OrgID,
+		UploadDatasetID: rs.UploadDatasetID, UserID: rs.UserID, OrgID: rs.OrgID,
 	}
 }
 
@@ -163,6 +164,20 @@ func (s *RedisSessionStore) GetSession(sessionID string, userID, orgID int64) (*
 		return nil, fmt.Errorf("session not found")
 	}
 	return fromRedis(rs), nil
+}
+
+func (s *RedisSessionStore) SetUploadDatasetID(sessionID string, userID, orgID int64, datasetID string) error {
+	rs, err := s.getSessionRaw(sessionID)
+	if err != nil {
+		return err
+	}
+	if rs.UserID != userID || rs.OrgID != orgID {
+		return fmt.Errorf("session not found")
+	}
+	session := fromRedis(rs)
+	session.UploadDatasetID = datasetID
+	session.UpdatedAt = time.Now()
+	return s.saveSession(session)
 }
 
 func (s *RedisSessionStore) ListSessions(userID, orgID int64) ([]SessionMetadata, error) {

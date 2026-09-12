@@ -1,3 +1,5 @@
+import { grafanaFetch } from './grafanaFetch';
+
 export interface AgentRunRequest {
   message: string;
   type?: 'chat' | 'investigation' | 'performance';
@@ -296,7 +298,7 @@ export async function resolveAgentApproval(
   orgId?: string,
   approvalScope: 'once' | 'always' = 'once'
 ): Promise<ApprovalResolvedEvent> {
-  const resp = await fetch(`${AGENT_RUNS_URL}/${runId}/approvals/${approvalId}`, {
+  const resp = await grafanaFetch(`${AGENT_RUNS_URL}/${runId}/approvals/${approvalId}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -328,7 +330,7 @@ export async function runAgentDetached(request: AgentRunRequest): Promise<Detach
     url.searchParams.set('model', model);
   }
 
-  const resp = await fetch(url.pathname + url.search, {
+  const resp = await grafanaFetch(url.pathname + url.search, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -346,7 +348,7 @@ export async function runAgentDetached(request: AgentRunRequest): Promise<Detach
 }
 
 export async function cancelAgentRun(runId: string, orgId?: string): Promise<void> {
-  const resp = await fetch(`${AGENT_RUNS_URL}/${runId}/cancel`, {
+  const resp = await grafanaFetch(`${AGENT_RUNS_URL}/${runId}/cancel`, {
     method: 'POST',
     headers: orgIdHeaders(orgId),
   });
@@ -358,7 +360,7 @@ export async function cancelAgentRun(runId: string, orgId?: string): Promise<voi
 }
 
 export async function getAgentRunStatus(runId: string, orgId?: string): Promise<AgentRunStatus> {
-  const resp = await fetch(`${AGENT_RUNS_URL}/${runId}`, {
+  const resp = await grafanaFetch(`${AGENT_RUNS_URL}/${runId}`, {
     headers: orgIdHeaders(orgId),
   });
 
@@ -389,7 +391,7 @@ export async function reconnectToAgentRun(
       await new Promise((resolve) => setTimeout(resolve, RECONNECT_DELAY_MS));
     }
 
-    const resp = await fetch(`${AGENT_RUNS_URL}/${runId}/events`, {
+    const resp = await grafanaFetch(`${AGENT_RUNS_URL}/${runId}/events`, {
       headers: orgIdHeaders(orgId),
       signal: abortSignal,
     });

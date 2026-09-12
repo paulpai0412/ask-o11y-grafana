@@ -13,6 +13,7 @@ interface UseSidePanelStateReturn {
   showSidePanel: boolean;
   handleRemoveTab: (index: number) => void;
   handleClose: () => void;
+  handleToggle: () => void;
 }
 
 export function useSidePanelState({
@@ -42,6 +43,10 @@ export function useSidePanelState({
 
   const handleClose = useCallback(() => {
     setIsOpen(false);
+  }, []);
+
+  const handleToggle = useCallback(() => {
+    setIsOpen((open) => !open);
   }, []);
 
   useEffect(() => {
@@ -80,5 +85,6 @@ export function useSidePanelState({
     showSidePanel,
     handleRemoveTab,
     handleClose,
+    handleToggle,
   };
 }

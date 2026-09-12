@@ -4,6 +4,7 @@ import (
 	"consensys-asko11y-app/pkg/mcp"
 	"consensys-asko11y-app/pkg/rbac"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,10 +64,13 @@ type LoopRequest struct {
 	GrafanaURL string
 	AuthToken  string
 
-	UserRole   string
-	OrgID      string
-	OrgName    string
-	ScopeOrgID string
+	UserRole        string
+	UserID          string
+	SessionID       string
+	UploadDatasetID string
+	OrgID           string
+	OrgName         string
+	ScopeOrgID      string
 
 	// ExcludeToolNames, when set, removes these tools from the available set
 	// before the loop runs. Used to hide graphiti write tools from user sessions.
@@ -118,7 +122,11 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
 	}
 	openAITools := ConvertMCPToolsToOpenAI(mcpTools)
 
-	messages := BuildContextWindow(req.SystemPrompt, req.Messages, req.Summary, req.RecentMessageCount)
+	systemPrompt := req.SystemPrompt
+	if req.UploadDatasetID != "" {
+		systemPrompt += "\n\nCurrent session attachment dataset_id: " + req.UploadDatasetID
+	}
+	messages := BuildContextWindow(systemPrompt, req.Messages, req.Summary, req.RecentMessageCount)
 
 	// Per-run state for transport-failure aggregation. We emit at most one
 	// mcp_unavailable event per run, once at least 2 distinct tools have hit
@@ -280,7 +288,7 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
 			// above still carries the raw content so the user sees real errors.
 			llmContent := toolContent
 			if errorKind == "transport" {
-				llmContent = fmt.Sprintf("[SYSTEM: MCP transport failure for tool '%s' after retries. Result is UNAVAILABLE — do not fabricate output. Either retry this tool once, or tell the user the data is currently unavailable.]", tc.Function.Name)
+				llmContent = fmt.Sprintf("MCP transport failure for %s. Result is unavailable; do not invent output. A compute or write may still have executed: check its existing status before any retry.", tc.Function.Name)
 				transportFailedTools[tc.Function.Name] = struct{}{}
 			}
 			messages = append(messages, Message{
@@ -417,9 +425,13 @@ func (a *AgentLoop) executeTool(ctx context.Context, tc ToolCall, req LoopReques
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		return fmt.Sprintf("Invalid tool arguments: %v", err), true, "tool"
 	}
+	if args == nil {
+		return "Tool arguments must be a JSON object", true, "tool"
+	}
+	args["_server_session_id"] = req.SessionID
 	mcp.EnsureScopedGraphitiArgs(tool, args, req.OrgID)
 
-	result, err := a.mcpProxy.CallToolWithContext(tc.Function.Name, args, req.OrgID, req.OrgName, req.ScopeOrgID)
+	result, err := a.mcpProxy.CallToolWithActorContext(tc.Function.Name, args, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
 	if err != nil {
 		a.logger.Error("Tool call failed", "tool", tc.Function.Name, "error", err)
 		var te *mcp.TransportError
@@ -429,6 +441,9 @@ func (a *AgentLoop) executeTool(ctx context.Context, tc ToolCall, req LoopReques
 		return fmt.Sprintf("Tool call error: %v", err), true, "protocol"
 	}
 
+	if result == nil {
+		return "Tool returned no result; execution outcome is unknown", true, "protocol"
+	}
 	if result.IsError {
 		text := extractText(result)
 		if text == "" {
@@ -450,13 +465,18 @@ func (a *AgentLoop) executeToolWithApproval(ctx context.Context, eventCh chan<- 
 		return a.executeTool(ctx, tc, req)
 	}
 
+	// These installed tools only read authorized data or compute in isolation.
+	switch tc.Function.Name {
+	case "grafana-query_execute_planned_query", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_execute_python_preprocessing", "sandbox-analysis_revise_python_analysis":
+		return a.executeTool(ctx, tc, req)
+	}
 	risk := mcp.ClassifyToolRisk(tool, req.MCPServers)
 	if !approvalPolicyEnabled(req.ApprovalPolicy) || !risk.RequiresApproval {
 		return a.executeTool(ctx, tc, req)
 	}
 
 	approval := ApprovalRequestEvent{
-		ApprovalID: tc.ID,
+		ApprovalID: "approval_" + rand.Text(),
 		ToolCallID: tc.ID,
 		ToolName:   tc.Function.Name,
 		Risk:       riskLabel(risk),
@@ -510,8 +530,8 @@ func (a *AgentLoop) executeToolWithApproval(ctx context.Context, eventCh chan<- 
 		Data: resolved,
 	})
 
-	if resolved.Decision != "approved" {
-		return fmt.Sprintf("Tool %s was not approved by the user.", tc.Function.Name), true, "approval_denied"
+	if ctx.Err() != nil || resolved.Decision != "approved" || resolved.ApprovalID != approval.ApprovalID {
+		return fmt.Sprintf("Tool %s was not approved for this request.", tc.Function.Name), true, "approval_denied"
 	}
 
 	return a.executeTool(ctx, tc, req)

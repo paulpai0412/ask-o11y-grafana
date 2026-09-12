@@ -14,4 +14,5 @@ export { SidePanel } from './SidePanel/SidePanel';
 export { ToolCallDisplay } from './ToolCallsSection/ToolCallDisplay';
 export { ToolCallsSection } from './ToolCallsSection/ToolCallsSection';
 export { TracesRenderer } from './TracesRenderer/TracesRenderer';
+export { UploadButton } from './UploadButton/UploadButton';
 export { WelcomeMessage } from './WelcomeMessage/WelcomeMessage';

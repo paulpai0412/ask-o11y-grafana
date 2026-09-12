@@ -32,7 +32,7 @@ Dashboard Preview 目前仍是 Grafana 中已儲存的 Dashboard，建立前確�
 ## TODO（TODO-aab6376c）
 
 - [x] M0：branch 與回退 checkpoint。
-- [ ] M1：正式 source／無 patch 建置可用；原生 loop + 必要 UI/上傳/session/timeout；移除 analysis/delivery 控制；離線 Go/TS/前端建置可重現。
+- [x] M1：正式 source／無 patch 本機建置可用；原生 loop + 必要 UI/上傳/session/timeout；沒有移入自訂 analysis/delivery 控制。Go/TS/前端建置通過；不是現行 MCP 整合或 live 驗收。
 - [ ] M2：資料 MCP 與通用 Python 執行鏈精簡；取消分析 contract/plan 准入；保留安全查詢、正確 completion/cancel/status、已完成錯誤可修。
 - [ ] M3：native figure 直達新 Preview，移除 report workflow；原圖/來源不變、授權/UID/version/readback、舊 Dashboard 相容。
 - [ ] M4：新手 prompt/skills 實際載入、設定與工具目錄精簡；custom prompt 明確遷移，不靜默覆寫；移除退役 patch/source/test 接線。
@@ -42,4 +42,25 @@ M1/M4 可以先完成部分，但不得宣稱 MCP 或 live E2E 完成。先前 C
 
 ## 驗證與交付記錄
 
-待實作後填入實際命令/結果。必要建置或安全驗證若缺工具，記 blocker，不下載新能力繞過。離線測試不是部署/live 證明。
+### M1 本機 source/build checkpoint（2026-09-12）
+
+- `2d2c7d4` 匯入固定 upstream；後續修改只移入必要 UI/上傳、session tool history、actor/session headers、MCP timeout/retry 限制與 context sizing，未移入舊 analysis/delivery/selector 類別。
+- `scripts/build-install-ask-o11y.sh` 保留原入口名稱，但**現在只建置** `ask-o11y/`，沒有 clone、patch、source reset/delete、安裝依賴、Docker 或重啟操作；舊 `ASK_O11Y_BUILD_DIR` 不再指定正式 source。不要用此名稱推斷它仍會安裝。
+- 既有 `node_modules` 僅以 ignored symlink 重用。第一次建置發現共用 webpack cache 包含舊 scratch source，改建置入口使用原生 `--no-cache`；最後 source maps 查核沒有舊 scratch application source。沒有修改 scaffolded `.config`。
+- 使用者明確批准本機使用已安裝 Node 24.18.0；未安裝 Node 22、未改正式 runtime。Go 1.26.5，`CGO_ENABLED=0`，不冒稱 race 檢查通過。
+- 聚焦回歸發現 upstream 對未知名称且未標唯讀的工具不要求批准；改以非唯讀為批准預設（保留 operator overrides），以測試驗批准 ID 綁定、未批准不呼叫、null/array/string args 拒絕與 host session 覆寫。這不等於已完成 indeterminate operation 防重送。
+- 上傳沿用 session ownership/容量上限，改用 Grafana SDK HTTP client，讓真實 org 覆寫配置中的 org，拒絕將讀取失敗當成成功刪除；補 OpenAPI 與 header 回歸。
+- 修正移入 Chat 的 memo 缺少 attachment/session dependencies；不是增加新 UI 框架。
+
+驗證證據在 `.scratch/minimal-source/`：
+
+- `go-test-final.log`：`CGO_ENABLED=0 go test ./pkg/...` 全 package 通過。
+- `go-vet.log`：`go vet ./pkg/...` 通過。
+- `frontend-tests-final.log`：34 suites / 492 tests 通過；保留既有 React act 警告。
+- `lint-final.log`：0 errors，9 個 deprecated API warnings。
+- `openapi.log`：OpenAPI valid，2 warnings。
+- `build-final.log`：`tsc --noEmit`、webpack production（1 asset-size warning）、Go backend、build stamp 通過。產物 `0.3.2+local.3546d78c8241a4ba` 只在本機 dist，沒有安裝。
+
+診斷限制：舊四個 scripts 的五個告警已按當前 body + primary LSP=0 核對並 mark false-positive；turn-end 仍重報。新增目錄的 lens/TS LSP 亦以無 JSX/ES5/缺 React 的配置報錯，但同一 source 的專案 `tsc --noEmit`、Jest 與正式 webpack 都通過。`lens_diagnostics(mode=all)` 最後仍列 Chat.tsx 28 blocking + 其他 warnings，因此**不宣稱 lens 或全 repo 綠燈**；以 source-bound 專案命令作本階段替代證據，不為 stale/錯配設定改 source 或修工具。
+
+M2–M5 未完成：目前仍沒有新的 generic MCP/Plotly binding、完整取消/未知狀態拒重送、新手 prompt/skill context 或 settings migration。既有 patches 暫留作 rollback 記錄但不再被本機 build 使用，待 consumers 同步完成再移除。這個 source checkpoint 不能部署後宣稱整體產品可用。

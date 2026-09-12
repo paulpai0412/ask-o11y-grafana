@@ -61,6 +61,10 @@ func BuildContextWindow(systemPrompt string, allMessages []Message, summary stri
 	if len(allMessages) > recentCount {
 		start = len(allMessages) - recentCount
 	}
+	// The message-count cut must not separate results from their tool call.
+	for start > 0 && allMessages[start].Role == "tool" {
+		start--
+	}
 	ctx = append(ctx, allMessages[start:]...)
 
 	return sanitizeMessages(ctx)
