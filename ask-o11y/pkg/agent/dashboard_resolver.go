@@ -1,0 +1,48 @@
+package agent
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"consensys-asko11y-app/pkg/mcp"
+)
+
+const artifactBridgeResolveTool = "artifact-bridge_resolve_dashboard_refs"
+
+// Reuse opaque bindings: the model supplies layout/references, not figure arrays.
+func (a *AgentLoop) resolveDashboardBindings(args map[string]interface{}, req LoopRequest) error {
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Errorf("invalid dashboard arguments")
+	}
+	opaque := false
+	for _, marker := range []string{`"$execution_ref"`, `"$report_manifest_ref"`, `"$plan_ref"`, `"$dashboard_ref"`, `"askO11yPlotlyBindings"`, `"askO11yAssetBindings"`} {
+		opaque = opaque || strings.Contains(string(encoded), marker)
+	}
+	if !opaque {
+		return nil
+	}
+	dashboard, ok := args["dashboard"].(map[string]interface{})
+	if !ok || args["operations"] != nil {
+		return fmt.Errorf("artifact bindings require a complete dashboard; do not embed them in patch operations")
+	}
+	if !mcp.IsToolEnabled(artifactBridgeResolveTool, req.MCPServers) {
+		return fmt.Errorf("artifact bridge is disabled")
+	}
+	result, err := a.mcpProxy.CallToolWithActorContext(artifactBridgeResolveTool,
+		map[string]interface{}{"dashboard": dashboard, "_server_session_id": req.SessionID},
+		req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
+	if err != nil || result == nil || result.IsError {
+		return fmt.Errorf("artifact binding resolution failed; no dashboard was written")
+	}
+	var resolved struct {
+		OK        bool                   `json:"ok"`
+		Dashboard map[string]interface{} `json:"dashboard"`
+	}
+	if err := json.Unmarshal([]byte(extractText(result)), &resolved); err != nil || !resolved.OK || resolved.Dashboard == nil {
+		return fmt.Errorf("artifact bridge returned an invalid dashboard; no write was dispatched")
+	}
+	args["dashboard"] = resolved.Dashboard
+	return nil
+}

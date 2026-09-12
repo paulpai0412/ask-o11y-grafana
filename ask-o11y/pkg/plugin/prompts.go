@@ -98,7 +98,7 @@ func (r *PromptRegistry) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out := system + tools
+	out := system + "\n\n## Analysis skill (advisory, not an approval or workflow)\n\n" + analysisSkill + tools
 	if ctx.ConversationType == "investigation" {
 		out += "\n\n---\n\n" + DefaultInvestigationModeSystemAddendum
 	}

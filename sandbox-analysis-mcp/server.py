@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import builtins
 import contextlib
 import csv
 import hashlib
@@ -90,16 +91,15 @@ def _plotly_capability_description() -> str:
     return (
         " Installed native Plotly presentation: "
         + json.dumps(capability, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + ". A failed figure remains visible as an error while successful results stay available. Respect any user instruction to stop on failure; never silently drop a figure or retry computation. Corrected Python still needs exact-call approval."
+        + ". Figure rendering errors do not invalidate computation. Respect user restrictions; do not silently drop a figure or rerun an unknown computation."
     )
 
 
 TOOLS = [
-    {"name": "reconcile_operation", "description": "Recover a session-owned compute receipt from durable host completion evidence without running Python again. An indeterminate status is not success and never authorizes redispatch.", "inputSchema": {"type": "object", "additionalProperties": False, "required": ["operation_id"], "properties": {"operation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}}},
-    {"name": "get_ml_capabilities", "description": "Inspect actual imports and package versions in the configured sandbox image, without user data. Returns supported trusted task/split combinations and sequential global-budget limits; unsupported or unavailable algorithms are never substituted.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
+    {"name": "reconcile_operation", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Recover a session-owned compute receipt from durable host completion evidence without running Python again. An indeterminate status is not success and never authorizes redispatch.", "inputSchema": {"type": "object", "additionalProperties": False, "required": ["operation_id"], "properties": {"operation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}}},
     {
         "name": "execute_python_analysis",
-        "description": "Execute generated Python in a fresh network-denied OpenSandbox over one authorized Grafana frame after preview confirmation. Return the numbers, tables, text or charts needed to answer the question. Charts are optional; when needed, emit Plotly figures as *.json using the capability below. Only renderable outputs receive a fresh report_manifest_ref for dashboard synthesis. Use presentation_mode='image' for static PNG output when appropriate. The sandbox receives df, pd, np, display(value), and emit(value, name=None). Transformations and derived frames are supported via emit_frame; retain source data and describe any changes. Arbitrary Python outputs cannot claim verified ML; use execute_ml_contract for that. Name JSON results *.json for bounded inline return and DataFrame/string downloads *.csv for a signed URL. The offline image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, CPU-only XGBoost, LightGBM, imbalanced-learn, and Optuna." + _plotly_capability_description(),
+        "description": "Run generated Python in a fresh network-denied OpenSandbox over an authorized Grafana frame. Choose the method yourself; no ML or report contract is required. df, pd, np, emit(value, name=None), display and emit_frame are available. Emit Plotly figures directly, JSON summaries as *.json, and downloads as *.csv. Results include execution_ref and figure output_index for Dashboard bindings; arrays need not pass through the model. The image includes SciPy, Matplotlib, Seaborn, Plotly, scikit-learn, statsmodels, SHAP, XGBoost, LightGBM, imbalanced-learn and Optuna. Correct a completed Python failure on the same frame; never redispatch an unknown operation." + _plotly_capability_description(),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -113,55 +113,8 @@ TOOLS = [
         },
     },
     {
-        "name": "profile_dataset",
-        "description": "Deterministic full-data profile over one authorized Grafana frame. Uses every returned row and every returned field; produces bounded facts and visual-only aggregations for distributions, missingness, relationships, and temporal trend. It never samples, truncates, creates a derived dataset, or selects an ML method.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "frame_ref": {"type": "string", "description": "Opaque authorized grafana-frame artifact ref."},
-                "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295, "default": DEFAULT_SEED},
-            },
-            "required": ["frame_ref"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "reexport_trusted_report",
-        "description": "Re-export one successful pre-manifest profile or trusted ML execution into a fresh host-owned report_manifest_ref without running Python again. Requires authenticated server provenance and rejects generic or untrusted outputs; use the returned fresh ref for prepare_ml_report.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"execution_ref": {"type": "string", "description": "Opaque successful pre-manifest sandbox-execution ref."}},
-            "required": ["execution_ref"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "repair_generic_report",
-        "description": "Repair only report persistence from same-session succeeded generic Python with retained, contract-valid renderables. Cannot change invalid charts or code. Existing indeterminate operations must be reconciled first. Contract rejection requires corrected Python on the original authorized frame, not this tool. Creates fresh refs without rerunning Python or changing original receipts; remains generic and untrusted.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"execution_ref": {"type": "string", "description": "Opaque same-session generic sandbox-execution ref from a succeeded/rejected report receipt."}},
-            "required": ["execution_ref"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "execute_ml_contract",
-        "description": "Structured supervised-ML executor over one authorized Grafana frame. Takes the Planner's opaque plan_ref as contract_ref; the trusted host composes a deterministic classification or chronological-regression pipeline from the pinned target, features, split, algorithms, budget, and objective. Regression compares Dummy, Ridge, Random Forest, Extra Trees, Histogram Gradient Boosting, and optional CatBoost/XGBoost on shared chronological folds, then evaluates holdout once. No model-authored Python.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "frame_ref": {"type": "string", "description": "Opaque authorized grafana-frame artifact ref."},
-                "contract_ref": {"type": "string", "description": "Opaque Planner query-plan artifact ref carrying the ontology-pinned analysis contract."},
-                "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295, "default": DEFAULT_SEED},
-            },
-            "required": ["frame_ref", "contract_ref"],
-            "additionalProperties": False,
-        },
-    },
-    {
         "name": "execute_python_preprocessing",
-        "description": "Execute generated Python over one authorized original uploaded CSV/XLSX document in a fresh network-denied OpenSandbox after preview confirmation. The sandbox receives document_path, input_format, pd, np, emit, and emit_frame. emit_frame returns both a derived_frame_ref and a session-owned derived_dataset_id for later Sandbox or Grafana Query steps.",
+        "description": "Execute generated Python over one authorized original uploaded CSV/XLSX document in a fresh network-denied OpenSandbox when the user's request permits reading the original document. The sandbox receives document_path, input_format, pd, np, emit, and emit_frame. emit_frame returns both a derived_frame_ref and a session-owned derived_dataset_id for later Sandbox or Grafana Query steps.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -175,11 +128,13 @@ TOOLS = [
     },
     {
         "name": "list_python_analyses",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
         "description": "List the authenticated user's recent Sandbox Analysis revisions so a later conversation can rediscover opaque refs without raw data.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "inspect_python_analysis",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
         "description": "Read one authorized Sandbox Analysis revision's generated Python, fields, output summary, and provenance for revision; never returns frame rows.",
         "inputSchema": {
             "type": "object",
@@ -190,7 +145,7 @@ TOOLS = [
     },
     {
         "name": "revise_python_analysis",
-        "description": "Execute replacement Python against the same authorized persisted Grafana frame as an earlier Sandbox Analysis revision. Numbers, tables and text need no charts. Renderable replacement outputs receive a fresh report_manifest_ref; use it instead of legacy execution coordinates." + _plotly_capability_description(),
+        "description": "Run complete replacement Python against an earlier revision's authorized frame. Reuse saved data without re-querying. Charts are optional; returned figures use execution_ref/output_index bindings." + _plotly_capability_description(),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -646,6 +601,16 @@ def execute_opensandbox(frame_bundle_json: str, python_code: str, seed: int) -> 
 
 def execute_document_opensandbox(document_bytes: bytes, input_format: str, python_code: str, seed: int) -> dict[str, Any]:
     return execute_opensandbox_input(f"/tmp/input-document.{input_format}", document_bytes, wrapped_document_code(python_code, input_format, seed))
+
+
+def output_figure_summary(execution: dict[str, Any], execution_ref: str) -> list[dict[str, Any]]:
+    return [
+        {"$execution_ref": execution_ref, "output_index": index,
+         "display_name": result.get("display_name") or f"Figure {index + 1}",
+         "figure_format": ml_plotly_contract.FIGURE_FORMAT}
+        for index, result in enumerate(execution.get("results", []))
+        if isinstance(result, dict) and "application/vnd.plotly.v1+json" in (result.get("mime") or {})
+    ]
 
 
 def output_asset_summary(execution: dict[str, Any], execution_ref: str) -> list[dict[str, Any]]:
@@ -1974,6 +1939,17 @@ def execute_python_analysis(
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Do not repeat an indeterminate operation; inspect its existing execution evidence.")
 
 
+def python_error_hint(error: Any, source: str) -> dict[str, Any]:
+    """Expose the exception class and generated-code locations, never row values."""
+    error = error if isinstance(error, dict) else {}
+    name = error.get("name")
+    cls = getattr(builtins, name, None) if isinstance(name, str) else None
+    name = name if isinstance(cls, type) and issubclass(cls, BaseException) else "Exception"
+    trace = str(error.get("traceback") or "")
+    lines = sorted({int(value) for value in re.findall(r'''<generated-analysis>["']?(?::|,\s*line\s+)(\d{1,6})(?!\d)''', trace) if 0 < int(value) <= len(source.splitlines())})
+    return {"name": name, "line_numbers": lines}
+
+
 def _execute_python_analysis(
     args: dict[str, Any],
     executor: Callable[[str, str, int], dict[str, Any]],
@@ -2003,8 +1979,7 @@ def _execute_python_analysis(
         context = context_from_args(args)
         source_run_id, frame = read_authorized_frame(context, frame_ref)
         field_names, row_count = validate_frame(frame)
-        validity_rules, semantic_contract = read_plan_contract(context, source_run_id, field_names)
-        frame_bundle_json = json.dumps({"frame": frame, "validity_rules": validity_rules, "semantic_contract": semantic_contract}, ensure_ascii=False, separators=(",", ":"))
+        frame_bundle_json = json.dumps({"frame": frame}, ensure_ascii=False, separators=(",", ":"))
     except (PermissionError, WorkflowContractError, ValueError, TypeError) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; the input frame is invalid or not authorized.")
     if len(frame_bundle_json.encode("utf-8")) > MAX_INPUT_BUNDLE_BYTES:
@@ -2014,6 +1989,10 @@ def _execute_python_analysis(
         execution = executor(frame_bundle_json, python_code, seed)
     except Exception as exc:
         return error_response(step=step, error=f"sandbox execution outcome unknown: {type(exc).__name__}", recoverable=False, instruction="Reconcile the existing execution before retrying; never rerun it blindly or execute on the MCP host.", evidence={"effect_outcome": "indeterminate"})
+    if not isinstance(execution, dict) or (execution.get("complete") is None and execution.get("error") is None):
+        return error_response(step=step, error="sandbox completion is unavailable", recoverable=False,
+                              instruction="Check the existing execution; do not dispatch replacement code while its outcome is unknown.",
+                              evidence={"effect_outcome": "indeterminate"})
     encoded_execution = json.dumps(execution, ensure_ascii=False).encode("utf-8")
     if len(encoded_execution) > MAX_OUTPUT_BYTES:
         return error_response(step=step, error=f"sandbox output exceeds {MAX_OUTPUT_BYTES} bytes", recoverable=False, instruction="Stop; request smaller displayed outputs.")
@@ -2024,17 +2003,10 @@ def _execute_python_analysis(
         or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in audit_counts)
         or validity.get("input_rows") != row_count
         or validity.get("valid_rows", 0) + validity.get("excluded_rows", 0) != row_count
-        or validity.get("rules") != validity_rules
+        or validity.get("rules") != []
     ):
         return error_response(step=step, error="sandbox execution returned an invalid trusted input audit", recoverable=False, instruction="Stop; do not trust outputs without host-verified validity evidence.")
     captured_results_sha256 = _canonical_results_digest(execution.get("results", []), include_report_source=True)
-    preflight_execution, report_status, report_error = _preflight_report(
-        execution, validity, presentation_mode, step, purpose=semantic_contract.get("business_question"),
-    )
-    host_source_retained = preflight_execution is not execution and any(
-        _is_report_source_result(result) for result in preflight_execution.get("results", [])
-    )
-    execution = preflight_execution
     settings = runtime_settings() if executor is execute_opensandbox else {"image": "self-check", "runtime_class": "fake"}
     summary = output_summary(execution)
     summary["presentation_mode"] = presentation_mode
@@ -2050,7 +2022,8 @@ def _execute_python_analysis(
         "input_frame_ref": frame_ref,
         "executor_kind": step,
         "presentation_mode": presentation_mode,
-        "trusted_ml_contract": step == "execute_ml_contract",
+        "trusted_ml_contract": False,
+        "figure_format": ml_plotly_contract.FIGURE_FORMAT,
         "input_frame_sha256": hashlib.sha256(json.dumps(frame, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
         "input_fields": field_names,
         "seed": seed,
@@ -2068,98 +2041,17 @@ def _execute_python_analysis(
             "signed_download_bytes": artifact_assets.MAX_ASSET_BYTES,
         },
         "validity": validity,
-        "ontology": semantic_contract.get("ontology"),
-        "analysis_contract": semantic_contract.get("analysis_contract"),
-        "business_question": semantic_contract.get("business_question"),
-        "planned_objective": semantic_contract.get("planned_objective"),
-        "plan_sha256": semantic_contract.get("plan_sha256"),
+
         "output_summary": summary,
         "parent_provenance_ref": parent_provenance_ref,
         "captured_results_sha256": captured_results_sha256,
-        "host_report_source_sha256": (
-            hashlib.sha256(json.dumps(_result_json(next(result for result in execution.get("results", []) if _is_report_source_result(result))), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-            if host_source_retained else None
-        ),
+
     }
     execution_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-execution", execution)
     execution_error = execution.get("error")
     provenance["computation_status"] = "failed" if execution_error else "succeeded"
-    provenance["report_status"] = "not_attempted" if execution_error else report_status
     summary["computation_status"] = provenance["computation_status"]
-    summary["report_status"] = provenance["report_status"]
-    if report_error is not None:
-        provenance["report_manifest_ref"] = None
-        provenance["report_error"] = report_error
-        provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
-        trusted_repair = step in _TRUSTED_REEXPORT_EXECUTORS and report_status == "rejected"
-        code_correction = step in _GENERIC_REPORT_STEPS and report_status == "rejected"
-        instruction = (
-            "Keep the successful execution and provenance; call reexport_trusted_report with the execution_ref. It may rebuild only the host report manifest without rerunning computation."
-            if trusted_repair else
-            "Keep the successful execution and provenance; do not call repair_generic_report. Reuse the same frame_ref and call execute_python_analysis again with corrected python_code; do not rerun the query."
-            if code_correction else
-            "Keep the successful execution and provenance; no report repair is authorized for this outcome. Do not rerun or fabricate a report source."
-        )
-        return error_response(
-            step=step, error=report_error, recoverable=trusted_repair or code_correction,
-            instruction=instruction,
-            evidence={"execution_ref": execution_ref, "provenance_ref": provenance_ref,
-                      **_report_recovery_evidence(frame_ref, correction=True),
-                      "correction_required": code_correction,
-                      "recovery_action": "reexport_trusted_report" if trusted_repair else "correct_python_same_frame" if code_correction else "stop"},
-        )
-    report_manifest_ref = None
-    report_manifest: dict[str, Any] = {}
-    if not execution_error:
-        source_present = False
-        for result in execution.get("results", []):
-            display_name = result.get("display_name") if isinstance(result, dict) else None
-            payload = result.get("mime", {}).get("application/json") if isinstance(result, dict) and isinstance(result.get("mime"), dict) else None
-            if display_name == "report-source.json":
-                source_present = True
-                break
-            if isinstance(payload, str):
-                try:
-                    value = json.loads(payload)
-                except json.JSONDecodeError:
-                    value = None
-                if isinstance(value, dict) and value.get("format") == ml_report_contract.REPORT_SOURCE_FORMAT:
-                    source_present = True
-                    break
-        if source_present:
-            manifest_validated = False
-            try:
-                report_manifest = ml_report_contract.normalize_report_manifest(execution_ref=execution_ref, results=execution.get("results", []))
-                manifest_validated = True
-                report_manifest_ref = ARTIFACTS.write_json(context, output_run_id, "report-manifest", report_manifest)
-            # pi-lens-ignore: no-boolean-in-except, ast-grep:no-boolean-in-except
-            except (ValueError, TypeError, KeyError, OSError) as exc:
-                provenance["report_manifest_ref"] = None
-                provenance["report_status"] = "rejected"
-                provenance["report_error"] = str(exc)
-                provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
-                summary["report_status"] = "rejected"
-                trusted_repair = step in _TRUSTED_REEXPORT_EXECUTORS
-                deterministic_rejection = not manifest_validated
-                generic_repair = step in _GENERIC_REPORT_STEPS and not deterministic_rejection
-                instruction = (
-                    "Keep the successful execution and provenance; call reexport_trusted_report with the execution_ref. It may rebuild only the host report manifest without rerunning computation."
-                    if trusted_repair else
-                    "Keep the successful execution and provenance; do not call repair_generic_report. Reuse the same frame_ref and call execute_python_analysis again with corrected python_code; do not rerun the query."
-                    if deterministic_rejection else
-                    "Keep the successful execution and provenance; call repair_generic_report with the execution_ref only after this manifest validation succeeded; the failure may be a persistence failure."
-                    if generic_repair else
-                    "Keep the successful execution and provenance; no report repair is authorized for this outcome. Do not rerun or fabricate a report source."
-                )
-                return error_response(step=step, error=f"report manifest rejected: {exc}", recoverable=trusted_repair or deterministic_rejection or generic_repair, instruction=instruction, evidence={"execution_ref": execution_ref, "provenance_ref": provenance_ref,
-                    **_report_recovery_evidence(frame_ref, correction=deterministic_rejection),
-                    "correction_required": deterministic_rejection and not trusted_repair,
-                    "recovery_action": "reexport_trusted_report" if trusted_repair else "correct_python_same_frame" if deterministic_rejection else "repair_generic_report" if generic_repair else "stop"})
-    provenance["report_manifest_ref"] = report_manifest_ref
-    figure_errors = ml_report_contract.presentation_errors(report_manifest) if report_manifest_ref else []
-    provenance["report_status"] = "partial" if figure_errors else "accepted" if report_manifest_ref else "not_requested"
-    summary["report_status"] = provenance["report_status"]
-    summary["presentation_errors"] = figure_errors
+    summary["figures"] = output_figure_summary(execution, execution_ref)
     summary["assets"] = output_asset_summary(execution, execution_ref)
     summary["downloads"] = output_download_summary(execution, execution_ref, context)
     try:
@@ -2170,31 +2062,20 @@ def _execute_python_analysis(
         summary["derived_data"] = derived_summary
     provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
     refs = {"execution_ref": execution_ref, "provenance_ref": provenance_ref, **derived_refs}
-    if report_manifest_ref:
-        refs["report_manifest_ref"] = report_manifest_ref
     if execution_error:
-        error_name = execution_error.get("name") if isinstance(execution_error, dict) else None
-        if error_name in {"SyntaxError", "IndentationError"}:
-            return error_response(
-                step=step,
-                error=f"generated Python has a {error_name}; fix the syntax and resubmit complete corrected code",
-                recoverable=True,
-                instruction="Do not rerun the query; call execute_python_analysis once more with the same frame_ref and corrected python_code. Never expose exception values in prose.",
-                evidence={"refs": refs, "code_sha256": code_sha256},
-            )
+        hint = python_error_hint(execution_error, python_code)
         return error_response(
-            step=step,
-            error="sandbox Python failed; details retained only in the authorized execution artifact",
-            recoverable=False,
-            instruction="Stop and report the opaque execution_ref; do not expose exception values or silently execute replacement code.",
-            evidence={"refs": refs, "code_sha256": code_sha256},
+            step=step, error=f"Python {hint['name']} at generated code lines {hint['line_numbers']}",
+            recoverable=True,
+            instruction="Python has finished with an error. Reuse the same frame_ref with corrected complete Python; do not query again. Raw exception values remain private.",
+            evidence={"refs": refs, "frame_ref": frame_ref, "code_sha256": code_sha256, "python_error": hint},
         )
     return success_response(
         step=step,
         run_id=output_run_id,
         refs=refs,
-        instruction="Explain the bounded results and limitations in the user's language. A requested report still needs an evidence-backed answer, not just a computation receipt. Charts are optional; use report_manifest_ref only when returned for renderable outputs, never guess a manifest from execution indexes. A Grafana Dashboard exists only after the approved writer returns its URL.",
-        evidence={"validity": validity, "presentation_errors": figure_errors},
+        instruction="Explain the observed results and limitations in the user's language. Reference saved figures by execution_ref and output_index; never copy their arrays. A Dashboard exists only after an authorized writer confirms it.",
+        evidence={"input_rows": row_count},
         output_summary=summary,
         provenance={key: value for key, value in provenance.items() if key != "code_ref"},
     )
@@ -2244,6 +2125,9 @@ def _execute_python_preprocessing(args: dict[str, Any], executor: Callable[[byte
         execution = executor(document_bytes, input_format, python_code, seed)
     except Exception as exc:
         return error_response(step=step, error=f"sandbox execution outcome unknown: {type(exc).__name__}", recoverable=False, instruction="Reconcile the existing execution before retrying.", evidence={"effect_outcome": "indeterminate"})
+    if not isinstance(execution, dict) or (execution.get("complete") is None and execution.get("error") is None):
+        return error_response(step=step, error="sandbox completion is unavailable", recoverable=False,
+                              instruction="Reconcile the existing execution before retrying.", evidence={"effect_outcome": "indeterminate"})
     if len(json.dumps(execution, ensure_ascii=False).encode("utf-8")) > MAX_OUTPUT_BYTES:
         return error_response(step=step, error=f"sandbox output exceeds {MAX_OUTPUT_BYTES} bytes", recoverable=False, instruction="Stop; request smaller displayed outputs.")
     validity = execution.get("input_audit")
@@ -2273,6 +2157,11 @@ def _execute_python_preprocessing(args: dict[str, Any], executor: Callable[[byte
         "parent_provenance_ref": None,
     }
     execution_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-execution", execution)
+    summary["figures"] = output_figure_summary(execution, execution_ref)
+    provenance["trusted_ml_contract"] = False
+    provenance["figure_format"] = ml_plotly_contract.FIGURE_FORMAT
+    provenance["computation_status"] = "failed" if execution.get("error") else "succeeded"
+    summary["computation_status"] = provenance["computation_status"]
     summary["assets"] = output_asset_summary(execution, execution_ref)
     summary["downloads"] = output_download_summary(execution, execution_ref, context)
     execution_error = execution.get("error")
@@ -2285,15 +2174,15 @@ def _execute_python_preprocessing(args: dict[str, Any], executor: Callable[[byte
     provenance_ref = ARTIFACTS.write_json(context, output_run_id, "sandbox-provenance", provenance)
     refs = {"execution_ref": execution_ref, "provenance_ref": provenance_ref, **derived_refs}
     if execution_error:
-        error_name = execution_error.get("name") if isinstance(execution_error, dict) else None
-        if error_name in {"SyntaxError", "IndentationError"}:
-            return error_response(step=step, error=f"generated Python has a {error_name}; fix the syntax and resubmit complete corrected code", recoverable=True, instruction="Call execute_python_preprocessing again with the same document_ref and corrected complete code.", evidence={"refs": refs, "code_sha256": code_sha256})
-        return error_response(step=step, error="sandbox Python failed; details retained only in the authorized execution artifact", recoverable=False, instruction="Stop and report the opaque execution_ref; do not expose exception values or silently execute replacement code.", evidence={"refs": refs, "code_sha256": code_sha256})
+        hint = python_error_hint(execution_error, python_code)
+        return error_response(step=step, error=f"Python {hint['name']} at generated code lines {hint['line_numbers']}", recoverable=True,
+                              instruction="Python has finished with an error. Reuse the same document_ref with corrected complete code; raw exception values remain private.",
+                              evidence={"refs": refs, "document_ref": document_ref, "code_sha256": code_sha256, "python_error": hint})
     return success_response(
         step=step,
         run_id=output_run_id,
         refs=refs,
-        instruction="Reuse these display/download artifacts within this session. Derived datasets and verified ML from arbitrary document code are not supported.",
+        instruction="Reuse these outputs or derived_frame_ref within this session. Python outputs are not certified ML. Dashboard creation still requires authorized writing.",
         evidence={"input_format": input_format, "source_sha256": document.get("source_sha256")},
         output_summary=summary,
         derived_frame_ref=derived_refs.get("derived_frame_ref"),
@@ -2475,11 +2364,6 @@ def handle_rpc(msg: dict[str, Any]):
             out = error_response(step=name, error="unsupported tool arguments: " + ", ".join(unexpected), recoverable=False, instruction="Stop; pass only arguments declared by this tool schema.")
         else:
             handlers = {
-                "profile_dataset": profile_dataset,
-                "reexport_trusted_report": reexport_trusted_report,
-                "repair_generic_report": repair_generic_report,
-                "execute_ml_contract": execute_ml_contract,
-                "get_ml_capabilities": get_ml_capabilities,
                 "reconcile_operation": reconcile_operation,
                 "execute_python_analysis": execute_python_analysis,
                 "execute_python_preprocessing": execute_python_preprocessing,

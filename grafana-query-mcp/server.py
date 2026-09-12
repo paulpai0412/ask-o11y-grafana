@@ -41,6 +41,7 @@ artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 uploaded_datasets = load_module("uploaded_datasets", ROOT / "uploaded_datasets.py")
 ontology_contract = load_module("ontology_contract", ROOT / "ontology_contract.py")
+wferp_sql = load_module("wferp_sql", ROOT / "data-query-planner-mcp/wferp_sql.py")
 ArtifactStore = artifact_store.ArtifactStore
 authenticate_headers = mcp_security.authenticate_headers
 require_runtime_token = mcp_security.require_runtime_token
@@ -190,7 +191,7 @@ def tool_discover_datasets(args: dict[str, Any]) -> dict[str, Any]:
         catalog_ref = ARTIFACTS.write_json(context, run_id, "datasource-catalog", {"datasets": candidates})
     except (RuntimeError, workflow_node.WorkflowContractError, OSError) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; authorized Grafana datasource discovery failed.")
-    return success_response(step=step, run_id=run_id, refs={"datasource_catalog_ref": catalog_ref}, instruction="Choose a dataset from the compact authorized catalog, then inspect it before proposing an analysis preview. No datasource query has executed.", evidence={"grafana_metadata_read": True, "datasource_query_executed": False}, datasets=candidates, datasource_catalog_ref=catalog_ref)
+    return success_response(step=step, run_id=run_id, refs={"datasource_catalog_ref": catalog_ref}, instruction="Choose an authorized dataset that answers the user's question. Inspect its schema when needed, or call query_dataset directly. No datasource query has executed.", evidence={"grafana_metadata_read": True, "datasource_query_executed": False}, datasets=candidates, datasource_catalog_ref=catalog_ref)
 
 
 def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
@@ -259,7 +260,7 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; authorized dataset inspection failed.")
     preview_keys = ["dataset_id", "title", "description", "domain_hints", "datasource_uid", "datasource_type", "query_kind", "source_format", "fields", "minimum_rows", "row_count_hint", "date_range", "schema_summary"]
     preview = {key: metadata_artifact[key] for key in preview_keys if key in metadata_artifact}
-    instruction = "For WFERP, search its bounded schema context before authoring SQL. For other datasets, use sanitized fields to prepare the user-visible preview. No datasource query has executed."
+    instruction = "Use the returned fields to choose analysis or visualization. WFERP schema search can help author SQL. query_dataset executes without an analysis-plan ticket."
     refs = {"dataset_metadata_ref": metadata_ref}
     if document_ref is not None:
         refs["document_ref"] = document_ref
@@ -417,12 +418,88 @@ def tool_execute_planned_query(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def tool_query_dataset(args: dict[str, Any]) -> dict[str, Any]:
+    """Build the authorized read at execution time; no analysis plan is a ticket."""
+    step = "query_dataset"
+    try:
+        if set(args) - {"dataset_id", "sql", "time_range", "_server_context", "_server_session_id"}:
+            raise workflow_node.WorkflowContractError("unsupported query arguments")
+        context = context_from_args(args)
+        if not context.get("session_id"):
+            raise workflow_node.WorkflowContractError("query execution requires an authenticated session")
+        inspected = tool_inspect_dataset({"dataset_id": args.get("dataset_id"), "_server_context": context, "_server_session_id": context.get("session_id")})
+        if not inspected.get("ok"):
+            return inspected
+        metadata = ARTIFACTS.read_json(context, inspected["dataset_metadata_ref"])
+        kind = metadata.get("query_kind")
+        if kind == "wferp_llm_sql":
+            sql = args.get("sql")
+            if not isinstance(sql, str):
+                raise workflow_node.WorkflowContractError("WFERP requires one bounded SELECT")
+            valid, reason = wferp_sql.validate_sql_policy(sql)
+            if not valid:
+                raise workflow_node.WorkflowContractError(reason)
+            valid, reason, _tables = wferp_sql.validate_metadata_references(sql, wferp_sql.load_metadata()["bundle"])
+            if not valid:
+                raise workflow_node.WorkflowContractError(reason)
+            query = {"refId": "A", "datasource": {"uid": metadata["datasource_uid"], "type": metadata["datasource_type"]}, "rawSql": sql.strip().rstrip(";"), "format": "table"}
+        else:
+            if "sql" in args or kind not in {"infinity_csv", "uploaded_csv"}:
+                raise workflow_node.WorkflowContractError("this dataset uses its authorized CSV query, not model-authored SQL or URLs")
+            query = metadata["query_template"]
+        time_range = args.get("time_range")
+        if time_range is None:
+            dates = metadata.get("date_range") or {}
+            start_date = dates.get("all_from") or dates.get("valid_from")
+            end_date = dates.get("all_to") or dates.get("valid_to")
+            time_range = {"from": start_date + "T00:00:00Z", "to": end_date + "T23:59:59Z"} if isinstance(start_date, str) and isinstance(end_date, str) else {"from": "now-367d", "to": "now"}
+        if not isinstance(time_range, dict) or set(time_range) != {"from", "to"} or any(not isinstance(value, str) for value in time_range.values()):
+            raise workflow_node.WorkflowContractError("time_range must contain from/to strings")
+        now = datetime.now(timezone.utc)
+        start, end = (parse_time_bound(time_range[key], now) for key in ("from", "to"))
+        if start.tzinfo is None or end.tzinfo is None or not 0 <= (end - start).total_seconds() <= MAX_TIME_RANGE_SECONDS:
+            raise workflow_node.WorkflowContractError("query time bounds exceed executor limits")
+        response = post_grafana("/api/ds/query", {"queries": [query], **time_range}, MAX_RESPONSE_BYTES)
+        bounds = {"maximum_rows": MAX_RESULT_ROWS, "maximum_fields": MAX_RESULT_FIELDS}
+        validation = validate_frame(response, bounds)
+        if not validation["ok"]:
+            return error_response(step=step, error="Grafana frame rejected", recoverable=True,
+                                  instruction="Correct the query or request a smaller explicit scope; no frame was saved.",
+                                  evidence={"errors": validation["errors"]})
+        run_id = ARTIFACTS.create_run(context)
+        frame_ref = ARTIFACTS.write_json(context, run_id, "grafana-frame", validation["frames"])
+        response_ref = ARTIFACTS.write_json(context, run_id, "grafana-query-response", response)
+        validation_ref = ARTIFACTS.write_json(context, run_id, "dataframe-validation", {key: value for key, value in validation.items() if key != "frames"})
+    except (PermissionError, workflow_node.WorkflowContractError, RuntimeError, OSError, ValueError, TypeError, KeyError, OverflowError) as exc:
+        return error_response(step=step, error=str(exc), recoverable=True, instruction="The query failed. Correct its parameters without changing permissions or accessing the datasource directly.")
+    return success_response(step=step, run_id=run_id, refs={"frame_ref": frame_ref, "response_ref": response_ref, "validation_ref": validation_ref},
+                            frame_ref=frame_ref, available_fields=validation["field_names"], row_count=validation["row_count"],
+                            instruction="Use this authorized frame directly with Python when analysis is needed. Choose methods yourself; there is no required analysis plan.",
+                            evidence={"executed_by": "Grafana /api/ds/query", "dataset_id": metadata["dataset_id"], "time_range": time_range})
+
+
+def tool_search_wferp_schema(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        context_from_args(args)
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > wferp_sql.MAX_PROMPT_BYTES:
+            raise workflow_node.WorkflowContractError("a bounded schema search prompt is required")
+        if not any(item.get("id") == "wferp" for item in configured_datasets()):
+            raise workflow_node.WorkflowContractError("WFERP dataset is not authorized")
+        schema = wferp_sql.build_context(prompt, wferp_sql.load_metadata())
+        return success_response(step="search_wferp_schema", run_id="run_schema", schema_context=schema,
+                                instruction="Use this schema to author a read-only SELECT for query_dataset. Method and join choices are yours; database/table/column access is validated at execution.")
+    except (PermissionError, workflow_node.WorkflowContractError, OSError, ValueError) as exc:
+        return error_response(step="search_wferp_schema", error=str(exc), recoverable=False, instruction="Schema context is unavailable; do not guess private table or column names.")
+
+
 TOOLS = [
-    {"name": "discover_datasets", "description": "List compact authorized Grafana-backed datasets and domain hints before an analysis preview. Reads Grafana datasource metadata only; never executes a datasource query and never exposes credentials or physical paths.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
-    {"name": "inspect_dataset", "description": "Inspect one authorized dataset's sanitized fields, types, units, row/date hints, and domain hints before preview. Returns an opaque dataset_metadata_ref containing the internal query template; does not execute a datasource query.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_id": {"type": "string"}}, "required": ["dataset_id"]}},
-    {"name": "execute_planned_query", "description": "After user confirmation, execute an authorized Query Planner plan_ref only through Grafana /api/ds/query. Enforces the plan-bound time range plus maximum bytes, rows, and fields before persisting a response/frame, then returns an opaque frame_ref. Does not select or call an analysis method.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"plan_ref": {"type": "string"}}, "required": ["plan_ref"]}},
+    {"name": "discover_datasets", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "List compact authorized Grafana-backed datasets and domain hints. Reads Grafana datasource metadata only; never executes a datasource query and never exposes credentials or physical paths.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
+    {"name": "inspect_dataset", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Inspect one authorized dataset's sanitized fields, types, units, row/date hints, and domain hints. Returns an opaque dataset_metadata_ref containing the internal query template; does not execute a datasource query.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_id": {"type": "string"}}, "required": ["dataset_id"]}},
+    {"name": "query_dataset", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Read an authorized dataset through Grafana and save a frame for Python. CSV queries use server-owned datasource/URL settings. WFERP accepts one read-only SELECT within its authorized schema. No analysis-plan ticket is required. Optional time_range is the Grafana request window; it does not itself filter CSV rows.", "inputSchema": {"type": "object", "additionalProperties": False, "required": ["dataset_id"], "properties": {"dataset_id": {"type": "string"}, "sql": {"type": "string"}, "time_range": {"type": "object", "additionalProperties": False, "required": ["from", "to"], "properties": {"from": {"type": "string"}, "to": {"type": "string"}}}}}},
+    {"name": "search_wferp_schema", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Search the bounded, authorized WFERP schema before authoring a SELECT. Advisory context only; no ontology or analysis-plan approval.", "inputSchema": {"type": "object", "additionalProperties": False, "required": ["prompt"], "properties": {"prompt": {"type": "string", "maxLength": wferp_sql.MAX_PROMPT_BYTES}}}},
 ]
-HANDLERS = {"discover_datasets": tool_discover_datasets, "inspect_dataset": tool_inspect_dataset, "execute_planned_query": tool_execute_planned_query}
+HANDLERS = {"discover_datasets": tool_discover_datasets, "inspect_dataset": tool_inspect_dataset, "query_dataset": tool_query_dataset, "search_wferp_schema": tool_search_wferp_schema}
 
 
 def rpc_result(rid, result):

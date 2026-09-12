@@ -21,18 +21,7 @@ PLUGIN_ID = "consensys-asko11y-app"
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = ROOT / ".scratch" / "poc" / "ask-o11y-workflow-tools-settings.json"
 
-SYSTEM_PROMPT = """Act as an expert analyst using the user's question, authorized metadata, real tool results and current tool schemas. There is no fixed workflow or required tool sequence.
-
-Choose methods and next steps yourself; ask about material business ambiguity or new authority, not routine algorithm choices. Profiling, structured ML, inspection and Artifact Bridge composition are optional helpers. Use generic Python with the installed sandbox packages for other methods. A negative result or losing baseline comparison is reportable.
-
-Analysis does not need repeated query or Python confirmation. Choose appropriate filtering, sampling, preprocessing and derived data; preserve original sources, disclose material changes and honor explicit task-specific restrictions. Prevent evaluation leakage and distinguish association from causation. Never invent results, business costs or engineering limits.
-
-Use Grafana Query for datasource execution and the isolated sandbox for computation. Use observed source identifiers and opaque artifact refs. Respect RBAC, session-private data, resource limits and cancellation. No datasource credentials, host files, secrets, package installation or arbitrary network access in Python. Reconcile indeterminate operations instead of blindly retrying or modifying retained receipts.
-
-Choose prose, tables, figures or a requested Dashboard according to the task. Numeric prose and optional citations are allowed; claims must remain truthful. Read saved JSON to verify persistence and do not claim browser rendering from text-only inspection.
-
-External writes use the approval-gated Grafana write capability, including mcp-grafana_update_dashboard. A Preview retains ask-o11y-preview; publication requires separate authorization. Use source-bound artifact/query bindings, never invented asset URLs. Report exact returned UID, URL and version, and distinguish a successful write from any failed follow-up. Pure analysis need not create a Dashboard.
-"""
+SYSTEM_PROMPT = (ROOT / "ask-o11y/pkg/plugin/analyst_prompt.md").read_text(encoding="utf-8")
 
 CAPABILITY_CONFIG = ROOT / "config" / "adaptive-mcp-capabilities.json"
 
@@ -43,15 +32,15 @@ def load_server_specs() -> list[dict[str, Any]]:
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"cannot load adaptive MCP capability config: {exc}") from exc
     servers = raw.get("servers") if isinstance(raw, dict) else None
-    if not isinstance(servers, list) or len(servers) != 5 or any(not isinstance(item, dict) for item in servers):
-        raise SystemExit("adaptive MCP capability config must define exactly five trust-seam servers")
+    if not isinstance(servers, list) or any(not isinstance(item, dict) for item in servers):
+        raise SystemExit("MCP capability config must define a server list")
     required = {"id", "name", "url_env", "local_url", "enabled_tools", "disabled_tools"}
     for server in servers:
         if set(server) != required or not isinstance(server["enabled_tools"], list) or not isinstance(server["disabled_tools"], list):
             raise SystemExit(f"invalid adaptive MCP capability entry: {server.get('id')}")
     ids = [str(item["id"]) for item in servers]
-    if ids != ["ontology", "data-query-planner", "grafana-query", "sandbox-analysis", "artifact-bridge"]:
-        raise SystemExit(f"capability config changed required trust seams: {ids}")
+    if ids != ["grafana-query", "sandbox-analysis", "artifact-bridge"]:
+        raise SystemExit(f"unexpected minimal runtime servers: {ids}")
     return servers
 
 
@@ -108,7 +97,7 @@ def build_json_data(existing: dict[str, Any], use_local_defaults: bool) -> dict[
             "builtInMCPToolSelections": dict(json_data.get("builtInMCPToolSelections") or {}),
             "defaultSystemPrompt": json_data.get("defaultSystemPrompt") or SYSTEM_PROMPT,
             "maxParallelToolCalls": 1,
-            "approvalPolicy": json_data.get("approvalPolicy", "approved"),
+            "approvalPolicy": "approval-gated-writes",
         }
     )
     return json_data
@@ -125,7 +114,7 @@ def validate_payload(payload: dict[str, Any]) -> None:
         raise SystemExit("builtInMCPToolSelections must be an object")
     servers = json_data.get("mcpServers")
     if not isinstance(servers, list) or len(servers) != len(SERVER_SPECS):
-        raise SystemExit("payload must contain exactly the high-level workflow-node servers")
+        raise SystemExit("payload must contain the configured minimal runtime servers")
     expected_ids = {str(spec["id"]) for spec in SERVER_SPECS}
     actual_ids = {str(server.get("id")) for server in servers}
     if actual_ids != expected_ids:
@@ -146,6 +135,8 @@ def validate_payload(payload: dict[str, Any]) -> None:
             prefixed_disabled = selections.get(tool_key(str(spec["id"]), str(name)))
             if not isinstance(direct_disabled, bool) or direct_disabled or not isinstance(prefixed_disabled, bool) or prefixed_disabled:
                 raise SystemExit(f"low-level tool not disabled: {spec['id']} {name}")
+    if json_data.get("approvalPolicy") != "approval-gated-writes":
+        raise SystemExit("external writes require the native approval gate")
     prompt = json_data.get("defaultSystemPrompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise SystemExit("defaultSystemPrompt must be nonempty text")
@@ -191,8 +182,12 @@ def apply_settings(grafana_url: str, payload: dict[str, Any]) -> dict[str, Any]:
         # Settings updates must not silently replace an operator's persisted prompt.
         with urllib.request.urlopen(urllib.request.Request(url, headers=auth_headers()), timeout=30) as resp:
             existing = json.loads(resp.read()).get("jsonData", {})
+        request_payload["jsonData"] = {**existing, **payload["jsonData"]}
+        if "builtInMCPToolSelections" in existing:
+            request_payload["jsonData"]["builtInMCPToolSelections"] = existing["builtInMCPToolSelections"]
         if existing.get("defaultSystemPrompt"):
-            request_payload["jsonData"] = {**payload["jsonData"], "defaultSystemPrompt": existing["defaultSystemPrompt"]}
+            request_payload["jsonData"]["defaultSystemPrompt"] = existing["defaultSystemPrompt"]
+        validate_payload(request_payload)
         req = urllib.request.Request(url, data=json.dumps(request_payload).encode(), headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read() or b"{}")
@@ -217,7 +212,7 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if args.self_check:
-        print(json.dumps({"ok": True, "settings_payload": str(args.out.relative_to(ROOT)), "servers": [spec["id"] for spec in SERVER_SPECS], "built_in_mcp": True}, ensure_ascii=False, indent=2))
+        print(json.dumps({"ok": True, "settings_payload": str(args.out), "servers": [spec["id"] for spec in SERVER_SPECS], "built_in_mcp": True}, ensure_ascii=False, indent=2))
         return 0
     if args.apply:
         if not args.grafana_url:

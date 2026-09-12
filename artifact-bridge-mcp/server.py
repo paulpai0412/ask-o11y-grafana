@@ -321,13 +321,16 @@ def resolve_plotly_bindings(context: dict[str, str], panel: dict[str, Any], coun
             plugin_id = binding["plugin_id"]
             if not isinstance(execution_ref, str) or isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
                 raise WorkflowContractError("plotly binding requires an opaque execution ref and non-negative output index")
+            if parse_artifact_ref(execution_ref)[1] != ("sandbox-execution",):
+                raise WorkflowContractError("plotly binding must reference a sandbox-execution artifact")
             execution = ARTIFACTS.read_json(context, execution_ref)
             try:
                 result = execution["results"][output_index]
             except (KeyError, IndexError, TypeError) as exc:
                 raise WorkflowContractError("plotly output index does not exist") from exc
-            # Legacy execution bindings have no v2 figure-format marker.
-            sanitized = _plotly_figure(result, legacy=True)
+            # The existing panel format marker selects native vs retained v1 decoding.
+            native = (panel.get("options") or {}).get("figureFormat") == ml_plotly_contract.FIGURE_FORMAT
+            sanitized = _plotly_figure(result, legacy=not native)
         else:
             raise WorkflowContractError("plotly binding requires only placeholder, report manifest ref, artifact id, and plugin id")
         if not isinstance(placeholder, str) or not placeholder.startswith("$plotly_") or not placeholder.removeprefix("$plotly_").replace("_", "").replace("-", "").isalnum():
@@ -1157,6 +1160,7 @@ REPORT_SYNTHESIS_SCHEMA = {
 
 TOOLS = [{
     "name": "resolve_dashboard_refs",
+    "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
     "description": "Internal-only: resolve authorized opaque query/analysis refs inside a dashboard before dispatch to Ask O11y's built-in Grafana MCP. It never chooses panels or writes Grafana.",
     "inputSchema": {
         "type": "object",
@@ -1169,51 +1173,6 @@ TOOLS = [{
     "description": "After explicit user approval in the original source session, grant reuse of existing execution results to one user-specified session of the same org/user. Does not grant uploads, input datasets, or new computation.",
     "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
     "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"execution_ref": {"type": "string"}, "target_session_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{16,128}$"}}, "required": ["execution_ref", "target_session_id"]},
-}, {
-    "name": "prepare_ml_report",
-    "description": "Read a report's artifact and fact catalog. Optional helper, not a prerequisite for composition. This tool does not assess analytical completeness.",
-    "inputSchema": {
-        "type": "object", "additionalProperties": False,
-        "properties": {"report_manifest_ref": {"type": "string", "description": "Required host-owned opaque report-manifest-v1 ref returned by Sandbox or trusted re-export."}},
-        "required": ["report_manifest_ref"],
-    },
-}, {
-    "name": "inspect_report_artifacts",
-    "description": "Read report facts and artifact evidence as needed, in bounded pages. Reading every page is not required for composition. Default spec returns text, not visual verification. No analysis execution or Grafana write.",
-    "inputSchema": {
-        "type": "object", "additionalProperties": False,
-        "properties": {
-            "report_manifest_ref": {"type": "string", "description": "Start reading an authorized host report manifest."},
-            "inspection_ref": {"type": "string", "description": "Continue from the last returned inspection receipt; do not collect ref arrays."},
-            "report_context_ref": {"type": "string", "description": "Legacy prepared context."},
-            "artifact_ids": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True, "items": {"type": "string"}, "description": "Optional selection; omitted selects the next bounded pending batch."},
-            "mode": {"type": "string", "enum": ["vision", "spec"], "default": "spec"},
-        },
-        "oneOf": [{"required": [key]} for key in ("report_manifest_ref", "inspection_ref", "report_context_ref")],
-    },
-}, {
-    "name": "compose_ml_dashboard",
-    "description": "Compose an LLM-authored report from report_manifest_ref directly, or an existing report context. Inspection receipts and complete fact coverage are not required. Validates artifact references and safe renderable content, not analytical quality. Returns a dashboard ref for the Grafana writer.",
-    "inputSchema": {
-        "type": "object", "additionalProperties": False,
-        "properties": {
-            "report_manifest_ref": {"type": "string"},
-            "report_context_ref": {"type": "string"},
-            "inspection_refs": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True, "items": {"type": "string"}},
-            "inspection_ref": {"type": "string", "description": "Optional existing receipt identifying the report context; it need not cover the entire report."},
-            "synthesis": REPORT_SYNTHESIS_SCHEMA,
-            "uid": {"type": "string", "maxLength": 40, "description": "A new unique Preview dashboard UID for this analysis session; include a short session/upload suffix, keep it at most 40 characters, and never reuse another session's UID."},
-            "title": {"type": "string", "description": "Dashboard title; pass separately from synthesis."},
-            "output_mode": {"type": "string", "enum": ["ref", "full"], "default": "ref", "description": "ref keeps the composed dashboard opaque and small; full is only for local contract tests."},
-            "delivery_status": {"type": "string", "enum": ["standard", "partial"], "default": "standard", "description": "Use partial for known omissions in the delivered report, not merely because automated assessment is not_assessed. Standard reports can retain an unassessed completeness notice. Neither value certifies that the business question is fully answered or changes evidence, authorization or publication gates."},
-        },
-        "required": ["synthesis", "uid", "title"],
-        "oneOf": [
-            {"required": ["report_manifest_ref"]},
-            {"required": ["inspection_ref"]},
-            {"required": ["report_context_ref"]},
-        ],
-    },
 }]
 
 
@@ -1239,9 +1198,6 @@ def handle_rpc(msg: dict[str, Any]):
         handlers = {
             "resolve_dashboard_refs": (resolve_dashboard_refs, {"dashboard", "_server_context"}),
             "grant_artifact_reuse": (grant_artifact_reuse, {"execution_ref", "target_session_id", "_server_context"}),
-            "prepare_ml_report": (prepare_ml_report, {"report_manifest_ref", "_server_context"}),
-            "inspect_report_artifacts": (inspect_report_artifacts, {"report_manifest_ref", "inspection_ref", "report_context_ref", "artifact_ids", "mode", "_server_context"}),
-            "compose_ml_dashboard": (compose_ml_dashboard, {"report_manifest_ref", "inspection_ref", "report_context_ref", "inspection_refs", "synthesis", "uid", "title", "output_mode", "delivery_status", "_server_context"}),
         }
         if name not in handlers:
             return rpc_error(rid, -32602, f"unknown tool: {name}")

@@ -107,8 +107,8 @@ func (a *AgentLoop) Run(ctx context.Context, req LoopRequest, eventCh chan<- SSE
 	}
 	mcpTools = rbac.FilterToolsByRole(mcpTools, req.UserRole)
 	mcpTools = mcp.FilterToolsBySelection(mcpTools, req.MCPServers)
-	if len(req.ExcludeToolNames) > 0 {
-		excluded := make(map[string]bool, len(req.ExcludeToolNames))
+	{
+		excluded := map[string]bool{artifactBridgeResolveTool: true}
 		for _, n := range req.ExcludeToolNames {
 			excluded[n] = true
 		}
@@ -410,6 +410,9 @@ func (a *AgentLoop) executeTool(ctx context.Context, tc ToolCall, req LoopReques
 		span.End()
 	}()
 
+	if tc.Function.Name == artifactBridgeResolveTool {
+		return "Artifact resolution is internal to the approved Dashboard writer", true, "tool"
+	}
 	tool, found := a.mcpProxy.FindToolByName(tc.Function.Name)
 	if !found {
 		return fmt.Sprintf("Unknown tool: %s", tc.Function.Name), true, "tool"
@@ -429,6 +432,11 @@ func (a *AgentLoop) executeTool(ctx context.Context, tc ToolCall, req LoopReques
 		return "Tool arguments must be a JSON object", true, "tool"
 	}
 	args["_server_session_id"] = req.SessionID
+	if tc.Function.Name == "mcp-grafana_update_dashboard" {
+		if err := a.resolveDashboardBindings(args, req); err != nil {
+			return err.Error(), true, "tool"
+		}
+	}
 	mcp.EnsureScopedGraphitiArgs(tool, args, req.OrgID)
 
 	result, err := a.mcpProxy.CallToolWithActorContext(tc.Function.Name, args, req.OrgID, req.OrgName, req.ScopeOrgID, req.UserID)
@@ -467,7 +475,7 @@ func (a *AgentLoop) executeToolWithApproval(ctx context.Context, eventCh chan<- 
 
 	// These installed tools only read authorized data or compute in isolation.
 	switch tc.Function.Name {
-	case "grafana-query_execute_planned_query", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_execute_python_preprocessing", "sandbox-analysis_revise_python_analysis":
+	case "grafana-query_query_dataset", "sandbox-analysis_execute_python_analysis", "sandbox-analysis_execute_python_preprocessing", "sandbox-analysis_revise_python_analysis":
 		return a.executeTool(ctx, tc, req)
 	}
 	risk := mcp.ClassifyToolRisk(tool, req.MCPServers)

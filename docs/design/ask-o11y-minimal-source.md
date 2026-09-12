@@ -63,4 +63,28 @@ M1/M4 可以先完成部分，但不得宣稱 MCP 或 live E2E 完成。先前 C
 
 診斷限制：舊四個 scripts 的五個告警已按當前 body + primary LSP=0 核對並 mark false-positive；turn-end 仍重報。新增目錄的 lens/TS LSP 亦以無 JSX/ES5/缺 React 的配置報錯，但同一 source 的專案 `tsc --noEmit`、Jest 與正式 webpack 都通過。`lens_diagnostics(mode=all)` 最後仍列 Chat.tsx 28 blocking + 其他 warnings，因此**不宣稱 lens 或全 repo 綠燈**；以 source-bound 專案命令作本階段替代證據，不為 stale/錯配設定改 source 或修工具。
 
-M2–M5 未完成：目前仍沒有新的 generic MCP/Plotly binding、完整取消/未知狀態拒重送、新手 prompt/skill context 或 settings migration。既有 patches 暫留作 rollback 記錄但不再被本機 build 使用，待 consumers 同步完成再移除。這個 source checkpoint 不能部署後宣稱整體產品可用。
+M1 checkpoint 當時 M2–M5 未完成；下方記錄後續進展。既有 patches 暫留作 rollback 記錄但不再被本機 build 使用，待 consumers 同步完成再移除。source checkpoint 不能當成整體產品或部署驗收。
+
+### M2–M4 本機整合進展（2026-09-12）
+
+已接通的最短路徑：`query_dataset → authorized frame → execute_python_analysis → captured native figure → approved native Dashboard writer`。沒有新增 agent/skill selector、資料庫、流程引擎或分析方法裁判。
+
+- Query 重新取得授權 metadata，重用 Grafana `/api/ds/query`；CSV 使用 server-owned datasource/URL/template，WFERP 保留 SELECT-only、database/table/column 驗證及回應/時間/容量上限，但不要求 analysis plan/ontology 准入。新 frame 必須有 authenticated session。
+- 通用 Python 不再讀 plan、注入 validity/semantic contract、要求 report preflight/manifest。輸出保留原始 execution、provenance、derived frames 與 native figures；明示 `trusted_ml_contract=false`。標準 Python 錯誤只回去敏 class/generated-code 行號，已完成失敗可修碼。缺 completion/error 證據為 indeterminate；現有 receipts 擋相同操作重送。
+- Bridge 與 Go writer 已接 native figure binding：未批准不解析/寫入，停用 bridge 或解析失敗不寫入，數值直接傳 writer、不回灌模型。沿用 sanitizer 拒絕外部網路圖像等不安全 figure，原始 execution 不刪。舊讀取分支保留，未聲稱做過舊 Dashboard live 驗證。
+- 公開 tools/list **及 tools/call** 均移除 profile/fixed ML/reexport/repair 與 report prepare/inspection/compositor；舊 private helpers 尚待清理，不能稱整個 repo 已完成退役。
+- `analyst_prompt.md` 是 Go embed 與 settings 候選的同一份預設；`skills/analysis/SKILL.md` 直接接進原生 `BuildSystemPrompt`，其結果經 `handleAgentRun` 傳入 `LoopRequest.SystemPrompt`。它是 advisory，不是新選擇器或 gate。
+- 設定候選縮為 Grafana Query / Sandbox Analysis / Artifact Bridge 三個 MCP。resolver 在 operator config 啟用供 host 使用，但對模型隱藏並禁止直接呼叫。候選維持 `approval-gated-writes`；遷移保留非空 custom prompt、既有 built-in tool selections 及其他無關設定。沒有執行真 settings apply。
+
+驗證：`.scratch/minimal-source/mcp/` 的 `settings-python.log` 是真 MCP handlers + 隔離 fixtures（不在 host 執行生成 Python）：涵蓋 CSV 與安全 SQL→frame、無 plan 計算、actor/org/session 拒絕、receipt 重用、已完成錯誤修碼、相同未知操作不重送、native polar figure/不安全 figure 拒絕、退役工具拒絕、工具目錄一致，以及 mock settings migration 保留既有值。`settings-go.log` 全 `go test ./pkg/...` 通過，`settings-vet.log` 通過；含批准/bridge 邊界與 actual system prompt skill 載入測試。`settings-build.log` 的 tsc/webpack/Go/build stamp 通過，最終產物 `0.3.2+local.5421aa3ba73b1e22`，僅本機 dist；skill 補標題後的 `prompt-final.log` 亦通過。最後 source hashes 在 `source-sha256.txt`。`settings-candidate.log` 是離線 CLI self-check（包含修正原本相對/外部 `--out` 顯示路徑會失敗的小 bug），不是 settings apply。
+
+本輪 3 個 Go prompt 檔及 4 個 Python production/config 檔 primary LSP 無 errors。既有 TS/JSX 診斷錯配沒有藉改 source/tsconfig 迴避，project tsc/build 是當前 source 的替代證據；fixture JSON decode 故意讓錯誤使測試失敗，`is False` 檢查真正 bool，非 production 未處理輸入。prompt 的 text/template 只產 LLM 純文字，非 HTML/XSS sink，已標 false-positive。最後 lens all 仍有原 `wferp/_Source/1_mssql_to_json.py` 7 blocking 及既有 warnings，本輪不擴到該 backlog；不宣稱全 repo/lens 綠燈。曾誤執行既有 live completion check，因缺 `EXPECTED_EXECD_SHA256` 在初始化停止，`completion.log` 保留且不計入通過。
+
+仍未完成（原 M2–M5 範圍，不增新功能）：
+
+- 真正的 MCP→OpenSandbox 取消／狀態收斂；目前 Go tool timeout 仍基於 client context，不是 agent run context。
+- 跨 run/改碼後的 indeterminate 拒重送；不能把目前「同 key receipt」測試擴稱完整未知防重送。shared MCP reconnect 的 actor/session 並行隔離亦待驗證與修正。
+- 退役 private helpers、patch/source/test consumers 清理；完整 writer UID/version/readback 與舊 Dashboard 相容驗收。
+- 取得另行部署/live 授權後的真 Ask O11y UI/LLM E2E（非 main 手工 RPC）。以上 runtime 保護完成前不可部署。
+
+設定遷移時先審閱三 MCP 候選與寫入 policy，另確認 operator 是否要以新預設取代既有非空 prompt；未批准時保留原值並明示可能仍帶舊流程文字。不可靜默 reset custom prompt。舊 Dashboard、資料、artifacts、sessions、receipts 與 live services 本輪均未修改。
