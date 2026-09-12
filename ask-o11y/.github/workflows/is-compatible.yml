@@ -1,0 +1,90 @@
+name: Latest Grafana API compatibility check
+on: [pull_request]
+
+jobs:
+  # Detect if code changed (for fast-pass on release-please PRs)
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'pkg/**'
+              - 'tests/**'
+              - '*.config.*'
+              - 'Magefile.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'tsconfig.json'
+
+  compatibilitycheck:
+    needs: check-changes
+    if: needs.check-changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js environment
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup Go environment
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.26.5'
+
+      - name: Install Mage
+        run: go install github.com/magefile/mage@latest
+
+      - name: Clear npm cache
+        run: npm cache clean --force
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          rm -rf node_modules/@swc
+          npm install @swc/core @swc/helpers
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Find module.ts or module.tsx
+        id: find-module-ts
+        run: |
+          MODULETS="$(find ./src -type f \( -name "module.ts" -o -name "module.tsx" \))"
+          echo "modulets=${MODULETS}" >> $GITHUB_OUTPUT
+
+      - name: Compatibility check
+        uses: grafana/plugin-actions/is-compatible@2ecc2ba7168309f04010b5b637530b877d67e4ff # main
+        with:
+          module: ${{ steps.find-module-ts.outputs.modulets }}
+          comment-pr: 'no'
+          fail-if-incompatible: 'yes'
+          # Pin to the Grafana 13.x baseline this plugin is built/tested against (see
+          # package.json) instead of the action's default `@latest`, so this check
+          # doesn't silently start failing (or passing) against a newer, unvalidated
+          # Grafana release. Bump alongside package.json when re-validating a newer version.
+          targets: '@grafana/data@13.1.1,@grafana/ui@13.1.1,@grafana/runtime@13.1.1,@grafana/schema@13.1.1,@grafana/e2e-selectors,@grafana/experimental'
+
+  # Fast pass for release-please PRs (no code changes)
+  skip-compatibilitycheck:
+    name: compatibilitycheck
+    needs: check-changes
+    if: needs.check-changes.outputs.code == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No code changes detected, skipping compatibility check (release-please PR)"

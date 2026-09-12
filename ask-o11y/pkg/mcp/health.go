@@ -1,0 +1,277 @@
+package mcp
+
+import (
+	"sync"
+	"time"
+
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+)
+
+// ServerStatus represents the status of an MCP server
+type ServerStatus string
+
+const (
+	StatusHealthy      ServerStatus = "healthy"
+	StatusDegraded     ServerStatus = "degraded"
+	StatusUnhealthy    ServerStatus = "unhealthy"
+	StatusDisconnected ServerStatus = "disconnected"
+	StatusConnecting   ServerStatus = "connecting"
+)
+
+// ServerHealth represents the health status of an MCP server
+type ServerHealth struct {
+	ServerID            string       `json:"serverId"`
+	Name                string       `json:"name"`
+	URL                 string       `json:"url"`
+	Type                string       `json:"type"`
+	Status              ServerStatus `json:"status"`
+	LastCheck           time.Time    `json:"lastCheck"`
+	ResponseTime        int64        `json:"responseTime"` // milliseconds
+	SuccessRate         float64      `json:"successRate"`
+	ErrorCount          int          `json:"errorCount"`
+	ConsecutiveFailures int          `json:"consecutiveFailures"`
+	LastError           string       `json:"lastError,omitempty"`
+	Tools               []Tool       `json:"tools"`
+	ToolCount           int          `json:"toolCount"`
+}
+
+// HealthMonitor monitors the health of MCP servers
+type HealthMonitor struct {
+	proxy  *Proxy
+	logger log.Logger
+	mu     sync.RWMutex
+	health map[string]*ServerHealth
+	ticker *time.Ticker
+	done   chan bool
+}
+
+// NewHealthMonitor creates a new health monitor
+func NewHealthMonitor(proxy *Proxy, logger log.Logger) *HealthMonitor {
+	return &HealthMonitor{
+		proxy:  proxy,
+		logger: logger,
+		health: make(map[string]*ServerHealth),
+		done:   make(chan bool),
+	}
+}
+
+// Start begins health monitoring
+func (hm *HealthMonitor) Start(interval time.Duration) {
+	hm.ticker = time.NewTicker(interval)
+
+	// Perform initial health check
+	hm.checkAllServers()
+
+	go func() {
+		for {
+			select {
+			case <-hm.ticker.C:
+				hm.checkAllServers()
+			case <-hm.done:
+				return
+			}
+		}
+	}()
+
+	hm.logger.Info("Health monitor started", "interval", interval)
+}
+
+// Stop stops health monitoring
+func (hm *HealthMonitor) Stop() {
+	if hm.ticker != nil {
+		hm.ticker.Stop()
+	}
+	hm.done <- true
+	hm.logger.Info("Health monitor stopped")
+}
+
+// checkAllServers performs health checks on all servers
+func (hm *HealthMonitor) checkAllServers() {
+	hm.proxy.mu.RLock()
+	clients := make(map[string]*Client)
+	for id, client := range hm.proxy.clients {
+		clients[id] = client
+	}
+	hm.proxy.mu.RUnlock()
+
+	hm.logger.Debug("Performing health check", "servers", len(clients))
+
+	for id, client := range clients {
+		hm.checkServer(id, client)
+	}
+}
+
+// CheckServerNow performs an immediate, synchronous health check for one
+// server. Used right after on-demand registration so callers can see fresh
+// tools without waiting for the next periodic tick. Retries briefly to absorb
+// the cold-connect window for streamable-http transports.
+func (hm *HealthMonitor) CheckServerNow(serverID string) {
+	hm.proxy.mu.RLock()
+	client, ok := hm.proxy.clients[serverID]
+	hm.proxy.mu.RUnlock()
+	if !ok {
+		return
+	}
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		hm.checkServer(serverID, client)
+		hm.mu.RLock()
+		health, exists := hm.health[serverID]
+		populated := exists && health.ToolCount > 0
+		hm.mu.RUnlock()
+		if populated {
+			return
+		}
+		if attempt < maxAttempts-1 {
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+}
+
+// checkServer performs a health check on a single server
+func (hm *HealthMonitor) checkServer(serverID string, client *Client) {
+	startTime := time.Now()
+
+	// List tools to check server health
+	tools, err := client.ListTools()
+	responseTime := time.Since(startTime).Milliseconds()
+
+	needReconnect := false
+	serverName := ""
+
+	func() {
+		hm.mu.Lock()
+		defer hm.mu.Unlock()
+
+		health, exists := hm.health[serverID]
+		if !exists {
+			health = &ServerHealth{
+				ServerID:  serverID,
+				Name:      client.config.Name,
+				URL:       client.config.URL,
+				Type:      client.config.Type,
+				Status:    StatusConnecting,
+				Tools:     []Tool{},
+				ToolCount: 0,
+			}
+			hm.health[serverID] = health
+		}
+
+		health.LastCheck = time.Now()
+		health.ResponseTime = responseTime
+
+		if err != nil {
+			health.ErrorCount++
+			health.ConsecutiveFailures++
+			health.LastError = sanitizeError(err)
+
+			if health.ConsecutiveFailures >= 5 {
+				health.Status = StatusDisconnected
+			} else if health.ConsecutiveFailures >= 3 {
+				health.Status = StatusUnhealthy
+			} else {
+				health.Status = StatusDegraded
+			}
+
+			hm.logger.Warn("Health check failed",
+				"server", health.Name,
+				"error", health.LastError,
+				"consecutiveFailures", health.ConsecutiveFailures)
+
+			// One step before StatusUnhealthy, ask the client to re-establish its
+			// session so the next user request doesn't hit a dead socket.
+			if health.ConsecutiveFailures == 2 {
+				needReconnect = true
+				serverName = health.Name
+			}
+		} else {
+			health.ConsecutiveFailures = 0
+			health.LastError = ""
+			health.Tools = tools
+			health.ToolCount = len(tools)
+
+			if responseTime > 2000 {
+				health.Status = StatusDegraded
+			} else {
+				health.Status = StatusHealthy
+			}
+
+			totalChecks := health.ErrorCount + 1
+			successfulChecks := totalChecks - health.ErrorCount
+			health.SuccessRate = float64(successfulChecks) / float64(totalChecks) * 100
+
+			hm.logger.Debug("Health check succeeded",
+				"server", health.Name,
+				"responseTime", responseTime,
+				"toolCount", len(tools))
+		}
+	}()
+
+	// Do the potentially-blocking reconnect outside the health-map lock to keep
+	// checkAllServers from serializing on one stuck server.
+	if needReconnect {
+		if recErr := client.forceReconnect(); recErr != nil {
+			hm.logger.Warn("forceReconnect failed", "server", serverName, "error", sanitizeError(recErr))
+		} else {
+			hm.logger.Info("forceReconnect triggered by health monitor", "server", serverName)
+		}
+	}
+}
+
+// GetAllHealth returns the health status of all servers
+func (hm *HealthMonitor) GetAllHealth() []ServerHealth {
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
+	result := make([]ServerHealth, 0, len(hm.health))
+	for _, health := range hm.health {
+		result = append(result, *health)
+	}
+
+	return result
+}
+
+// GetSystemHealth returns overall system health statistics
+func (hm *HealthMonitor) GetSystemHealth() map[string]interface{} {
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
+	stats := map[string]int{
+		"healthy":      0,
+		"degraded":     0,
+		"unhealthy":    0,
+		"disconnected": 0,
+		"total":        len(hm.health),
+	}
+
+	overallStatus := "healthy"
+
+	for _, health := range hm.health {
+		switch health.Status {
+		case StatusHealthy:
+			stats["healthy"]++
+		case StatusDegraded:
+			stats["degraded"]++
+		case StatusUnhealthy:
+			stats["unhealthy"]++
+		case StatusDisconnected:
+			stats["disconnected"]++
+		}
+	}
+
+	// Determine overall status
+	if stats["unhealthy"] > 0 || stats["disconnected"] > 0 {
+		overallStatus = "unhealthy"
+	} else if stats["degraded"] > 0 {
+		overallStatus = "degraded"
+	}
+
+	return map[string]interface{}{
+		"overallStatus": overallStatus,
+		"healthy":       stats["healthy"],
+		"degraded":      stats["degraded"],
+		"unhealthy":     stats["unhealthy"],
+		"disconnected":  stats["disconnected"],
+		"total":         stats["total"],
+	}
+}

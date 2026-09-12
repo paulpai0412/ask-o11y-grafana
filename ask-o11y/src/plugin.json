@@ -1,0 +1,137 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "app",
+  "name": "Ask O11y",
+  "id": "consensys-asko11y-app",
+  "info": {
+    "keywords": [
+      "app",
+      "assistant",
+      "ai",
+      "llm",
+      "mcp",
+      "chat",
+      "observability",
+      "monitoring",
+      "query",
+      "dashboard",
+      "analytics",
+      "troubleshooting",
+      "rbac"
+    ],
+    "description": "AI-powered observability assistant with MCP integration. Query databases, analyze metrics, manage dashboards, and troubleshoot issues through natural language with 56+ integrated tools.",
+    "author": {
+      "name": "Consensys",
+      "url": "https://consensys.io"
+    },
+    "links": [
+      {
+        "name": "GitHub Repository",
+        "url": "https://github.com/Consensys/ask-o11y-plugin"
+      },
+      {
+        "name": "Documentation",
+        "url": "https://github.com/Consensys/ask-o11y-plugin#readme"
+      },
+      {
+        "name": "Report Issues",
+        "url": "https://github.com/Consensys/ask-o11y-plugin/issues"
+      },
+      {
+        "name": "License",
+        "url": "https://github.com/Consensys/ask-o11y-plugin/blob/main/LICENSE"
+      }
+    ],
+    "logos": {
+      "small": "img/ask_o11y_logo.png",
+      "large": "img/ask_o11y_logo.png"
+    },
+    "screenshots": [
+      { "name": "Agent RCA overview", "path": "img/screenshots/home-page.png" },
+      { "name": "Live investigation workspace", "path": "img/screenshots/chat-interface.png" },
+      { "name": "MCP settings", "path": "img/screenshots/mcp-configuration.png" },
+      { "name": "MCP tool selection", "path": "img/screenshots/tool-selection.png" },
+      { "name": "Service graph settings", "path": "img/screenshots/service-graph-settings.png" },
+      { "name": "Run trace and evidence history", "path": "img/screenshots/session-history.png" }
+    ],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "includes": [
+    {
+      "type": "page",
+      "name": "Ask O11y",
+      "path": "/a/%PLUGIN_ID%",
+      "action": "consensys-asko11y-app.agent:read",
+      "addToNav": true,
+      "defaultNav": true,
+      "icon": "ai"
+    },
+    {
+      "type": "page",
+      "icon": "cog",
+      "name": "Configuration",
+      "path": "/plugins/%PLUGIN_ID%",
+      "action": "consensys-asko11y-app.settings:write",
+      "role": "Admin",
+      "addToNav": true
+    }
+  ],
+  "roles": [
+    {
+      "role": {
+        "name": "Ask O11y Reader",
+        "description": "Read Ask O11y agent runs, traces, memory, and topology.",
+        "permissions": [
+          { "action": "consensys-asko11y-app.agent:read" },
+          { "action": "consensys-asko11y-app.memory:read" }
+        ]
+      },
+      "grants": ["Viewer", "Editor", "Admin"]
+    },
+    {
+      "role": {
+        "name": "Ask O11y Operator",
+        "description": "Run Ask O11y agent workflows and approve gated tool calls.",
+        "permissions": [
+          { "action": "consensys-asko11y-app.agent:read" },
+          { "action": "consensys-asko11y-app.agent:run" },
+          { "action": "consensys-asko11y-app.agent:approve" },
+          { "action": "consensys-asko11y-app.memory:read" }
+        ]
+      },
+      "grants": ["Editor", "Admin"]
+    },
+    {
+      "role": {
+        "name": "Ask O11y Administrator",
+        "description": "Administer Ask O11y settings, memory writes, and agent runtime policy.",
+        "permissions": [
+          { "action": "consensys-asko11y-app.agent:read" },
+          { "action": "consensys-asko11y-app.agent:run" },
+          { "action": "consensys-asko11y-app.agent:approve" },
+          { "action": "consensys-asko11y-app.agent:write" },
+          { "action": "consensys-asko11y-app.memory:read" },
+          { "action": "consensys-asko11y-app.memory:write" },
+          { "action": "consensys-asko11y-app.settings:write" }
+        ]
+      },
+      "grants": ["Admin"]
+    }
+  ],
+  "backend": true,
+  "executable": "gpx_consensys-asko11y-app",
+  "dependencies": {
+    "grafanaDependency": ">=13.0.0",
+    "plugins": [
+      {
+        "type": "app",
+        "id": "grafana-llm-app",
+        "name": "LLM"
+      }
+    ]
+  },
+  "iam": {
+    "permissions": [{ "action": "plugins.app:access", "scope": "plugins:id:grafana-llm-app" }]
+  }
+}

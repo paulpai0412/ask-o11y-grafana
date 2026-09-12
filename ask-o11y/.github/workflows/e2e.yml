@@ -1,0 +1,216 @@
+name: E2E Tests with Coverage
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Detect if code changed (for fast-pass on release-please PRs)
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'pkg/**'
+              - 'tests/**'
+              - '*.config.*'
+              - 'Magefile.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'tsconfig.json'
+
+  build:
+    name: Build Plugin with Coverage
+    needs: check-changes
+    if: needs.check-changes.outputs.code == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      plugin-id: ${{ steps.metadata.outputs.plugin-id }}
+      plugin-version: ${{ steps.metadata.outputs.plugin-version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js environment
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup Go environment
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Install Mage
+        run: go install github.com/magefile/mage@v1.15.0
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend with coverage instrumentation
+        run: npm run build:frontend:coverage:prod
+
+      - name: Build backend (Linux only)
+        run: mage build:linux
+
+      - name: Get plugin metadata
+        id: metadata
+        run: |
+          sudo apt-get install jq
+          export GRAFANA_PLUGIN_ID=$(cat dist/plugin.json | jq -r .id)
+          export GRAFANA_PLUGIN_VERSION=$(cat dist/plugin.json | jq -r .info.version)
+          echo "plugin-id=${GRAFANA_PLUGIN_ID}" >> $GITHUB_OUTPUT
+          echo "plugin-version=${GRAFANA_PLUGIN_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Archive Build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.metadata.outputs.plugin-id }}-${{ steps.metadata.outputs.plugin-version }}-coverage
+          path: dist
+          retention-days: 5
+
+  e2e-tests:
+    name: E2E Tests with Coverage
+    needs: [check-changes, build]
+    if: needs.check-changes.outputs.code == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GRAFANA_VERSION: '13.0.1'
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Download plugin
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          name: ${{ needs.build.outputs.plugin-id }}-${{ needs.build.outputs.plugin-version }}-coverage
+
+      - name: Set executable permissions on backend binaries
+        run: |
+          chmod +x ./dist/gpx_* || true
+
+      - name: Setup Node.js environment
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start Grafana
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          docker compose up -d grafana
+
+      - name: Wait for Grafana server
+        uses: grafana/plugin-actions/wait-for-grafana@2ecc2ba7168309f04010b5b637530b877d67e4ff # main
+        with:
+          url: http://localhost:3000/login
+
+      - name: Install Playwright Browsers
+        run: npm exec playwright install chromium --with-deps
+
+      - name: Run E2E tests with coverage
+        id: run-tests
+        run: npm run e2e:coverage
+
+      - name: Generate coverage report
+        if: always()
+        run: npm run coverage:report || true
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-report
+          path: |
+            coverage-e2e/
+            !coverage-e2e/.nyc_output/
+          retention-days: 30
+
+      - name: Add coverage summary to job summary
+        if: always()
+        run: |
+          echo "## E2E Test Coverage Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f coverage-e2e/lcov-report/index.html ]; then
+            echo "Coverage report generated successfully." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            # Extract coverage summary from nyc output
+            if compgen -G "coverage-e2e/.nyc_output/*.json" > /dev/null; then
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              npm run coverage:report -- --reporter=text-summary 2>/dev/null | tail -10 >> $GITHUB_STEP_SUMMARY || echo "Coverage summary not available" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "No coverage report generated." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Docker logs
+        if: always() && steps.run-tests.outcome == 'failure'
+        run: |
+          docker logs consensys-asko11y-app >& grafana-server.log || true
+
+      - name: Upload server log on failure
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.run-tests.outcome == 'failure'
+        with:
+          name: grafana-server-log
+          path: grafana-server.log
+          retention-days: 5
+
+      - name: Stop Grafana
+        if: always()
+        run: docker compose down
+
+  # Fast pass for release-please PRs (no code changes)
+  skip-build:
+    name: Build Plugin with Coverage
+    needs: check-changes
+    if: needs.check-changes.outputs.code == 'false' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No code changes detected, skipping build (release-please PR)"
+
+  skip-e2e:
+    name: E2E Tests with Coverage
+    needs: check-changes
+    if: needs.check-changes.outputs.code == 'false' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No code changes detected, skipping E2E tests (release-please PR)"

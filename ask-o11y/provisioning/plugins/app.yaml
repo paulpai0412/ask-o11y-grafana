@@ -1,0 +1,40 @@
+apiVersion: 1
+
+apps:
+  - type: grafana-llm-app
+    org_id: 1
+    jsonData:
+      mcp:
+        disabled: false
+        toolsets:
+          search: false
+          datasource: true
+          incident: false
+          prometheus: true
+          loki: false
+          alerting: false
+          dashboard: false
+          oncall: false
+          asserts: false
+          sift: false
+      enableDevSandbox: true
+      provider: anthropic
+      models:
+        default: large
+        mapping:
+          base: claude-haiku-4-5-20251001
+          large: claude-haiku-4-5-20251001
+    secureJsonData:
+      anthropicKey: $LLM_API_KEY
+  - type: consensys-asko11y-app
+    org_id: 1
+    jsonData:
+      useBuiltInMCP: true
+      mcpServers:
+        - id: graphiti
+          name: Graphiti Knowledge Graph
+          url: 'http://graphiti:8000/mcp'
+          enabled: true
+          type: 'streamable-http'
+          headers:
+            Host: 'localhost:8000'
