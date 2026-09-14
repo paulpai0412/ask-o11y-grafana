@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Icon, useStyles2, useTheme2 } from '@grafana/ui';
+import { Icon, LinkButton, useStyles2, useTheme2 } from '@grafana/ui';
 import { cx } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
 import { getHoverButtonStyle } from '../../../../theme';
+import { testIds } from '../../../testIds';
 import { GrafanaPageRef } from '../../types';
 import { TabCloseButton } from './TabCloseButton';
 import { useEmbeddingAllowed } from '../../hooks/useEmbeddingAllowed';
-import { getTabLabel, toRelativeUrl } from '../../utils/urlUtils';
+import { getTabLabel, toFullDashboardUrl, toRelativeUrl } from '../../utils/urlUtils';
 
 const SIDE_PANEL_MIN_WIDTH_UNITS = 50;
 const SIDE_PANEL_TARGET_WIDTH = '50vw';
@@ -87,14 +88,33 @@ export const SidePanel: React.FC<SidePanelProps> = ({
             {activeRef.title || (activeRef.type === 'explore' ? 'Explore' : 'Dashboard')}
           </span>
         </div>
-        <button
-          onClick={onClose}
-          className={cx('p-1.5 rounded-md transition-colors text-secondary', styles.hoverButton)}
-          aria-label="Close panel"
-          title="Hide preview"
-        >
-          <Icon name="times" size="md" />
-        </button>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {activeRef.type === 'dashboard' && (
+            <LinkButton
+              href={toFullDashboardUrl(activeRef.url)}
+              target="_blank"
+              rel="noopener noreferrer"
+              variant="secondary"
+              fill="text"
+              size="sm"
+              icon="external-link-alt"
+              aria-label="Open dashboard in new tab"
+              title="Open dashboard in new tab"
+              data-testid={testIds.chat.openDashboardButton}
+              className={cx('flex-shrink-0', styles.hoverButton)}
+            >
+              Open dashboard
+            </LinkButton>
+          )}
+          <button
+            onClick={onClose}
+            className={cx('p-1.5 rounded-md transition-colors text-secondary', styles.hoverButton)}
+            aria-label="Close panel"
+            title="Hide preview"
+          >
+            <Icon name="times" size="md" />
+          </button>
+        </div>
       </div>
 
       {/* Tab bar */}

@@ -38,6 +38,18 @@ export function toRelativeUrl(url: string, kioskModeEnabled = true): string {
 }
 
 /**
+ * Convert a dashboard reference into a standalone dashboard URL.
+ * Preview-only parameters are removed so panel links open the full dashboard.
+ */
+export function toFullDashboardUrl(url: string): string {
+  const standaloneUrl = new URL(extractPathFromUrl(url), window.location.origin);
+  standaloneUrl.searchParams.delete('kiosk');
+  standaloneUrl.searchParams.delete('viewPanel');
+
+  return `${standaloneUrl.pathname}${standaloneUrl.search}${standaloneUrl.hash}`;
+}
+
+/**
  * Extract the path from an absolute URL
  */
 export function extractPathFromUrl(url: string): string {

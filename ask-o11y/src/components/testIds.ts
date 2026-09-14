@@ -50,6 +50,7 @@ export const testIds = {
   chat: {
     newChatButton: 'data-testid chat-new-chat-button',
     retryButton: 'data-testid chat-retry-button',
+    openDashboardButton: 'data-testid chat-open-dashboard-button',
   },
   investigation: {
     error: 'data-testid investigation-error',

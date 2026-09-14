@@ -33,14 +33,7 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       // Check that the side panel is visible
       const sidePanel = screen.getByRole('complementary', { name: /Grafana page preview/i });
@@ -57,14 +50,7 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       // Find the iframe
       const iframe = screen.getByTitle(/Explore with query/i);
@@ -88,17 +74,30 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       const sidePanel = screen.getByRole('complementary', { name: /Grafana page preview/i });
       expect(sidePanel).toBeInTheDocument();
+    });
+
+    it('should open the full dashboard in a new tab', () => {
+      const pageRefs: Array<GrafanaPageRef & { messageIndex: number }> = [
+        {
+          type: 'dashboard',
+          url: '/d/test-dashboard-123/my-dashboard?from=now-1h&viewPanel=2&kiosk',
+          uid: 'test-dashboard-123',
+          title: 'My Dashboard',
+          messageIndex: 0,
+        },
+      ];
+
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
+
+      const openDashboardLink = screen.getByRole('link', { name: /open dashboard in new tab/i });
+      expect(openDashboardLink).toHaveAttribute('href', '/d/test-dashboard-123/my-dashboard?from=now-1h');
+      expect(openDashboardLink).toHaveAttribute('target', '_blank');
+      expect(openDashboardLink).toHaveAttribute('rel', expect.stringContaining('noopener'));
+      expect(openDashboardLink).toHaveAttribute('rel', expect.stringContaining('noreferrer'));
     });
 
     it('should add kiosk parameter to dashboard URL', () => {
@@ -112,14 +111,7 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       const iframe = screen.getByTitle(/My Dashboard/i);
       expect(iframe).toBeInTheDocument();
@@ -154,14 +146,7 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       // Check for tab buttons
       const exploreTab = screen.getByRole('button', { name: /Explore/i });
@@ -190,29 +175,22 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       // Initially showing Explore (first tab) - use more specific query for iframe
-      let iframe = screen.getAllByTitle(/Explore/i).find(el => el.tagName === 'IFRAME');
+      let iframe = screen.getAllByTitle(/Explore/i).find((el) => el.tagName === 'IFRAME');
       expect(iframe).toBeInTheDocument();
       expect(iframe).toHaveAttribute('src', expect.stringContaining('/explore'));
 
       // Click Dashboard 1 tab to switch
       const allDashboard1Elements = screen.getAllByText(/Dashboard 1/i);
-      const dashboard1TabButton = allDashboard1Elements.find(el => el.tagName === 'BUTTON');
+      const dashboard1TabButton = allDashboard1Elements.find((el) => el.tagName === 'BUTTON');
       expect(dashboard1TabButton).toBeInTheDocument();
       fireEvent.click(dashboard1TabButton!);
 
       // Wait for iframe to update to Dashboard 1
       await waitFor(() => {
-        const iframes = screen.getAllByTitle(/Dashboard 1/i).filter(el => el.tagName === 'IFRAME');
+        const iframes = screen.getAllByTitle(/Dashboard 1/i).filter((el) => el.tagName === 'IFRAME');
         expect(iframes.length).toBeGreaterThan(0);
         expect(iframes[0]).toHaveAttribute('src', expect.stringContaining('/d/dashboard-1'));
       });
@@ -235,14 +213,7 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       // Find close button for first tab (should be × button)
       const closeButtons = screen.getAllByRole('button', { name: /close tab/i });
@@ -266,14 +237,7 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       // Find close panel button (top-right × button)
       const closePanelButton = screen.getByRole('button', { name: /close panel/i });
@@ -294,28 +258,14 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={false}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={false} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       const sidePanel = screen.queryByRole('complementary', { name: /Grafana page preview/i });
       expect(sidePanel).not.toBeInTheDocument();
     });
 
     it('should not render when pageRefs is empty', () => {
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={[]}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={[]} onRemoveTab={mockOnRemoveTab} />);
 
       const sidePanel = screen.queryByRole('complementary', { name: /Grafana page preview/i });
       expect(sidePanel).not.toBeInTheDocument();
@@ -333,14 +283,7 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       const iframe = screen.getByTitle(/Explore with kiosk/i);
       const iframeSrc = iframe.getAttribute('src');
@@ -363,14 +306,7 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       const iframe = screen.getByTitle(/Dashboard with viewPanel/i);
       const iframeSrc = iframe.getAttribute('src');
@@ -392,14 +328,7 @@ describe('SidePanel Component', () => {
         },
       ];
 
-      render(
-        <SidePanel
-          isOpen={true}
-          onClose={mockOnClose}
-          pageRefs={pageRefs}
-          onRemoveTab={mockOnRemoveTab}
-        />
-      );
+      render(<SidePanel isOpen={true} onClose={mockOnClose} pageRefs={pageRefs} onRemoveTab={mockOnRemoveTab} />);
 
       const iframe = screen.getByTitle(/Absolute URL Dashboard/i);
       const iframeSrc = iframe.getAttribute('src');

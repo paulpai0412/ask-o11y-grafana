@@ -594,7 +594,9 @@ def inline_result_summary(execution: dict[str, Any]) -> tuple[list[dict[str, Any
             omitted = True
             continue
         try:
-            value = raw if mime_type == "text/plain" else json.loads(raw)
+            # Python JSON permits NaN/Infinity (e.g. a singleton group's std).
+            # Represent these as missing values in strict JSON; retain raw capture.
+            value = raw if mime_type == "text/plain" else json.loads(raw, parse_constant=lambda _: None)
         except (json.JSONDecodeError, TypeError):
             omitted = True
             continue
