@@ -8,10 +8,27 @@ services:
       - GF_FEATURE_TOGGLES_ENABLE=externalServiceAccounts
       - GF_AUTH_MANAGED_SERVICE_ACCOUNTS_ENABLED=true
       - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_RENDERING_SERVER_URL=http://127.0.0.1:8081/render
+      - GF_RENDERING_CALLBACK_URL=http://127.0.0.1:3000/
+      - GF_RENDERING_RENDERER_TOKEN=${GRAFANA_RENDERER_TOKEN:?Set GRAFANA_RENDERER_TOKEN in .env}
       - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=consensys-asko11y-app,asko11y-plotly-panel,grafana-llm-app
     volumes:
       - grafana-data:/var/lib/grafana
       - ./config/grafana.ini:/etc/grafana/grafana.ini:ro
+    restart: unless-stopped
+
+  image-renderer:
+    image: grafana/grafana-image-renderer:v5.12.3@sha256:cf36a94431662540a72d2058a43e0cbf72638334475d8216a25a77526a627be7
+    network_mode: host
+    environment:
+      SERVER_ADDR: 127.0.0.1:8081
+      AUTH_TOKEN: ${GRAFANA_RENDERER_TOKEN:?Set GRAFANA_RENDERER_TOKEN in .env}
+      RATE_LIMIT_MIN_LIMIT: "1"
+      RATE_LIMIT_MAX_LIMIT: "1"
+      GOMEMLIMIT: 256MiB
+    mem_limit: 2g
+    cpus: 2
+    shm_size: 256m
     restart: unless-stopped
 
   csv-server:

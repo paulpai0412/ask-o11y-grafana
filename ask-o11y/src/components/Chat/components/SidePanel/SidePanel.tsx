@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Icon, LinkButton, useStyles2, useTheme2 } from '@grafana/ui';
 import { cx } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
@@ -6,6 +6,7 @@ import { getHoverButtonStyle } from '../../../../theme';
 import { testIds } from '../../../testIds';
 import { GrafanaPageRef } from '../../types';
 import { TabCloseButton } from './TabCloseButton';
+import { DownloadHtmlReport } from './DownloadHtmlReport';
 import { useEmbeddingAllowed } from '../../hooks/useEmbeddingAllowed';
 import { getTabLabel, toFullDashboardUrl, toRelativeUrl } from '../../utils/urlUtils';
 
@@ -34,6 +35,7 @@ export const SidePanel: React.FC<SidePanelProps> = ({
   const styles = useStyles2(getStyles);
   const [activeIndex, setActiveIndex] = useState(0);
   const allowEmbedding = useEmbeddingAllowed();
+  const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const safeActiveIndex = Math.min(activeIndex, Math.max(0, pageRefs.length - 1));
 
@@ -89,6 +91,7 @@ export const SidePanel: React.FC<SidePanelProps> = ({
           </span>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
+          {activeRef.type === 'dashboard' && <DownloadHtmlReport key={iframeSrc} iframeRef={iframeRef} />}
           {activeRef.type === 'dashboard' && (
             <LinkButton
               href={toFullDashboardUrl(activeRef.url)}
@@ -161,6 +164,8 @@ export const SidePanel: React.FC<SidePanelProps> = ({
       {/* Iframe content */}
       <div className="flex-1 min-h-0">
         <iframe
+          key={iframeSrc}
+          ref={iframeRef}
           src={iframeSrc}
           title={activeRef.title || `Grafana ${activeRef.type}`}
           className="w-full h-full border-0"

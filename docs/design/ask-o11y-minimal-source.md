@@ -1,5 +1,7 @@
 # Ask O11y 精簡 source：新手自然語言分析
 
+2026-09-15 新增：使用者核准在 dashboard preview header 匯出單檔離線 HTML，並核准本機官方 Image Renderer／Grafana 設定及 Ask O11y 部署；維持 main-only、不更動既有 dashboard、不公開分享。設計、限制與驗證見 [Dashboard HTML 匯出](dashboard-html-export.md)。此授權只覆蓋該功能，不擴張下列歷史任務範圍。
+
 ## 授權與回退
 
 - 2026-09-12 使用者批准建立 branch、按直接維護 source 的方向重新設計並開始實作。
