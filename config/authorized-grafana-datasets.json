@@ -11,6 +11,18 @@
       "metadata_file": "data-query-planner-mcp/metadata/csv-poc.json",
       "query_profile_file": "data/poc/u1_operating_daily_profile.json",
       "query_kind": "infinity_csv"
+    },
+    {
+      "id": "dataflow-salesdatamart",
+      "title": "DataFlow SalesDatamart",
+      "description": "Sales reporting views, including product category, order date, quantity and line net amount. Inspect live metadata for available columns. Amounts are local currency; do not assume a common reporting currency.",
+      "domain_hints": ["sales"],
+      "datasource_uid": "dataflow-salesdatamart",
+      "datasource_type": "mssql",
+      "query_kind": "mssql",
+      "org_id": "1",
+      "database": "SalesDatamart",
+      "schemas": ["reporting"]
     }
   ]
 }

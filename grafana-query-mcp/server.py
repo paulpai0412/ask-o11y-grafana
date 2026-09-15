@@ -39,6 +39,7 @@ workflow_node = load_module("workflow_node", ROOT / "workflow_node.py")
 artifact_store = load_module("artifact_store", ROOT / "artifact_store.py")
 mcp_security = load_module("mcp_security", ROOT / "mcp_security.py")
 uploaded_datasets = load_module("uploaded_datasets", ROOT / "uploaded_datasets.py")
+mssql = load_module("grafana_mssql", HERE / "mssql.py")
 ArtifactStore = artifact_store.ArtifactStore
 authenticate_headers = mcp_security.authenticate_headers
 require_runtime_token = mcp_security.require_runtime_token
@@ -57,7 +58,7 @@ GRAFANA_PASSWORD = os.environ.get("GRAFANA_PASSWORD", "admin")
 ARTIFACTS = ArtifactStore(os.environ.get("ANALYSIS_ARTIFACT_ROOT", ROOT / ".analysis-artifacts" / "runs"))
 ARTIFACTS.cleanup_expired()
 uploaded_datasets.cleanup_expired()
-SERVER_INFO = {"name": "grafana-query-mcp", "version": "0.4.0"}
+SERVER_INFO = {"name": "grafana-query-mcp", "version": "0.5.0"}
 PROTOCOL = "2025-03-26"
 CATALOG_FILE = ROOT / "config" / "authorized-grafana-datasets.json"
 MAX_RESPONSE_BYTES = 50 * 1024 * 1024
@@ -174,6 +175,8 @@ def tool_discover_datasets(args: dict[str, Any]) -> dict[str, Any]:
         live_by_uid = {str(item.get("uid")): item for item in live if isinstance(item, dict) and item.get("uid")}
         candidates = []
         for configured in configured_datasets():
+            if configured.get("query_kind") == "mssql" and str(configured.get("org_id")) != context["org_id"]:
+                continue
             uid = str(configured.get("datasource_uid") or "")
             datasource = live_by_uid.get(uid)
             if not datasource or datasource.get("type") != configured.get("datasource_type"):
@@ -208,6 +211,8 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
             uid = str(configured.get("datasource_uid") or "")
             expected_type = configured.get("datasource_type")
             query_kind = str(configured.get("query_kind") or "")
+            if query_kind == "mssql" and str(configured.get("org_id")) != context["org_id"]:
+                raise workflow_node.WorkflowContractError("MSSQL dataset is not authorized for this organization")
         live = get_grafana("/api/datasources/uid/" + urllib.parse.quote(uid, safe=""))
         if not isinstance(live, dict) or live.get("type") != expected_type:
             raise workflow_node.WorkflowContractError("configured dataset does not match the live Grafana datasource")
@@ -217,7 +222,20 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
             query_columns = [{"selector": field["name"], "text": field["name"], "type": "timestamp" if field["type"] == "date" else field["type"]} for field in upload["fields"]]
             query_template = {"refId": "A", "datasource": {"uid": uid, "type": live.get("type")}, "type": "csv", "source": "url", "url": signed_url, "parser": "backend", "format": "table", "url_options": {"method": "GET", "data": ""}, "csv_options": {"delimiter": ",", "skip_empty_lines": True}, "columns": query_columns}
             metadata_artifact = {"dataset_id": dataset_id, "title": upload["filename"], "description": "Session-owned uploaded dataset", "domain_hints": ["uploaded", "csv", "excel"], "datasource_uid": uid, "datasource_type": live.get("type"), "query_kind": query_kind, "session_id": upload["session_id"], "source_format": upload.get("source_format"), "fields": fields, "minimum_rows": 1, "row_count_hint": upload["rows"], "date_range": upload.get("date_range") or {"kind": "unbounded"}, "query_template": query_template}
-        if query_kind == "infinity_csv" and configured is not None:
+        elif query_kind == "mssql" and configured is not None:
+            database = (live.get("jsonData") or {}).get("database") or live.get("database")
+            if not configured.get("database") or database != configured["database"] or str(live.get("orgId")) != context["org_id"]:
+                raise workflow_node.WorkflowContractError("MSSQL database/organization does not match the authorized dataset")
+            query = mssql.query_model(uid, mssql.schema_sql(configured.get("schemas", [])))
+            response = post_grafana("/api/ds/query", {"queries": [query], "from": "now-1h", "to": "now"})
+            validation = validate_frame(response, {"maximum_rows": mssql.MAX_SCHEMA_COLUMNS, "maximum_fields": MAX_RESULT_FIELDS})
+            if not validation["ok"]:
+                raise workflow_node.WorkflowContractError("MSSQL schema inspection failed: " + "; ".join(validation["errors"]))
+            metadata_artifact = {"dataset_id": dataset_id, "title": configured.get("title"),
+                                 "description": configured.get("description"), "domain_hints": configured.get("domain_hints", []),
+                                 "datasource_uid": uid, "datasource_type": expected_type, "query_kind": query_kind,
+                                 "tables": mssql.schema_tables(validation["frames"][0])}
+        elif query_kind == "infinity_csv" and configured is not None:
             metadata = load_json(ROOT / str(configured.get("metadata_file")))
             profile = load_json(ROOT / str(configured.get("query_profile_file")))
             fields = [{key: field.get(key) for key in ["name", "type", "display_name", "unit", "description", "aliases", "validity_for", "accepted_values"]} for field in metadata.get("fields", []) if isinstance(field, dict)]
@@ -235,15 +253,17 @@ def tool_inspect_dataset(args: dict[str, Any]) -> dict[str, Any]:
         if upload is not None and upload.get("source_format") in {"csv", "xlsx"}:
             uploaded_datasets.read_source(context, dataset_id, upload["session_id"])
             document_ref = ARTIFACTS.write_json(context, run_id, "uploaded-document", {"upload_id": dataset_id, "session_id": upload["session_id"], "filename": upload["filename"], "sheet": upload.get("sheet"), "source_format": upload["source_format"], "source_sha256": upload["source_sha256"]})
-    except (RuntimeError, workflow_node.WorkflowContractError, OSError, StopIteration) as exc:
+    except (RuntimeError, workflow_node.WorkflowContractError, OSError, ValueError, StopIteration) as exc:
         return error_response(step=step, error=str(exc), recoverable=False, instruction="Stop; authorized dataset inspection failed.")
-    preview_keys = ["dataset_id", "title", "description", "domain_hints", "datasource_uid", "datasource_type", "query_kind", "source_format", "fields", "minimum_rows", "row_count_hint", "date_range", "schema_summary"]
+    preview_keys = ["dataset_id", "title", "description", "domain_hints", "datasource_uid", "datasource_type", "query_kind", "source_format", "fields", "minimum_rows", "row_count_hint", "date_range", "tables"]
     preview = {key: metadata_artifact[key] for key in preview_keys if key in metadata_artifact}
     instruction = "Use the returned fields to choose analysis or visualization. query_dataset executes without an analysis-plan ticket."
+    if query_kind == "mssql":
+        instruction += " Author one T-SQL SELECT using the returned schema-qualified tables/views. Query actual values/date coverage as needed; do not guess them. Use explicit date literals, not Grafana macros, in query_dataset SQL. Native dashboard panels may use this datasource directly; no image renderer or Python is needed for a simple SQL chart."
     refs = {"dataset_metadata_ref": metadata_ref}
     if document_ref is not None:
         refs["document_ref"] = document_ref
-    return success_response(step=step, run_id=run_id, refs=refs, instruction=instruction, evidence={"grafana_metadata_read": True, "datasource_query_executed": False}, dataset_metadata_ref=metadata_ref, document_ref=document_ref, metadata=preview)
+    return success_response(step=step, run_id=run_id, refs=refs, instruction=instruction, evidence={"grafana_metadata_read": True, "datasource_query_executed": query_kind == "mssql", "business_data_read": False}, dataset_metadata_ref=metadata_ref, document_ref=document_ref, metadata=preview)
 
 
 def validate_frame(response: dict[str, Any], contract: dict[str, Any], ref_id: str = "A") -> dict[str, Any]:
@@ -325,9 +345,13 @@ def tool_query_dataset(args: dict[str, Any]) -> dict[str, Any]:
             return inspected
         metadata = ARTIFACTS.read_json(context, inspected["dataset_metadata_ref"])
         kind = metadata.get("query_kind")
-        if "sql" in args or kind not in {"infinity_csv", "uploaded_csv"}:
-            raise workflow_node.WorkflowContractError("this dataset uses its authorized CSV query, not model-authored SQL or URLs")
-        query = metadata["query_template"]
+        if kind == "mssql":
+            sql = mssql.bounded_select(args.get("sql"), metadata["tables"], MAX_RESULT_ROWS)
+            query = mssql.query_model(metadata["datasource_uid"], sql)
+        else:
+            if "sql" in args or kind not in {"infinity_csv", "uploaded_csv"}:
+                raise workflow_node.WorkflowContractError("this dataset uses its authorized CSV query, not model-authored SQL or URLs")
+            query = metadata["query_template"]
         time_range = args.get("time_range")
         if time_range is None:
             dates = metadata.get("date_range") or {}
@@ -353,16 +377,28 @@ def tool_query_dataset(args: dict[str, Any]) -> dict[str, Any]:
         validation_ref = ARTIFACTS.write_json(context, run_id, "dataframe-validation", {key: value for key, value in validation.items() if key != "frames"})
     except (PermissionError, workflow_node.WorkflowContractError, RuntimeError, OSError, ValueError, TypeError, KeyError, OverflowError) as exc:
         return error_response(step=step, error=str(exc), recoverable=True, instruction="The query failed. Correct its parameters without changing permissions or accessing the datasource directly.")
+    # A bounded value preview lets the analyst verify SQL aggregates/date coverage
+    # without invoking Python solely to inspect a small Grafana result.
+    result_preview = {}
+    if kind == "mssql":
+        values = validation["frames"][0]["data"]["values"]
+        result_preview = {"columns": validation["field_names"], "rows": [], "truncated": False}
+        for row in zip(*(column[:20] for column in values)):
+            candidate = {**result_preview, "rows": [*result_preview["rows"], list(row)]}
+            if len(json.dumps(candidate, ensure_ascii=False).encode()) > 12_000:
+                break
+            result_preview = candidate
+        result_preview["truncated"] = len(result_preview["rows"]) < validation["row_count"]
     return success_response(step=step, run_id=run_id, refs={"frame_ref": frame_ref, "response_ref": response_ref, "validation_ref": validation_ref},
-                            frame_ref=frame_ref, available_fields=validation["field_names"], row_count=validation["row_count"],
+                            frame_ref=frame_ref, available_fields=validation["field_names"], row_count=validation["row_count"], result_preview=result_preview,
                             instruction="Use this authorized frame directly with Python when analysis is needed. Choose methods yourself; there is no required analysis plan.",
                             evidence={"executed_by": "Grafana /api/ds/query", "dataset_id": metadata["dataset_id"], "time_range": time_range})
 
 
 TOOLS = [
     {"name": "discover_datasets", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "List compact authorized Grafana-backed datasets and domain hints. Reads Grafana datasource metadata only; never executes a datasource query and never exposes credentials or physical paths.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
-    {"name": "inspect_dataset", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Inspect one authorized dataset's sanitized fields, types, units, row/date hints, and domain hints. Returns an opaque dataset_metadata_ref containing the internal query template; does not execute a datasource query.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_id": {"type": "string"}}, "required": ["dataset_id"]}},
-    {"name": "query_dataset", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Read an authorized dataset through Grafana and save a frame for Python. Queries use server-owned datasource/URL settings; model-authored SQL and URLs are rejected. No analysis-plan ticket is required. Optional time_range is the Grafana request window; it does not itself filter CSV rows.", "inputSchema": {"type": "object", "additionalProperties": False, "required": ["dataset_id"], "properties": {"dataset_id": {"type": "string"}, "sql": {"type": "string"}, "time_range": {"type": "object", "additionalProperties": False, "required": ["from", "to"], "properties": {"from": {"type": "string"}, "to": {"type": "string"}}}}}},
+    {"name": "inspect_dataset", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Inspect one authorized dataset's fields and types. For MSSQL, reads live schema metadata through Grafana and returns authorized tables/views (no business rows). For CSV, returns fields, units and row/date hints. Returns an opaque dataset_metadata_ref.", "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"dataset_id": {"type": "string"}}, "required": ["dataset_id"]}},
+    {"name": "query_dataset", "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}, "description": "Read an authorized dataset through Grafana. MSSQL requires one read-only T-SQL SELECT using schema-qualified tables/views observed in inspect_dataset; returns up to 20 preview rows plus a complete frame_ref. SQL writes, external access, variables and Grafana macros are rejected. CSV uses server-owned query settings and rejects SQL/URLs. time_range is a bounded Grafana request window, not an automatic SQL/CSV row filter; use explicit SQL predicates for dates. No analysis-plan ticket is required.", "inputSchema": {"type": "object", "additionalProperties": False, "required": ["dataset_id"], "properties": {"dataset_id": {"type": "string"}, "sql": {"type": "string"}, "time_range": {"type": "object", "additionalProperties": False, "required": ["from", "to"], "properties": {"from": {"type": "string"}, "to": {"type": "string"}}}}}},
 ]
 HANDLERS = {"discover_datasets": tool_discover_datasets, "inspect_dataset": tool_inspect_dataset, "query_dataset": tool_query_dataset}
 
